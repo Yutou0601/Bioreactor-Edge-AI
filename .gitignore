@@ -1,0 +1,24 @@
+# =========================
+# Python & AI 忽略清單
+# =========================
+__pycache__/
+*.pyc
+.env
+venv/
+env/
+
+# 不上傳大檔案與權重
+*.pth
+*.pt
+*.engine
+*.onnx
+
+# 不上傳機密或龐大的 Raw Data
+edge_backend/data/*.csv
+
+# =========================
+# Node.js & 前端忽略清單
+# =========================
+node_modules/
+dist/
+.DS_Store
