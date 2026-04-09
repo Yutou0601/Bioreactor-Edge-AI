@@ -56,3 +56,7 @@ pip3 install -r requirements.txt
 python3 train.py
 # 啟動 API 伺服器
 python3 main.py
+
+### 2. 前端 (Website)
+```bash
+npm run dev
