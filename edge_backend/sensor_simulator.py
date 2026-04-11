@@ -33,12 +33,13 @@ def start_simulation():
     
     try:
         while True:
-            # 1. 模擬環境的微幅波動
-            current_orp += random.uniform(-2.0, 2.0)
-            current_ph += random.uniform(-0.05, 0.05)
-            current_temp += random.uniform(-0.1, 0.1)
-            current_ch4 += random.uniform(-0.2, 0.2)
-            current_pressure += random.uniform(-0.05, 0.05)
+            # 1. 模擬環境的波動 (加入「均值回歸」機制，避免純隨機漫步導致無止盡的飄移)
+            # 公式: 隨機跳動 + (基準值 - 當前值) * 回歸力度
+            current_orp += random.uniform(-2.0, 2.0) + (500.0 - current_orp) * 0.05
+            current_ph += random.uniform(-0.05, 0.05) + (7.1 - current_ph) * 0.05
+            current_temp += random.uniform(-0.1, 0.1) + (30.0 - current_temp) * 0.05
+            current_ch4 += random.uniform(-0.2, 0.2) + (20.0 - current_ch4) * 0.05
+            current_pressure += random.uniform(-0.05, 0.05) + (2.5 - current_pressure) * 0.05
 
             # 2. 打包成 JSON 格式
             payload = {
