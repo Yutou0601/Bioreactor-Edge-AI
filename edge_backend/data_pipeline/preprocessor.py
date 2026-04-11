@@ -11,14 +11,17 @@ def create_sequences(data, target, seq_length=30, predict_ahead=5):
         ys.append(target[i + seq_length + predict_ahead])
     return np.array(xs), np.array(ys)
 
-def fit_and_save_scalers(df, features, target_col, save_dir="core/weights"):
+def fit_and_save_scalers(df, features, target_cols, save_dir="core/weights"):
     """訓練時使用：計算比例尺，並將其存為 .pkl 檔"""
     os.makedirs(save_dir, exist_ok=True)
     scaler_x = MinMaxScaler()
     scaler_y = MinMaxScaler()
     
+    if isinstance(target_cols, str):
+        target_cols = [target_cols]
+        
     data_x = scaler_x.fit_transform(df[features].values)
-    data_y = scaler_y.fit_transform(df[[target_col]].values)
+    data_y = scaler_y.fit_transform(df[target_cols].values)
     
     # 儲存比例尺，供未來 API 推論使用
     joblib.dump(scaler_x, os.path.join(save_dir, 'scaler_x.pkl'))

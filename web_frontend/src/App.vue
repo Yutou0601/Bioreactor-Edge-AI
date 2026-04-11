@@ -8,6 +8,7 @@ import mqtt from 'mqtt'
 // ==============================
 const currentPressure = ref(0.0)
 const predictedPressure = ref(0.0)
+const predictedCH4 = ref(0.0)
 const systemStatus = ref('系統啟動中...')
 const lastUpdateTime = ref('--:--:--')
 
@@ -15,7 +16,8 @@ const lastUpdateTime = ref('--:--:--')
 const sensorData = ref({
   orp: -250,
   ph: 7.2,
-  temp: 35.5
+  temp: 35.5,
+  ch4: 20.0
 })
 
 // 🌟 【新增】動態節點狀態變數
@@ -38,7 +40,7 @@ const isUploading = ref(false)
 // 3. MQTT 客戶端設定
 // ==============================
 let mqttClient = null
-const MQTT_BROKER_URL = 'ws://192.168.55.1:9001' 
+const MQTT_BROKER_URL = 'ws://localhost:9001' 
 
 const TOPIC_SUB_PREDICT = 'reactor/01/prediction' 
 const TOPIC_PUB_SENSOR = 'reactor/01/sensors'     
@@ -176,6 +178,7 @@ const initMqtt = () => {
 const updateDashboardData = (data) => {
   currentPressure.value = data.current_pressure_kg_cm2 || 2.5
   predictedPressure.value = data.predicted_pressure_5min || 2.5
+  predictedCH4.value = data.predicted_ch4_5min || 20.0
   systemStatus.value = data.status || '監控中'
 
   // 🌟 【新增】抓取後端傳來的真實推論時間
@@ -186,6 +189,7 @@ const updateDashboardData = (data) => {
   sensorData.value.orp += (Math.random() - 0.5) * 4
   sensorData.value.ph += (Math.random() - 0.5) * 0.05
   sensorData.value.temp += (Math.random() - 0.5) * 0.1
+  sensorData.value.ch4 += (Math.random() - 0.5) * 0.2
 
   const now = new Date().toLocaleTimeString('zh-TW', { hour12: false })
   lastUpdateTime.value = now
@@ -217,7 +221,8 @@ const sendDataToJetson = () => {
     timestamp: new Date().toISOString(),
     orp: sensorData.value.orp,
     ph: sensorData.value.ph,
-    temp: sensorData.value.temp
+    temp: sensorData.value.temp,
+    ch4: sensorData.value.ch4
   })
 
   mqttClient.publish(TOPIC_PUB_SENSOR, payload, { qos: 1 }, (err) => {
@@ -294,8 +299,13 @@ onUnmounted(() => {
           </div>
           <div class="v-line"></div>
           <div class="metric">
-            <span class="label">AI 5min 預估</span>
+            <span class="label">AI 5min 預估壓力</span>
             <div class="number text-red">{{ predictedPressure.toFixed(2) }} <small>kg/cm²</small></div>
+          </div>
+          <div class="v-line"></div>
+          <div class="metric">
+            <span class="label">AI 5min 預估甲烷</span>
+            <div class="number text-green">{{ predictedCH4.toFixed(1) }} <small>%</small></div>
           </div>
         </div>
 
@@ -317,6 +327,10 @@ onUnmounted(() => {
             <div class="item">
               <span>Temperature</span>
               <strong>{{ sensorData.temp.toFixed(1) }} <small>°C</small></strong>
+            </div>
+            <div class="item">
+              <span>CH4 (甲烷)</span>
+              <strong>{{ sensorData.ch4.toFixed(1) }} <small>%</small></strong>
             </div>
           </div>
         </div>

@@ -22,10 +22,12 @@ def start_simulation():
         print(f"無法連線到 Broker: {e}")
         return
 
-    # 初始感測器數值
-    current_orp = -250.0
-    current_ph = 7.2
-    current_temp = 35.5
+    # 初始感測器數值 (貼近真實 CSV 數據，避免模型遇到未知的極端值噴負數)
+    current_orp = 500.0
+    current_ph = 7.1
+    current_temp = 30.0
+    current_ch4 = 20.0
+    current_pressure = 2.5
 
     print("開始模擬發送感測器數據... (按 Ctrl+C 停止)")
     
@@ -35,12 +37,16 @@ def start_simulation():
             current_orp += random.uniform(-2.0, 2.0)
             current_ph += random.uniform(-0.05, 0.05)
             current_temp += random.uniform(-0.1, 0.1)
+            current_ch4 += random.uniform(-0.2, 0.2)
+            current_pressure += random.uniform(-0.05, 0.05)
 
             # 2. 打包成 JSON 格式
             payload = {
                 "orp": round(current_orp, 1),
                 "ph": round(current_ph, 2),
-                "temp": round(current_temp, 1)
+                "temp": round(current_temp, 1),
+                "ch4": round(current_ch4, 1),
+                "pressure": round(current_pressure, 2)
             }
             
             # 3. 發布 (Publish) 到指定的頻道
