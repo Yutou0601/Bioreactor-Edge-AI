@@ -7,7 +7,10 @@ import apiClient from './services/apiClient'
 // ==========================================
 // 系統狀態
 // ==========================================
-const systemStatus   = ref('系統啟動中...')
+const systemStatus      = ref('系統啟動中...')
+const currentPressure   = ref(0.0)   // MQTT 即時壓力
+const predictedPressure = ref(0.0)   // LSTM 預測壓力（5min）
+const predictedCH4      = ref(0.0)   // LSTM 預測甲烷（5min）
 const lastUpdateTime = ref('--:--:--')
 const isAutoFetch    = ref(true)
 const isMqttConnected = ref(false)
@@ -534,7 +537,15 @@ const initMqtt = () => {
       systemStatus.value = '連線正常 (Active)'
       mqttClient.subscribe('reactor/01/prediction', () => {})
     })
-    mqttClient.on('message', () => {
+    mqttClient.on('message', (topic, message) => {
+      if (topic === 'reactor/01/prediction') {
+        try {
+          const d = JSON.parse(message.toString())
+          if (d.current_pressure_kg_cm2  != null) currentPressure.value   = d.current_pressure_kg_cm2
+          if (d.predicted_pressure_5min  != null) predictedPressure.value = d.predicted_pressure_5min
+          if (d.predicted_ch4_5min       != null) predictedCH4.value      = d.predicted_ch4_5min
+        } catch {}
+      }
       if (isAutoFetch.value)
         lastUpdateTime.value = new Date().toLocaleTimeString('zh-TW', { hour12: false })
     })
@@ -555,7 +566,8 @@ onMounted(async () => {
   initChart()
   initGasChart()
   initMqtt()
-  pollTimer = setInterval(() => { if (isAutoFetch.value) fetchRecords() }, 15000)
+  // USB 每分鐘一筆，60 秒輪詢一次即可
+  pollTimer = setInterval(() => { if (isAutoFetch.value) fetchRecords() }, 60000)
   window.addEventListener('resize', () => { myChart?.resize(); myGasChart?.resize() })
 })
 onUnmounted(() => {

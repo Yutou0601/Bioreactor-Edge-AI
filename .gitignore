@@ -1,5 +1,5 @@
 # =========================
-# Python & AI 忽略清單
+# Python & AI
 # =========================
 __pycache__/
 *.pyc
@@ -7,17 +7,26 @@ __pycache__/
 venv/
 env/
 
-# 不上傳大檔案與權重
+# 模型權重與比例尺（大型二進位，不上傳）
 *.pth
 *.pt
+*.pkl
 *.engine
 *.onnx
 
-# 不上傳機密或龐大的 Raw Data
-edge_backend/data/*.csv
+# =========================
+# 感測器原始資料（不上傳）
+# =========================
+edge_backend/data/
 
 # =========================
-# Node.js & 前端忽略清單
+# 生成的圖表與報告
+# =========================
+edge_backend/picture/
+edge_backend/generate_report.py
+
+# =========================
+# Node.js & 前端
 # =========================
 node_modules/
 dist/

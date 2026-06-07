@@ -17,10 +17,10 @@ if __name__ == "__main__":
     df = load_all_data("data/*.csv")
     
     features = ['ORP (mV)', '酸鹼值 (pH)', '溫度 (°C)']
-    target_col = '反應器壓力 (kg/cm²)'
+    target_cols = ['反應器壓力 (kg/cm²)', 'CH4濃度 (%)']
 
     print("2. 正在計算並儲存資料比例尺 (Scalers)...")
-    data_x, data_y = fit_and_save_scalers(df, features, target_col)
+    data_x, data_y = fit_and_save_scalers(df, features, target_cols)
 
     print("3. 正在切割時間序列 (過去 30 筆預測未來第 5 筆)...")
     X, y = create_sequences(data_x, data_y, seq_length=30, predict_ahead=5)
@@ -31,7 +31,7 @@ if __name__ == "__main__":
     dataset = TensorDataset(X_tensor, y_tensor)
     dataloader = DataLoader(dataset, batch_size=128, shuffle=True)
 
-    model = ReactorLSTM(input_size=len(features)).to(device)
+    model = ReactorLSTM(input_size=len(features), output_size=len(target_cols)).to(device)
     criterion = nn.MSELoss()
     optimizer = torch.optim.Adam(model.parameters(), lr=0.001)
 

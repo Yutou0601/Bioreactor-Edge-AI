@@ -166,6 +166,7 @@ def run(csv_path: Path, interval: float):
             })
             sent += 1; anomaly_count += 1
 
+
     except KeyboardInterrupt:
         print("\n\n  使用者中止。")
 

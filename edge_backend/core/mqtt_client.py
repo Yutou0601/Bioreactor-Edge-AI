@@ -43,6 +43,7 @@ def on_message(client, userdata, msg):
             "device": "Jetson Orin Nano",
             "current_pressure_kg_cm2": round(result["current_pressure_kg_cm2"], 2),
             "predicted_pressure_5min": round(result["predicted_pressure_5min"], 2),
+            "predicted_ch4_5min": round(result.get("predicted_ch4_5min", 0.0), 2),
             "status": result["status"],
             "inference_time_ms": round(inference_time_ms, 1) # 🌟 新增：把推論時間放進字典 (取到小數第一位)
         }

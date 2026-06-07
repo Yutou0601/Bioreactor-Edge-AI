@@ -24,7 +24,7 @@ def load_model_and_scalers():
     global model, scaler_x, scaler_y
     
     # 載入模型
-    model = ReactorLSTM(input_size=len(features)).to(device)
+    model = ReactorLSTM(input_size=len(features), output_size=2).to(device)
     model.load_state_dict(torch.load("core/weights/reactor_lstm_weights.pth", map_location=device))
     model.eval()
     
@@ -76,8 +76,10 @@ def get_pressure_prediction(new_sensor_data=None):
     with torch.no_grad():
         prediction_scaled = model(input_tensor)
         
-    # 使用 scaler_y 將預測出的 0~1 數值，還原回真實的壓力單位 (kg/cm²)
-    future_pressure = float(scaler_y.inverse_transform(prediction_scaled.cpu().numpy())[0][0])
+    # 使用 scaler_y 將預測出的 0~1 數值還原 (會得到 [Pressure, CH4])
+    predictions_unscaled = scaler_y.inverse_transform(prediction_scaled.cpu().numpy())
+    future_pressure = float(predictions_unscaled[0][0])
+    future_ch4 = float(predictions_unscaled[0][1])
     
     # 狀態判定 (超過 2.6 即亮紅燈)
     status = "危險 (Danger)" if future_pressure > 2.6 else "正常 (Normal)"
@@ -85,5 +87,6 @@ def get_pressure_prediction(new_sensor_data=None):
     return {
         "current_pressure_kg_cm2": round(latest_actual_pressure, 2),
         "predicted_pressure_5min": round(future_pressure, 2),
+        "predicted_ch4_5min": round(future_ch4, 2),
         "status": status
     }
