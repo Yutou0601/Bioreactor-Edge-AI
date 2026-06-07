@@ -3,32 +3,39 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from api.routes import router
 from core.mqtt_client import start_mqtt_client
-from core.inference import load_model_and_scalers
+from usb_receiver import start_usb_listener
 
-# 全域變數用來存放 MQTT 客戶端
 mqtt_client_instance = None
+
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    # ==========================
-    # 這裡放 Startup (啟動時) 的邏輯
-    # ==========================
-    load_model_and_scalers()
+    # ── Startup ────────────────────────────────────────
+    # LSTM 模型載入（可選：模型檔案不存在時不影響其他功能）
+    try:
+        from core.inference import load_model_and_scalers
+        load_model_and_scalers()
+    except Exception as e:
+        print(f"[AI 核心] 模型載入跳過（{e}）")
+
+    # MQTT 客戶端
     global mqtt_client_instance
-    print("啟動背景 MQTT 客戶端...")
+    print("[MQTT] 啟動背景客戶端...")
     mqtt_client_instance = start_mqtt_client()
-    
-    yield  # 讓 FastAPI 開始運行接單 (這個 yield 不能省略！)
-    
-    # ==========================
-    # 這裡放 Shutdown (關閉時) 的邏輯
-    # ==========================
+
+    # USB 感測器接收器（daemon 執行緒，感測器未接時不阻塞服務）
+    print("[USB] 啟動感測器接收執行緒...")
+    start_usb_listener()
+
+    yield
+
+    # ── Shutdown ───────────────────────────────────────
     if mqtt_client_instance:
-        print("關閉 MQTT 連線...")
+        print("[MQTT] 關閉連線...")
         mqtt_client_instance.loop_stop()
         mqtt_client_instance.disconnect()
 
-# 在建立 FastAPI 實體時，把 lifespan 綁定進去
+
 app = FastAPI(title="生物反應器 Edge AI API", lifespan=lifespan)
 
 app.add_middleware(
@@ -43,5 +50,4 @@ app.include_router(router, prefix="/api")
 
 if __name__ == "__main__":
     import uvicorn
-    # 指定 host 讓外部可以連線
     uvicorn.run(app, host="0.0.0.0", port=8000)
