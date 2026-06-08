@@ -4,8 +4,8 @@ import axios from 'axios'
 const apiClient = axios.create({
   // 統一設定後端 API 的基底網址
   baseURL: 'http://192.168.55.1:8000/api', 
-  // 設定超時時間，如果 Jetson 5 秒沒回應就當作斷線
-  timeout: 5000, 
+  // timeout 要比 poll 間隔短，避免上一輪請求還掛著下一輪就觸發
+  timeout: 3000,
   headers: {
     'Content-Type': 'application/json'
   }
@@ -15,7 +15,8 @@ const apiClient = axios.create({
 apiClient.interceptors.response.use(
   response => response,
   error => {
-    console.error('API 請求發生錯誤:', error)
+    // warn 而不是 error，避免後端暫時離線就洗紅色
+    console.warn('[API]', error.config?.url, error.code || error.message)
     return Promise.reject(error)
   }
 )

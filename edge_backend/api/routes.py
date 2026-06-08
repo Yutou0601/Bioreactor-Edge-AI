@@ -1,6 +1,8 @@
 import re
+import time
+import numpy as np
 from fastapi import APIRouter, HTTPException, File, UploadFile
-from core.inference import get_pressure_prediction
+from core.inference import get_pressure_prediction, sensor_buffer as _lstm_buffer
 from core.data_store import sensor_records, append_record, clear_all
 from core.signal_processor import ORPSignalProcessor
 from core.feature_extractor import ORPFeatureExtractor
@@ -20,16 +22,43 @@ router = APIRouter()
 # ==========================================
 # 通道 1：前端來拿取預測結果
 # ==========================================
-@router.get("/predict_pressure", response_model=PressurePredictionResponse)
+@router.get("/predict_pressure")
 def predict_pressure_api():
-    result = get_pressure_prediction()
-    return PressurePredictionResponse(
-        device="Jetson Orin Nano",
-        current_pressure_kg_cm2=round(result["current_pressure_kg_cm2"], 2),
-        predicted_pressure_5min=round(result["predicted_pressure_5min"], 2),
-        status=result["status"],
-        message="預測即將超標，請注意！" if result["status"] == "危險 (Danger)" else "系統穩定運行中"
-    )
+    # buffer 不足時，從 sensor_records 最近 35 筆自動補齊（MIN_BUF=35）
+    if len(_lstm_buffer) < 35 and len(sensor_records) >= 35:
+        sorted_recs = sorted(sensor_records, key=lambda r: r.get('timestamp') or '')
+        for r in sorted_recs[-35:]:
+            _lstm_buffer.append([
+                r.get('orp_raw') or r['orp'],
+                r['ph'],
+                r['temp'],
+                r.get('pressure', 0.0),
+            ])
+
+    try:
+        t0 = time.time()
+        result = get_pressure_prediction()
+        inference_ms = round((time.time() - t0) * 1000, 1)
+        return {
+            "device":                   "Jetson Orin Nano",
+            "current_pressure_kg_cm2":  round(result["current_pressure_kg_cm2"], 2),
+            "predicted_pressure_5min":  round(result["predicted_pressure_5min"], 2),
+            "predicted_ch4_5min":       round(result.get("predicted_ch4_5min", 0.0), 2),
+            "status":                   result["status"],
+            "inference_time_ms":        inference_ms,
+            "message": (
+            "預測即將超標，請緊急處理！" if result["status"] == "危險 (Danger)"
+            else "壓力上升趨勢，請留意！" if result["status"] == "警告 (Warning)"
+            else "系統穩定運行中"
+        ),
+        }
+    except Exception as e:
+        return {
+            "device": "Jetson Orin Nano",
+            "current_pressure_kg_cm2": 0.0, "predicted_pressure_5min": 0.0,
+            "predicted_ch4_5min": 0.0, "inference_time_ms": 0.0,
+            "status": "模型未載入", "message": str(e),
+        }
 
 
 # ==========================================
@@ -38,15 +67,126 @@ def predict_pressure_api():
 @router.post("/upload_sensor")
 def upload_sensor_data(payload: SensorDataPayload):
     print(f"[成功接收數據] ORP: {payload.orp:.1f} mV, pH: {payload.ph:.2f}, 溫度: {payload.temp:.1f} °C")
+    try:
+        result = get_pressure_prediction({
+            'orp':      payload.orp,
+            'ph':       payload.ph,
+            'temp':     payload.temp,
+            'pressure': payload.pressure,   # None 時 inference 會沿用上次壓力
+        })
+        prediction = result
+    except Exception:
+        prediction = None
     return {
-        "status": "success",
-        "message": "感測器數據已成功寫入 Jetson 邊緣節點",
-        "received_data": payload.dict()
+        "status":     "success",
+        "message":    "感測器數據已成功寫入 Jetson 邊緣節點",
+        "prediction": prediction,
     }
 
 
 # ==========================================
 # 通道 3：感測器記錄 CRUD
+# ==========================================
+# 研究分析統計端點
+# ==========================================
+@router.get("/report/stats")
+def get_report_stats():
+    recs = _sorted_records()
+    if len(recs) < 10:
+        return {"error": "資料不足（至少需 10 筆）"}
+
+    orp      = np.array([r['orp']                    for r in recs], dtype=float)
+    pressure = np.array([r.get('pressure', 0)        for r in recs], dtype=float)
+    ph       = np.array([r.get('ph', 7)              for r in recs], dtype=float)
+    temp     = np.array([r.get('temp', 30)           for r in recs], dtype=float)
+    ch4      = np.array([r.get('ch4_pct', 0)         for r in recs], dtype=float)
+    co2      = np.array([r.get('co2_pct', 0)         for r in recs], dtype=float)
+    anomaly  = np.array([1 if r.get('is_anomaly') else 0 for r in recs], dtype=int)
+
+    # 1. ORP 分布直方圖
+    cnt, edges = np.histogram(orp, bins=24)
+    orp_histogram = {
+        "bins":   [round((edges[i]+edges[i+1])/2, 1) for i in range(len(cnt))],
+        "counts": cnt.tolist(),
+    }
+
+    # 2. 壓力分布直方圖
+    p_cnt, p_edges = np.histogram(pressure, bins=24)
+    pressure_histogram = {
+        "bins":   [round((p_edges[i]+p_edges[i+1])/2, 3) for i in range(len(p_cnt))],
+        "counts": p_cnt.tolist(),
+    }
+
+    # 3. 相關係數熱力圖（6×6）
+    matrix   = np.array([orp, ph, temp, pressure, ch4, co2])
+    labels   = ['ORP', 'pH', '溫度', '壓力', 'CH4', 'CO2']
+    corr_raw = np.corrcoef(matrix)
+    # NaN 替換為 0（全常數欄位）
+    corr_raw = np.where(np.isnan(corr_raw), 0.0, corr_raw)
+    correlation = {
+        "labels": labels,
+        "matrix": [[round(float(v), 3) for v in row] for row in corr_raw],
+    }
+
+    # 4. 每日異常統計
+    date_total   = {}
+    date_anomaly = {}
+    for r in recs:
+        d = (r.get('timestamp') or '')[:10] or 'unknown'
+        date_total[d]   = date_total.get(d, 0) + 1
+        if r.get('is_anomaly'):
+            date_anomaly[d] = date_anomaly.get(d, 0) + 1
+    anomaly_by_date = [
+        {"date": d, "total": date_total[d], "anomalies": date_anomaly.get(d, 0)}
+        for d in sorted(date_total)
+    ]
+
+    # 5. CH4 / CO2 日均值趨勢
+    date_ch4 = {}
+    date_co2 = {}
+    for r in recs:
+        d = (r.get('timestamp') or '')[:10] or 'unknown'
+        date_ch4.setdefault(d, []).append(r.get('ch4_pct', 0))
+        date_co2.setdefault(d, []).append(r.get('co2_pct', 0))
+    gas_daily = [
+        {
+            "date":    d,
+            "avg_ch4": round(float(np.mean(date_ch4[d])), 2),
+            "avg_co2": round(float(np.mean(date_co2[d])), 2),
+        }
+        for d in sorted(date_ch4)
+    ]
+
+    # 6. pH-ORP 散點（最多取 600 點，避免前端過載）
+    step    = max(1, len(recs) // 600)
+    scatter = [
+        {"orp": round(float(orp[i]), 1), "ph": round(float(ph[i]), 2), "ch4": round(float(ch4[i]), 1)}
+        for i in range(0, len(recs), step)
+    ]
+
+    # 7. 摘要統計
+    summary = {
+        "total_records":  len(recs),
+        "anomaly_count":  int(anomaly.sum()),
+        "anomaly_rate":   round(float(anomaly.mean()) * 100, 1),
+        "orp_mean":       round(float(orp.mean()), 1),
+        "orp_std":        round(float(orp.std()), 2),
+        "pressure_mean":  round(float(pressure.mean()), 3),
+        "pressure_max":   round(float(pressure.max()), 3),
+        "ch4_mean":       round(float(ch4.mean()), 2),
+    }
+
+    return {
+        "summary":          summary,
+        "orp_histogram":    orp_histogram,
+        "pressure_histogram": pressure_histogram,
+        "correlation":      correlation,
+        "anomaly_by_date":  anomaly_by_date,
+        "gas_daily":        gas_daily,
+        "orp_ph_scatter":   scatter,
+    }
+
+
 # ==========================================
 def _sorted_records() -> list:
     """依 timestamp 排序，確保時間軸正確（支援跨日期多次匯入的情境）。"""
@@ -145,6 +285,20 @@ async def import_csv(file: UploadFile = File(...)):
         except (ValueError, IndexError):
             continue
 
+    # ── 去重：過濾掉 sensor_records 中已存在的 timestamp ──
+    existing_ts = {r['timestamp'] for r in sensor_records}
+    parsed_rows = [r for r in parsed_rows if r['timestamp'] not in existing_ts]
+
+    if not parsed_rows:
+        return {
+            'status':             'skipped',
+            'date':               detected_date,
+            'imported':           0,
+            'anomalies_detected': 0,
+            'message':            '所有資料已存在，無新資料匯入',
+            'orp_stats':          {'min': 0, 'max': 0, 'avg': 0},
+        }
+
     row_by_ts = {r['timestamp']: r for r in parsed_rows}
 
     # ── 訊號前處理 ────────────────────────────────
@@ -179,11 +333,37 @@ async def import_csv(file: UploadFile = File(...)):
             anomaly_count += 1
         ema_values.append(pt.ema)
 
+    # ── 預熱 LSTM buffer：前 29 筆直接 append，最後一筆透過正式介面傳入
+    #    這樣 latest_actual_pressure 也能被正確更新
+    for row in parsed_rows[-35:-1]:
+        _lstm_buffer.append([row['orp_raw'], row['ph'], row['temp'], row['pressure']])
+
+    try:
+        last = parsed_rows[-1]
+        pred = get_pressure_prediction({
+            'orp':      last['orp_raw'],
+            'ph':       last['ph'],
+            'temp':     last['temp'],
+            'pressure': last['pressure'],
+        })
+    except Exception:
+        pred = None
+
+    prediction_payload = None
+    if pred and '緩衝' not in pred.get('status', ''):
+        prediction_payload = {
+            'current_pressure_kg_cm2': pred['current_pressure_kg_cm2'],
+            'predicted_pressure_5min': pred['predicted_pressure_5min'],
+            'predicted_ch4_5min':      pred.get('predicted_ch4_5min', 0.0),
+            'status':                  pred['status'],
+        }
+
     return {
         'status':             'success',
         'date':               detected_date,
         'imported':           imported,
         'anomalies_detected': anomaly_count,
+        'prediction':         prediction_payload,
         'orp_stats': {
             'min': round(min(ema_values), 1) if ema_values else 0,
             'max': round(max(ema_values), 1) if ema_values else 0,

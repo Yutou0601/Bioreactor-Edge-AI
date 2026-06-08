@@ -72,12 +72,24 @@ def parse_rows(csv_path: Path) -> list[dict]:
     return rows
 
 
-def post_record(session: requests.Session, record: dict) -> bool:
+def post_record(session: requests.Session, record: dict) -> dict | None:
+    """POST 到 /upload_sensor（同時餵 LSTM buffer）再寫 /records。"""
     try:
-        res = session.post(f"{API_BASE}/records", json=record, timeout=3)
-        return res.status_code == 200
+        # 餵 LSTM buffer，取得即時推論結果
+        sensor_payload = {
+            'orp':      record['orp'],
+            'ph':       record['ph'],
+            'temp':     record['temp'],
+            'pressure': record['pressure'],
+        }
+        infer_res = session.post(f"{API_BASE}/upload_sensor", json=sensor_payload, timeout=3)
+        prediction = infer_res.json().get('prediction') if infer_res.status_code == 200 else None
+
+        # 寫完整記錄到 /records（供前端圖表顯示）
+        session.post(f"{API_BASE}/records", json=record, timeout=3)
+        return prediction
     except requests.ConnectionError:
-        return False
+        return None
 
 
 def run(csv_path: Path, interval: float):
@@ -132,17 +144,26 @@ def run(csv_path: Path, interval: float):
                     'ch4_pct':        src['ch4_pct'],
                     'note':           'SIM · 突波' if pt.is_anomaly else 'SIM',
                 }
-                ok = post_record(session, record)
-                status = '⚠ 突波' if pt.is_anomaly else ('✓' if ok else '✗ 失敗')
+                pred = post_record(session, record)
+                ok = pred is not None
                 if pt.is_anomaly:
                     anomaly_count += 1
                 if ok:
                     sent += 1
 
+                pred_str = ''
+                if pred and '緩衝' not in pred.get('status', ''):
+                    pred_str = (f"  AI→ {pred['predicted_pressure_5min']:.2f}kg "
+                                f"[{pred['status'].split()[0]}]")
+                elif pred:
+                    pred_str = f"  {pred.get('status', '')}"
+
+                status_icon = '⚠ 突波' if pt.is_anomaly else ('✓' if ok else '✗ 失敗')
                 print(
                     f"  {pt.timestamp:>20}  "
                     f"{pt.raw:>6.1f}  {pt.ema:>6.1f}  "
-                    f"{src['ch4_pct']:>6.2f}  {src['co2_pct']:>5.2f}  {status}"
+                    f"{src['ch4_pct']:>6.2f}  {src['co2_pct']:>5.2f}  "
+                    f"{status_icon}{pred_str}"
                 )
 
             time.sleep(interval)

@@ -3,6 +3,41 @@ import joblib
 import os
 from sklearn.preprocessing import MinMaxScaler
 
+
+def _ema_series(values, alpha):
+    out = [values[0]]
+    for v in values[1:]:
+        out.append(alpha * v + (1 - alpha) * out[-1])
+    return np.array(out)
+
+
+def engineer_features(df):
+    """
+    從原始 ORP 衍生三個訊號特徵，並加入當前壓力作為輸入。
+    必須在 fit_and_save_scalers 之前呼叫。
+
+    新增欄位：
+      orp_ema   — EMA(10)，平滑後的 ORP
+      orp_slope — (ema[t] - ema[t-5]) / 5，mV/min，趨勢斜率
+      orp_macd  — EMA(5) - EMA(30)，短長期動能差
+    """
+    df = df.copy()
+    orp = df['ORP (mV)'].values.astype(float)
+    n   = len(orp)
+
+    ema10 = _ema_series(orp, 2 / 11)
+    ema5  = _ema_series(orp, 2 / 6)
+    ema30 = _ema_series(orp, 2 / 31)
+
+    slopes        = np.zeros(n)
+    slopes[5:]    = (ema10[5:] - ema10[:-5]) / 5   # mV/min
+
+    df['orp_ema']   = ema10
+    df['orp_slope'] = slopes
+    df['orp_macd']  = ema5 - ema30
+    return df
+
+
 def create_sequences(data, target, seq_length=30, predict_ahead=5):
     """將連續資料切割成 LSTM 需要的滑動視窗 (Sliding Window)"""
     xs, ys = [], []

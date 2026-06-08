@@ -3,9 +3,10 @@ from typing import Optional
 
 
 class SensorDataPayload(BaseModel):
-    orp: float
-    ph: float
-    temp: float
+    orp:      float
+    ph:       float
+    temp:     float
+    pressure: Optional[float] = None   # 反應器壓力，有傳才更新
 
 
 class PressurePredictionResponse(BaseModel):
