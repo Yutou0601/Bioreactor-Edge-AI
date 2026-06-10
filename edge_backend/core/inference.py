@@ -1,8 +1,12 @@
+import os
 import torch
 import numpy as np
 from collections import deque
 from core.model import ReactorLSTM
 from data_pipeline.preprocessor import load_scalers
+
+_BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))  # edge_backend/
+_WEIGHTS_DIR = os.path.join(_BASE_DIR, "core", "weights")
 
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 model    = None
@@ -30,10 +34,11 @@ _EMA_OUT_ALPHA      = 0.5
 def load_model_and_scalers():
     global model, scaler_x, scaler_y
     model = ReactorLSTM(input_size=INPUT_SIZE, output_size=2).to(device)
-    model.load_state_dict(torch.load("core/weights/reactor_lstm_weights.pth", map_location=device))
+    weights_path = os.path.join(_WEIGHTS_DIR, "reactor_lstm_weights.pth")
+    model.load_state_dict(torch.load(weights_path, map_location=device))
     model.eval()
-    scaler_x, scaler_y = load_scalers("core/weights")
-    print("[AI 核心] 模型與 Scaler 已成功載入 GPU/CPU 記憶體！")
+    scaler_x, scaler_y = load_scalers(_WEIGHTS_DIR)
+    print("[推論核心] 模型與 Scaler 已成功載入！")
 
 
 # ── 內部工具：EMA 序列計算 ────────────────────────────────

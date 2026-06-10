@@ -771,7 +771,7 @@ onUnmounted(() => {
         <!-- 壓力預測卡片 -->
         <div class="panel pred-panel">
           <div class="pred-header">
-            <h2 class="panel-title">AI 壓力預測 <small>LSTM · 未來 5 min</small></h2>
+            <h2 class="panel-title">壓力 / CH4 預測 <small>LSTM · 未來 5 min</small></h2>
             <span class="an-badge"
               :class="predStatus.includes('危險') ? 'badge-red'
                     : predStatus.includes('警告') ? 'badge-yellow'
