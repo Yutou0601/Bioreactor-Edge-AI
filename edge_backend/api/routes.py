@@ -1,3 +1,4 @@
+import io
 import re
 import time
 import numpy as np
@@ -6,6 +7,7 @@ from core.inference import get_pressure_prediction, sensor_buffer as _lstm_buffe
 from core.data_store import sensor_records, append_record, clear_all
 from core.signal_processor import ORPSignalProcessor
 from core.feature_extractor import ORPFeatureExtractor
+from data_pipeline.loader import _detect_schema, read_btp_daily
 from api.schemas import PressurePredictionResponse, SensorDataPayload, SensorRecord
 
 _feature_extractor = ORPFeatureExtractor(
@@ -242,18 +244,116 @@ def delete_record(record_id: int):
 # ==========================================
 # 通道 4：CSV 批次匯入（含訊號前處理）
 # ==========================================
+def _import_csv_btp_daily(text: str, detected_date: str) -> dict:
+    """處理 usb_receiver.py 產生的 BTP_Sensor_log 格式：資料已完成訊號前處理，
+    直接沿用 orp/orp_raw/orp_cleaned/is_anomaly 等既有結果寫入 sensor_records，
+    不重跑 ORPSignalProcessor（避免對已處理過的訊號二次處理）。
+    """
+    df = read_btp_daily(io.StringIO(text))
+    if df.empty:
+        return {
+            'status': 'skipped', 'date': detected_date, 'imported': 0,
+            'anomalies_detected': 0, 'message': '檔案中沒有可用資料列',
+            'orp_stats': {'min': 0, 'max': 0, 'avg': 0},
+        }
+
+    df = df.copy()
+    df['timestamp'] = df['timestamp'].dt.strftime('%Y-%m-%d %H:%M:%S')
+    existing_ts = {r['timestamp'] for r in sensor_records}
+    df = df[~df['timestamp'].isin(existing_ts)]
+
+    if df.empty:
+        return {
+            'status': 'skipped', 'date': detected_date, 'imported': 0,
+            'anomalies_detected': 0, 'message': '所有資料已存在，無新資料匯入',
+            'orp_stats': {'min': 0, 'max': 0, 'avg': 0},
+        }
+
+    rows = df.to_dict('records')
+    imported = 0
+    anomaly_count = 0
+    ema_values: list[float] = []
+
+    for row in rows:
+        is_anomaly = bool(row.get('is_anomaly', False))
+        note_val = row.get('note')
+        note = note_val if isinstance(note_val, str) and note_val else f'CSV · {detected_date}'
+        append_record({
+            'timestamp':      row['timestamp'],
+            'orp':            row['orp'],
+            'orp_raw':        row['orp_raw'],
+            'orp_cleaned':    row['orp_cleaned'],
+            'is_anomaly':     is_anomaly,
+            'pressure':       row.get('pressure', 0.0),
+            'ph':             row.get('ph', 7.0),
+            'temp':           row.get('temp', 30.0),
+            'mixer_pressure': row.get('mixer_pressure', 0.0),
+            'co2_pct':        row.get('co2_pct', 0.0),
+            'ch4_pct':        row.get('ch4_pct', 0.0),
+            'note':           note,
+        })
+        imported += 1
+        if is_anomaly:
+            anomaly_count += 1
+        ema_values.append(row['orp'])
+
+    # 預熱 LSTM buffer：前 N-1 筆直接 append，最後一筆透過正式介面傳入
+    for row in rows[-35:-1]:
+        _lstm_buffer.append([row['orp_raw'], row['ph'], row['temp'], row['pressure']])
+
+    try:
+        last = rows[-1]
+        pred = get_pressure_prediction({
+            'orp':      last['orp_raw'],
+            'ph':       last['ph'],
+            'temp':     last['temp'],
+            'pressure': last['pressure'],
+        })
+    except Exception:
+        pred = None
+
+    prediction_payload = None
+    if pred and '緩衝' not in pred.get('status', ''):
+        prediction_payload = {
+            'current_pressure_kg_cm2': pred['current_pressure_kg_cm2'],
+            'predicted_pressure_5min': pred['predicted_pressure_5min'],
+            'predicted_ch4_5min':      pred.get('predicted_ch4_5min', 0.0),
+            'status':                  pred['status'],
+        }
+
+    return {
+        'status':             'success',
+        'date':               detected_date,
+        'imported':           imported,
+        'anomalies_detected': anomaly_count,
+        'prediction':         prediction_payload,
+        'orp_stats': {
+            'min': round(min(ema_values), 1) if ema_values else 0,
+            'max': round(max(ema_values), 1) if ema_values else 0,
+            'avg': round(sum(ema_values) / len(ema_values), 1) if ema_values else 0,
+        },
+    }
+
+
 @router.post("/import_csv")
 async def import_csv(file: UploadFile = File(...)):
     """
-    接受 BTP_Sensor_log-YYYY-MM-DD.csv 上傳，
-    套用一階差分突波排除 + 線性內插重建 + EMA 濾波，
-    批次寫入 sensor_records。
+    接受兩種來源格式：
+      1. BTP_Sensor_log-YYYY-MM-DD.csv — usb_receiver.py 的每日備份（已完成訊號前處理，
+         含 timestamp/orp/orp_raw/orp_cleaned/is_anomaly 等標題列），直接沿用其處理結果寫入
+         sensor_records，不重跑訊號前處理。
+      2. 感測板原始序列埠格式（無標題列，14 欄），套用一階差分突波排除 + 線性內插重建 +
+         EMA 濾波後寫入 sensor_records（沿用既有流程）。
     """
     date_match = re.search(r'(\d{4}-\d{2}-\d{2})', file.filename or '')
     detected_date = date_match.group(1) if date_match else 'unknown'
 
     content = await file.read()
     text = content.decode('utf-8-sig', errors='ignore')
+
+    first_line = text.splitlines()[0] if text.strip() else ''
+    if _detect_schema(first_line) == 'btp_daily':
+        return _import_csv_btp_daily(text, detected_date)
 
     # 每次匯入建立獨立的處理器實例（不共用 USB 那個）
     processor = ORPSignalProcessor(ema_window=10, spike_threshold=-20.0, spike_max_minutes=15)

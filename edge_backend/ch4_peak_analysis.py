@@ -1,16 +1,28 @@
 """
 CH4 排氣峰值預測分析
 ====================
-Pipeline:
-  1. 資料載入與時間索引建立
-  2. 排氣事件偵測 (scipy.signal.find_peaks)
-  3. 自適應 ORP 相位偵測 (Phase 1 / 2 / 3)  ← 週期內相對閾值，應對條件變動
-  4. 週期級特徵萃取 (Cycle-level Features)
-  5. 特徵選擇 (GA，目標：LOO-CV RMSE on CH4 peak)
-  6. Ridge Regression + Random Forest 建模比較
-  7. 特徵重要性輸出 + 視覺化 (儲存至 reports/)
+提供兩種粒度的分析（--granularity cycle|minute|both）：
 
-統計限制說明：
+  cycle-level（baseline，沿用既有方法論）：
+    1. 資料載入與時間索引建立
+    2. 排氣事件偵測 (scipy.signal.find_peaks)
+    3. 自適應 ORP 相位偵測 (Phase 1 / 2 / 3)  ← 週期內相對閾值，應對條件變動
+    4. 週期級特徵萃取 (Cycle-level Features)，每週期一筆樣本（CH4 峰值）
+    5. 特徵選擇 (GA，目標：LOO-CV RMSE on CH4 peak)
+    6. Ridge Regression + Random Forest 建模比較
+    7. 特徵重要性輸出 + 視覺化 (儲存至 reports/cycle_level/)
+
+  minute-level（每分鐘連續記錄，ICEA 2026 投稿新增）：
+    1. 沿用同一批資料，改以每分鐘為樣本單位（CH4 濃度本身即逐分鐘量測，
+       不再只取每週期一個峰值），樣本數可從個位數暴增至數千筆
+    2. ORP EMA/斜率/MACD 改以「連續區段」為單位計算，避免週期邊界處的 EMA 冷啟動失真
+    3. 交叉驗證改用 GroupKFold（依週期分組）+ 時序 holdout，取代樣本量小時才適用、
+       在大樣本下有分布偏誤疑慮的 LOO-CV
+    4. 額外自動跑一組消融實驗電池（排除時間特徵 / 純 ORP / 排除 ORP 的基準 /
+       最小感測器組合 / 納入 CH4 落後值），逐一拆解哪些訊號真的在解釋 CH4
+    5. 結果輸出為 JSON + predictions CSV（而非僅 PNG），供監控 PC / Jetson 雙邊比較用
+
+統計限制說明（cycle-level）：
   目前資料含 6 個完整排氣週期，樣本量極小。
   模型結果用於說明方法論與特徵重要性分析；
   實務預測穩定性需累積 ≥ 30 個週期的資料。
@@ -18,18 +30,23 @@ Pipeline:
 
 import os
 import sys
+import json
+import platform
+import argparse
 import warnings
 import random
+from datetime import datetime
 import numpy as np
 import pandas as pd
 import matplotlib
 matplotlib.use('Agg')
 import matplotlib.pyplot as plt
-import matplotlib.gridspec as gridspec
 from scipy.signal import find_peaks
 from sklearn.linear_model import Ridge
 from sklearn.ensemble import RandomForestRegressor
 from sklearn.preprocessing import StandardScaler
+from sklearn.pipeline import Pipeline
+from sklearn.model_selection import GroupKFold, TimeSeriesSplit
 from sklearn.metrics import mean_squared_error
 
 warnings.filterwarnings('ignore')
@@ -37,7 +54,10 @@ random.seed(42)
 np.random.seed(42)
 
 REPORT_DIR = os.path.join(os.path.dirname(__file__), 'reports')
-os.makedirs(REPORT_DIR, exist_ok=True)
+CYCLE_REPORT_DIR = os.path.join(REPORT_DIR, 'cycle_level')
+MINUTE_REPORT_DIR = os.path.join(REPORT_DIR, 'minute_level')
+os.makedirs(CYCLE_REPORT_DIR, exist_ok=True)
+os.makedirs(MINUTE_REPORT_DIR, exist_ok=True)
 
 # ─────────────────────────────────────────────────
 # 1. 資料載入
@@ -150,7 +170,7 @@ def detect_phases(slope: np.ndarray, k: float = 0.5,
     return labels, (mu, sigma, lo, hi)
 
 # ─────────────────────────────────────────────────
-# 5. 週期級特徵萃取
+# 5. 週期級特徵萃取（cycle-level，baseline）
 # ─────────────────────────────────────────────────
 
 FEATURE_NAMES = [
@@ -209,11 +229,11 @@ def extract_cycle_features(cycle_df: pd.DataFrame) -> dict:
     return feats, phase_labels
 
 # ─────────────────────────────────────────────────
-# 6. GA 特徵選擇
+# 6. GA 特徵選擇 + 交叉驗證
 # ─────────────────────────────────────────────────
 
 def loo_cv_rmse(X: np.ndarray, y: np.ndarray, model_fn) -> float:
-    """Leave-One-Out Cross-Validation RMSE（樣本少時唯一可靠的評估方式）"""
+    """Leave-One-Out Cross-Validation RMSE（樣本少時唯一可靠的評估方式，cycle-level 專用）"""
     n = len(y)
     preds = np.empty(n)
     for i in range(n):
@@ -226,24 +246,71 @@ def loo_cv_rmse(X: np.ndarray, y: np.ndarray, model_fn) -> float:
     return float(np.sqrt(mean_squared_error(y, preds)))
 
 
+def grouped_cv_rmse(X: np.ndarray, y: np.ndarray, groups: np.ndarray,
+                     model_fn, n_splits: int = 10) -> float:
+    """GroupKFold RMSE：整個週期（cycle_id）一起分進同一折，避免相鄰分鐘互相洩漏。
+    每分鐘管線的 GA 適應度函式與模型評估都使用這個，取代樣本量暴增後不再適用的 LOO-CV。
+    """
+    n_groups = len(np.unique(groups))
+    n_splits = max(2, min(n_splits, n_groups))
+    gkf = GroupKFold(n_splits=n_splits)
+    preds = np.empty(len(y))
+    for tr_idx, te_idx in gkf.split(X, y, groups):
+        mdl = model_fn()
+        mdl.fit(X[tr_idx], y[tr_idx])
+        preds[te_idx] = mdl.predict(X[te_idx])
+    return float(np.sqrt(mean_squared_error(y, preds)))
+
+
+def chronological_holdout_rmse(X: np.ndarray, y: np.ndarray, day_index: np.ndarray,
+                                model_fn, n_splits: int = 5):
+    """依日期做 TimeSeriesSplit，回傳最後一折（最近期天數）的 holdout RMSE。
+    回應 Austin et al. (2025) 對 LOO-CV／隨機 CV 在小樣本、正則化模型下分布偏誤的疑慮，
+    額外提供「訓練用較早的資料、驗證用較晚的資料」這個更貼近實務部署情境的穩健性指標。
+    天數不足以切出至少 2 折時回傳 None。
+    """
+    unique_days = np.unique(day_index)
+    max_splits = len(unique_days) - 1
+    if max_splits < 2:
+        return None
+    n_splits = max(2, min(n_splits, max_splits))
+    tscv = TimeSeriesSplit(n_splits=n_splits)
+    day_order = {d: i for i, d in enumerate(unique_days)}
+    day_pos = np.array([day_order[d] for d in day_index])
+
+    last_rmse = None
+    for tr_days_idx, te_days_idx in tscv.split(unique_days):
+        tr_mask = np.isin(day_pos, tr_days_idx)
+        te_mask = np.isin(day_pos, te_days_idx)
+        if tr_mask.sum() == 0 or te_mask.sum() == 0:
+            continue
+        mdl = model_fn()
+        mdl.fit(X[tr_mask], y[tr_mask])
+        preds = mdl.predict(X[te_mask])
+        last_rmse = float(np.sqrt(mean_squared_error(y[te_mask], preds)))
+    return last_rmse
+
+
 def ga_feature_selection(X: np.ndarray, y: np.ndarray,
                           feature_names: list,
                           pop_size: int = 20,
                           n_gen: int = 40,
                           cx_prob: float = 0.7,
                           mut_prob: float = 0.15,
-                          model_fn=None):
+                          evaluate_fn=None):
     """
-    以 GA 在 cycle-level 特徵集合中搜索最佳子集。
+    以 GA 在特徵集合中搜索最佳子集。
 
     染色體 : 長度 = n_features 的二進制向量，1 = 選用
-    適應度 : LOO-CV RMSE（愈小愈好，取負值轉最大化）
+    適應度 : evaluate_fn(X_selected, y) 的 RMSE（愈小愈好，取負值轉最大化）
+             預設為 Ridge + LOO-CV（cycle-level 既有行為，維持不變）；
+             每分鐘管線會傳入以 GroupKFold 評估的 evaluate_fn。
     選擇   : Tournament selection (size=3)
     交配   : Single-point crossover
     突變   : Bit-flip mutation
     """
-    if model_fn is None:
-        model_fn = lambda: Ridge(alpha=1.0)
+    if evaluate_fn is None:
+        evaluate_fn = lambda Xs, ys: loo_cv_rmse(Xs, ys, lambda: Ridge(alpha=1.0))
 
     n_feat = X.shape[1]
 
@@ -251,7 +318,7 @@ def ga_feature_selection(X: np.ndarray, y: np.ndarray,
         sel = [i for i, c in enumerate(chrom) if c]
         if not sel:
             return float('inf')
-        return loo_cv_rmse(X[:, sel], y, model_fn)
+        return evaluate_fn(X[:, sel], y)
 
     # 初始族群
     pop = []
@@ -445,7 +512,7 @@ def plot_ga_history(history, out_path):
     fig, ax = plt.subplots(figsize=(8, 4))
     ax.plot(history, color='#3498db', lw=1.5)
     ax.set_xlabel('Generation', fontsize=9)
-    ax.set_ylabel('Best LOO-CV RMSE (%)', fontsize=9)
+    ax.set_ylabel('Best CV RMSE (%)', fontsize=9)
     ax.set_title('GA Feature Selection – Convergence Curve', fontsize=10, fontweight='bold')
     ax.grid(True, alpha=0.3)
     plt.tight_layout()
@@ -456,7 +523,7 @@ def plot_ga_history(history, out_path):
 
 def plot_prediction_vs_actual(y_true, y_pred_ridge, y_pred_rf,
                                cycle_ids, out_path):
-    """LOO-CV 預測值 vs 實際值散點圖"""
+    """LOO-CV 預測值 vs 實際值散點圖（cycle-level，樣本少可逐點標註）"""
     fig, axes = plt.subplots(1, 2, figsize=(11, 4))
     for ax, preds, title, color in zip(
             axes,
@@ -481,22 +548,42 @@ def plot_prediction_vs_actual(y_true, y_pred_ridge, y_pred_rf,
     plt.close()
     print(f'  [圖表] 已儲存 → {out_path}')
 
+
+def plot_prediction_vs_actual_minute(y_true, y_pred_ridge, y_pred_rf, out_path):
+    """每分鐘尺度預測 vs 實際值散點圖。樣本數以千計，逐點標註不可讀，改用透明度散點。"""
+    fig, axes = plt.subplots(1, 2, figsize=(11, 4))
+    for ax, preds, title, color in zip(
+            axes,
+            [y_pred_ridge, y_pred_rf],
+            ['Ridge Regression (GroupKFold)', 'Random Forest (GroupKFold)'],
+            ['#3498db', '#e67e22']):
+        ax.scatter(y_true, preds, color=color, s=6, alpha=0.15, zorder=3, linewidths=0)
+        lims = [min(y_true.min(), np.min(preds)) - 3,
+                max(y_true.max(), np.max(preds)) + 3]
+        ax.plot(lims, lims, 'k--', lw=0.8, alpha=0.5)
+        ax.set_xlim(lims); ax.set_ylim(lims)
+        ax.set_xlabel('Actual CH4 (%)', fontsize=9)
+        ax.set_ylabel('Predicted CH4 (%)', fontsize=9)
+        rmse = np.sqrt(mean_squared_error(y_true, preds))
+        ax.set_title(f'{title}\nRMSE = {rmse:.2f}%  (n={len(y_true):,})',
+                     fontsize=9, fontweight='bold')
+        ax.grid(True, alpha=0.25)
+    plt.tight_layout()
+    plt.savefig(out_path, dpi=150, bbox_inches='tight')
+    plt.close()
+    print(f'  [圖表] 已儲存 → {out_path}')
+
 # ─────────────────────────────────────────────────
-# 8. 主程式
+# 8. Cycle-level 分析（baseline，既有邏輯原封不動搬進函式）
 # ─────────────────────────────────────────────────
 
-def main():
+def run_cycle_level_analysis(df: pd.DataFrame, out_dir: str):
     SEP = '=' * 60
-
-    # ── 載入 ────────────────────────────────────────
     print(SEP)
-    print('CH4 排氣峰值預測分析')
+    print('CH4 排氣峰值預測分析（cycle-level baseline）')
     print(SEP)
-    print('[1] 載入資料...')
-    df = load_data()
     print(f'    總筆數: {len(df):,}  欄位: {list(df.columns)}')
 
-    # ── 排氣事件 ─────────────────────────────────────
     print('\n[2] 偵測排氣事件...')
     ch4_arr = df['CH4濃度 (%)'].values
     peaks, _ = detect_vent_events(ch4_arr, prominence=10, min_distance=60)
@@ -506,17 +593,20 @@ def main():
         ts = df['timestamp'].iloc[idx]
         print(f'    事件 {i+1}: {ts}  CH4={v:.1f}%')
 
-    # ── 週期切割 ─────────────────────────────────────
     boundaries = [0] + list(peaks) + [len(df) - 1]
     n_complete = len(peaks)   # 有已知 CH4 峰值的週期數
 
     print(f'\n    完整週期數（有已知排氣峰值）: {n_complete}')
+
+    if n_complete < 2:
+        print('    ⚠ 週期數不足 2，無法進行 GA/LOO-CV，略過 cycle-level 分析')
+        return None
+
     print(f'    ⚠ 統計限制：{n_complete} 個樣本，所有模型評估使用 LOO-CV')
 
     # ── 相位偵測 + 特徵萃取 ───────────────────────────
     print('\n[3] 相位偵測 & 週期特徵萃取...')
     feature_records = []
-    all_phase_labels = []
 
     for i in range(n_complete):
         start, end = boundaries[i], boundaries[i + 1]
@@ -524,7 +614,6 @@ def main():
         orp_cyc = cyc_df['ORP (mV)'].values.astype(float)
         _, slope_cyc, _ = compute_orp_features(orp_cyc)
         phase_labels, (mu, sigma, lo, hi) = detect_phases(slope_cyc)
-        all_phase_labels.append(phase_labels)
 
         feats, _ = extract_cycle_features(cyc_df)
         feats['ch4_peak'] = peak_ch4[i]
@@ -543,7 +632,7 @@ def main():
         plot_phase_detail(
             i, df.iloc[start:end + 1],
             phase_full, peak_ch4[i],
-            os.path.join(REPORT_DIR, f'cycle_{i+1:02d}_phase.png')
+            os.path.join(out_dir, f'cycle_{i+1:02d}_phase.png')
         )
 
     feat_df = pd.DataFrame(feature_records)
@@ -554,7 +643,7 @@ def main():
     print('\n[4] 繪製總覽圖...')
     plot_cycles_overview(
         df, peaks, peak_ch4, boundaries,
-        os.path.join(REPORT_DIR, 'overview.png')
+        os.path.join(out_dir, 'overview.png')
     )
 
     # ── GA 特徵選擇 ──────────────────────────────────
@@ -568,7 +657,6 @@ def main():
     ga_result = ga_feature_selection(
         X_scaled, y_all, FEATURE_NAMES,
         pop_size=20, n_gen=40,
-        model_fn=lambda: Ridge(alpha=1.0)
     )
     print(f'    Best LOO-CV RMSE: {ga_result["best_rmse"]:.3f}%')
     print(f'    選中特徵 ({len(ga_result["selected_features"])}/{len(FEATURE_NAMES)}):')
@@ -577,7 +665,7 @@ def main():
 
     plot_ga_history(
         ga_result['history'],
-        os.path.join(REPORT_DIR, 'ga_convergence.png')
+        os.path.join(out_dir, 'ga_convergence.png')
     )
 
     # ── Ridge Regression（全特徵 vs GA 特徵）──────────
@@ -586,7 +674,6 @@ def main():
     X_ga      = X_scaled[:, sel_idx]
     X_full    = X_scaled
 
-    # LOO-CV RMSE
     ridge_full_rmse = loo_cv_rmse(X_full, y_all, lambda: Ridge(alpha=1.0))
     ridge_ga_rmse   = loo_cv_rmse(X_ga,   y_all, lambda: Ridge(alpha=1.0))
     rf_full_rmse    = loo_cv_rmse(X_full, y_all,
@@ -619,7 +706,7 @@ def main():
     plot_prediction_vs_actual(
         y_all, preds_ridge, preds_rf,
         list(range(1, n_complete + 1)),
-        os.path.join(REPORT_DIR, 'prediction_vs_actual.png')
+        os.path.join(out_dir, 'prediction_vs_actual.png')
     )
 
     # ── Random Forest 特徵重要性 ──────────────────────
@@ -638,7 +725,7 @@ def main():
     plot_feature_importance(
         FEATURE_NAMES, importances,
         'Random Forest Feature Importances (full data fit)',
-        os.path.join(REPORT_DIR, 'feature_importance.png')
+        os.path.join(out_dir, 'feature_importance.png')
     )
 
     # ── 相關係數矩陣 ───────────────────────────────────
@@ -651,7 +738,7 @@ def main():
 
     # ── 結論摘要 ──────────────────────────────────────
     print(f'\n{SEP}')
-    print('分析結論摘要')
+    print('分析結論摘要（cycle-level）')
     print(SEP)
     print(f'  排氣事件數        : {n_complete}')
     print(f'  CH4 峰值範圍      : {y_all.min():.1f} ~ {y_all.max():.1f} %')
@@ -666,10 +753,441 @@ def main():
     print('    目前結果反映方法論的可行性，而非預測精度的最終指標。')
     print('    建議累積 ≥ 30 個排氣週期後重新評估。')
     print()
-    print(f'  輸出圖表目錄: {REPORT_DIR}/')
-    for f in sorted(os.listdir(REPORT_DIR)):
+    print(f'  輸出圖表目錄: {out_dir}/')
+    for f in sorted(os.listdir(out_dir)):
         print(f'    - {f}')
     print(SEP)
+
+    return {
+        'n_cycles': n_complete,
+        'ga_selected_features': ga_result['selected_features'],
+        'ridge_ga_loo_rmse': ridge_ga_rmse,
+        'rf_ga_loo_rmse': rf_ga_rmse,
+        'top_feature': top_feat,
+    }
+
+# ─────────────────────────────────────────────────
+# 9. Minute-level 每分鐘連續 CH4 迴歸（新增）
+# ─────────────────────────────────────────────────
+
+def segment_by_gaps(df: pd.DataFrame, max_gap_minutes: int = 5) -> np.ndarray:
+    """依時間斷點（斷線重啟等）把資料切成連續區段，回傳每列的 segment_id。"""
+    gaps = df['timestamp'].diff().dt.total_seconds().div(60).fillna(0)
+    return (gaps > max_gap_minutes).cumsum().values
+
+
+def drop_zero_variance_features(X_df: pd.DataFrame, tol: float = 1e-6) -> list:
+    """回傳去除零變異欄位後的特徵名稱清單（取代寫死排除 temp_mean 的做法）。"""
+    return [c for c in X_df.columns if X_df[c].std(ddof=0) > tol]
+
+
+def build_minute_level_dataset(df: pd.DataFrame, horizon: int = 0):
+    """把整份逐分鐘資料轉換成每分鐘迴歸用的資料集：
+      - 依連續區段（segment）各自重算 ORP EMA/斜率/MACD，避免週期邊界處的 EMA 冷啟動失真
+      - 沿用既有 vent-peak 週期切割邏輯，逐列標上 cycle_id / 週期內時間位置 / 相位
+      - CH4 迴歸目標使用 EMA(5) 平滑、依 horizon 位移（僅在同一 segment 內位移，不跨斷點）
+    回傳 (feat_df, meta)。
+    """
+    df = df.sort_values('timestamp').reset_index(drop=True).copy()
+    df['segment_id'] = segment_by_gaps(df)
+
+    df['pressure']       = df['反應器壓力 (kg/cm²)'].astype(float)
+    df['ph']             = df['酸鹼值 (pH)'].astype(float)
+    df['temp']           = df['溫度 (°C)'].astype(float)
+    df['mixer_pressure'] = df['混合槽壓力 (kg/cm²)'].astype(float)
+    df['co2_pct']        = df['CO2濃度 (%)'].astype(float)
+
+    orp_ema10 = np.empty(len(df))
+    orp_slope = np.empty(len(df))
+    orp_macd  = np.empty(len(df))
+    ch4_ema5  = np.empty(len(df))
+    for seg_id, idx in df.groupby('segment_id').groups.items():
+        idx = idx.to_numpy()
+        seg_orp = df.loc[idx, 'ORP (mV)'].values.astype(float)
+        ema10, slope, macd = compute_orp_features(seg_orp)
+        orp_ema10[idx] = ema10
+        orp_slope[idx] = slope
+        orp_macd[idx]  = macd
+        seg_ch4 = df.loc[idx, 'CH4濃度 (%)'].values.astype(float)
+        ch4_ema5[idx] = _ema(seg_ch4, 2 / 6)
+
+    df['orp_ema10'] = orp_ema10
+    df['orp_slope'] = orp_slope
+    df['orp_macd']  = orp_macd
+    df['ch4_ema5']  = ch4_ema5
+
+    # 週期切割（沿用既有 vent-peak 定義；只有落在已知完整週期內的分鐘才有 cycle_id）
+    ch4_arr = df['CH4濃度 (%)'].values
+    peaks, _ = detect_vent_events(ch4_arr, prominence=10, min_distance=60)
+    boundaries = [0] + list(peaks) + [len(df) - 1]
+    n_cycles = len(peaks)
+
+    cycle_id     = np.full(len(df), -1, dtype=int)
+    elapsed_min  = np.full(len(df), np.nan)
+    elapsed_frac = np.full(len(df), np.nan)
+    phase_label  = np.zeros(len(df), dtype=int)
+
+    for i in range(n_cycles):
+        start, end = boundaries[i], boundaries[i + 1]
+        n = end - start + 1
+        cycle_id[start:end + 1]     = i
+        elapsed_min[start:end + 1]  = np.arange(n)
+        elapsed_frac[start:end + 1] = np.arange(n) / max(n - 1, 1)
+        cyc_slope = orp_slope[start:end + 1]
+        labels, _ = detect_phases(cyc_slope)
+        phase_label[start:end + 1] = labels
+
+    df['cycle_id']             = cycle_id
+    df['elapsed_min_in_cycle'] = elapsed_min
+    df['elapsed_frac_in_cycle'] = elapsed_frac
+    df['phase_label']          = phase_label
+
+    # label：horizon 分鐘後（0 = 當下）的 CH4 EMA(5)，僅在同一 segment 內位移
+    df['ch4_pct_target'] = df.groupby('segment_id')['ch4_ema5'].shift(-horizon)
+
+    # CH4 落後值（消融實驗用，預設特徵集不使用，理由見 FEATURE_NAMES_MINUTE_LAG 註解）
+    df['ch4_lag1'] = df.groupby('segment_id')['ch4_ema5'].shift(1)
+    df['ch4_lag2'] = df.groupby('segment_id')['ch4_ema5'].shift(2)
+
+    meta = {'peaks': peaks, 'boundaries': boundaries, 'n_cycles': n_cycles}
+    return df, meta
+
+
+def filter_valid_minutes(df: pd.DataFrame, keep_anomalies: bool = False) -> pd.DataFrame:
+    """預設丟掉 ORP 內插修正過的異常分鐘（is_anomaly=True），以及目標值為 NaN
+    （週期外或位移後超出區段尾端）的列。"""
+    if not keep_anomalies and 'is_anomaly' in df.columns:
+        df = df[~df['is_anomaly'].fillna(False).astype(bool)]
+    return df.dropna(subset=['ch4_pct_target']).reset_index(drop=True)
+
+
+FEATURE_NAMES_MINUTE = [
+    'orp_ema10', 'orp_slope', 'orp_macd', 'phase_label',
+    'elapsed_min_in_cycle', 'elapsed_frac_in_cycle',
+    'pressure', 'ph', 'temp', 'mixer_pressure', 'co2_pct',
+]
+
+# ── 消融實驗特徵集 ──────────────────────────────────────
+# 主結果（FEATURE_NAMES_MINUTE）之外，另外跑一組消融實驗電池，逐一拆解
+# 「哪些訊號真的在解釋 CH4，哪些只是巧合的高相關」。
+
+_TIME_FEATURES = {'elapsed_min_in_cycle', 'elapsed_frac_in_cycle'}
+_ORP_FEATURES = {'orp_ema10', 'orp_slope', 'orp_macd', 'phase_label'}
+
+# 排除週期進度特徵：檢驗 ORP／操作參數在不知道「現在是週期第幾分鐘」時
+# 是否仍有預測力，還是模型其實只是在學一條隨時間單調上升的趨勢線。
+FEATURE_NAMES_MINUTE_NO_TIME = [f for f in FEATURE_NAMES_MINUTE if f not in _TIME_FEATURES]
+
+# 只用 ORP 相關特徵：量化「ORP 相位動態」這個論文核心論點本身，
+# 在完全拿掉時間與其他感測器資訊後，還能解釋多少 CH4 變異。
+FEATURE_NAMES_MINUTE_ORP_ONLY = ['orp_ema10', 'orp_slope', 'orp_macd', 'phase_label']
+
+# 排除所有 ORP 與時間特徵，只用其他操作參數：檢驗 ORP 感測器是否真的必要，
+# 或者壓力／pH／CO2 這些更便宜的訊號本身就已經足夠預測 CH4。
+FEATURE_NAMES_MINUTE_NON_ORP_BASELINE = [
+    f for f in FEATURE_NAMES_MINUTE if f not in _ORP_FEATURES and f not in _TIME_FEATURES
+]
+
+# 最小感測器組合（僅 ORP + pH）：對應邊緣部署時「精簡感測器成本」的論述，
+# 評估只保留最少感測器時精度犧牲多少。
+FEATURE_NAMES_MINUTE_MINIMAL_SENSOR = ['orp_ema10', 'orp_slope', 'orp_macd', 'phase_label', 'ph']
+
+# 額外納入 CH4 自身落後值。預設分析不使用（保持可解釋性 —
+# 目的是用 ORP 相位動態解釋 CH4，而非讓模型單純學到 CH4 的自相關），
+# 但另外輸出一組結果，預期 RMSE 會趨近於零但不具解釋力，作為「模型能否偷看
+# 答案」的上界對照，佐證主結果沒有偷懶依賴自相關。
+FEATURE_NAMES_MINUTE_LAG = FEATURE_NAMES_MINUTE + ['ch4_lag1', 'ch4_lag2']
+
+# 消融實驗登記表：{標籤: {features, needs_lag_filter, desc}}。
+# needs_lag_filter=True 代表該特徵集用到 ch4_lag1/2，須額外過濾掉每個
+# 連續區段開頭無落後值可用的列。
+MINUTE_ABLATIONS = {
+    'no_time': {
+        'features': FEATURE_NAMES_MINUTE_NO_TIME,
+        'needs_lag_filter': False,
+        'desc': '排除週期進度特徵（elapsed_min/frac_in_cycle），檢驗 ORP/操作參數'
+                '在不知道「現在是週期第幾分鐘」時是否仍有預測力',
+    },
+    'orp_only': {
+        'features': FEATURE_NAMES_MINUTE_ORP_ONLY,
+        'needs_lag_filter': False,
+        'desc': '只用 ORP 相關特徵，量化 ORP 訊號本身能解釋多少 CH4 變異',
+    },
+    'non_orp_baseline': {
+        'features': FEATURE_NAMES_MINUTE_NON_ORP_BASELINE,
+        'needs_lag_filter': False,
+        'desc': '排除所有 ORP 與時間特徵，只用其他操作參數，檢驗 ORP 是否真的必要',
+    },
+    'minimal_sensor': {
+        'features': FEATURE_NAMES_MINUTE_MINIMAL_SENSOR,
+        'needs_lag_filter': False,
+        'desc': '最小感測器組合（僅 ORP + pH），評估邊緣部署精簡感測器的可行性',
+    },
+    'with_lag': {
+        'features': FEATURE_NAMES_MINUTE_LAG,
+        'needs_lag_filter': True,
+        'desc': '額外納入 CH4 落後值，作為「模型能否偷看答案」的上界對照',
+    },
+}
+
+
+def export_results_json(results: dict, out_path: str) -> None:
+    with open(out_path, 'w', encoding='utf-8') as f:
+        json.dump(results, f, ensure_ascii=False, indent=2)
+    print(f'  [輸出] 已儲存 → {out_path}')
+
+
+def _fit_minute_level(feat_df: pd.DataFrame, feature_names: list,
+                       out_dir: str, host_tag: str, tag: str):
+    """對一份每分鐘資料集跑完整的 GA + GroupKFold/時序 holdout 評估 + 圖表/JSON 輸出。"""
+    os.makedirs(out_dir, exist_ok=True)
+
+    available = drop_zero_variance_features(feat_df[feature_names], tol=1e-6)
+    dropped = [f for f in feature_names if f not in available]
+    if dropped:
+        print(f'  [{tag}] 零變異特徵已排除: {dropped}')
+
+    X_all  = feat_df[available].values.astype(float)
+    y_all  = feat_df['ch4_pct_target'].values.astype(float)
+    groups = feat_df['cycle_id'].values
+    day_index = (
+        feat_df['年'].astype(int).astype(str) + '-' +
+        feat_df['月'].astype(int).astype(str).str.zfill(2) + '-' +
+        feat_df['日'].astype(int).astype(str).str.zfill(2)
+    ).values
+
+    n_groups = len(np.unique(groups))
+    n_splits = max(2, min(10, n_groups))
+
+    def make_ridge():
+        return Pipeline([('scaler', StandardScaler()), ('model', Ridge(alpha=1.0))])
+
+    def make_rf():
+        return Pipeline([('scaler', StandardScaler()),
+                          ('model', RandomForestRegressor(n_estimators=50, random_state=42))])
+
+    print(f'  [{tag}] GA 特徵選擇（GroupKFold={n_splits} 折，依週期分組，Ridge pipeline）...')
+    evaluate_fn = lambda Xs, ys: grouped_cv_rmse(Xs, ys, groups, make_ridge, n_splits=n_splits)
+    ga_result = ga_feature_selection(
+        X_all, y_all, available,
+        pop_size=20, n_gen=40,
+        evaluate_fn=evaluate_fn,
+    )
+    print(f'    Best Grouped-CV RMSE: {ga_result["best_rmse"]:.3f}%')
+    print(f'    選中特徵 ({len(ga_result["selected_features"])}/{len(available)}): '
+          f'{ga_result["selected_features"]}')
+
+    plot_ga_history(ga_result['history'], os.path.join(out_dir, f'ga_convergence_{tag}.png'))
+
+    sel_idx = ga_result['selected_idx']
+    X_ga   = X_all[:, sel_idx]
+    X_full = X_all
+
+    ridge_full_rmse = grouped_cv_rmse(X_full, y_all, groups, make_ridge, n_splits=n_splits)
+    ridge_ga_rmse   = grouped_cv_rmse(X_ga,   y_all, groups, make_ridge, n_splits=n_splits)
+    rf_full_rmse    = grouped_cv_rmse(X_full, y_all, groups, make_rf, n_splits=n_splits)
+    rf_ga_rmse      = grouped_cv_rmse(X_ga,   y_all, groups, make_rf, n_splits=n_splits)
+
+    chrono_ridge = chronological_holdout_rmse(X_ga, y_all, day_index, make_ridge)
+    chrono_rf    = chronological_holdout_rmse(X_ga, y_all, day_index, make_rf)
+
+    print(f'    {"模型":35s}  GroupKFold RMSE')
+    print(f'    {"-"*55}')
+    print(f'    {"Ridge (全部特徵)":35s}  {ridge_full_rmse:.3f} %')
+    print(f'    {"Ridge (GA 選擇特徵)":35s}  {ridge_ga_rmse:.3f} %  ← GA 結果')
+    print(f'    {"Random Forest (全部特徵)":35s}  {rf_full_rmse:.3f} %')
+    print(f'    {"Random Forest (GA 選擇特徵)":35s}  {rf_ga_rmse:.3f} %')
+    if chrono_ridge is not None:
+        print(f'    {"Ridge (GA, 時序 holdout)":35s}  {chrono_ridge:.3f} %')
+    if chrono_rf is not None:
+        print(f'    {"Random Forest (GA, 時序 holdout)":35s}  {chrono_rf:.3f} %')
+
+    # 逐折預測值（供繪圖 + predictions CSV）
+    gkf = GroupKFold(n_splits=n_splits)
+    y_pred_ridge = np.empty(len(y_all))
+    y_pred_rf    = np.empty(len(y_all))
+    fold_id      = np.empty(len(y_all), dtype=int)
+    per_fold_rmse_ridge, per_fold_rmse_rf = [], []
+    for fi, (tr, te) in enumerate(gkf.split(X_ga, y_all, groups)):
+        mdl_r = make_ridge(); mdl_r.fit(X_ga[tr], y_all[tr])
+        mdl_f = make_rf();    mdl_f.fit(X_ga[tr], y_all[tr])
+        pr = mdl_r.predict(X_ga[te])
+        pf = mdl_f.predict(X_ga[te])
+        y_pred_ridge[te] = pr
+        y_pred_rf[te]    = pf
+        fold_id[te]      = fi
+        per_fold_rmse_ridge.append(float(np.sqrt(mean_squared_error(y_all[te], pr))))
+        per_fold_rmse_rf.append(float(np.sqrt(mean_squared_error(y_all[te], pf))))
+
+    plot_prediction_vs_actual_minute(
+        y_all, y_pred_ridge, y_pred_rf,
+        os.path.join(out_dir, f'prediction_vs_actual_{tag}.png')
+    )
+
+    # RF 特徵重要性（全資料 fit，僅供解釋，非 CV 評估指標）
+    rf_full_fit = Pipeline([('scaler', StandardScaler()),
+                             ('model', RandomForestRegressor(n_estimators=200, random_state=42))])
+    rf_full_fit.fit(X_full, y_all)
+    importances = rf_full_fit.named_steps['model'].feature_importances_
+    plot_feature_importance(
+        available, importances,
+        f'Random Forest Feature Importances ({tag}, full-data fit)',
+        os.path.join(out_dir, f'feature_importance_{tag}.png')
+    )
+
+    corr_df = feat_df[available + ['ch4_pct_target']]
+    corr = corr_df.corr()['ch4_pct_target'].drop('ch4_pct_target').sort_values(
+        key=abs, ascending=False)
+
+    results = {
+        'tag': tag,
+        'host_tag': host_tag,
+        'n_rows': int(len(feat_df)),
+        'n_cycles': int(n_groups),
+        'n_splits': int(n_splits),
+        'date_range': [str(day_index.min()), str(day_index.max())],
+        'features_available': available,
+        'features_dropped_zero_variance': dropped,
+        'ga_selected_features': ga_result['selected_features'],
+        'ga_best_rmse': ga_result['best_rmse'],
+        'ga_history': ga_result['history'],
+        'rmse': {
+            'ridge_full_groupkfold': ridge_full_rmse,
+            'ridge_ga_groupkfold': ridge_ga_rmse,
+            'rf_full_groupkfold': rf_full_rmse,
+            'rf_ga_groupkfold': rf_ga_rmse,
+            'ridge_ga_chronological_holdout': chrono_ridge,
+            'rf_ga_chronological_holdout': chrono_rf,
+        },
+        'per_fold_rmse': {
+            'ridge_ga': per_fold_rmse_ridge,
+            'rf_ga': per_fold_rmse_rf,
+        },
+        'feature_importance_rf_full': {f: float(i) for f, i in zip(available, importances)},
+        'correlation_with_target': {f: float(r) for f, r in corr.items()},
+        'generated_at': datetime.now().isoformat(timespec='seconds'),
+    }
+
+    export_results_json(
+        results, os.path.join(out_dir, f'minute_level_results_{host_tag}_{tag}.json'))
+
+    pred_df = pd.DataFrame({
+        'timestamp':        feat_df['timestamp'],
+        'cycle_id':         feat_df['cycle_id'],
+        'phase_label':      feat_df['phase_label'],
+        'fold_id':          fold_id,
+        'y_true':           y_all,
+        'y_pred_ridge_ga':  y_pred_ridge,
+        'y_pred_rf_ga':     y_pred_rf,
+    })
+    pred_df.to_csv(
+        os.path.join(out_dir, f'minute_level_predictions_{host_tag}_{tag}.csv'), index=False)
+
+    return results
+
+
+def run_minute_level_analysis(df: pd.DataFrame, out_dir: str, host_tag: str = 'local',
+                               horizon: int = 0, keep_anomalies: bool = False):
+    print(f'\n{"="*60}')
+    print(f'每分鐘連續 CH4 迴歸分析（horizon={horizon} min，host={host_tag}）')
+    print('='*60)
+
+    feat_df, meta = build_minute_level_dataset(df, horizon=horizon)
+    feat_df = filter_valid_minutes(feat_df, keep_anomalies=keep_anomalies)
+    feat_df = feat_df[feat_df['cycle_id'] >= 0].reset_index(drop=True)
+
+    n_rows = len(feat_df)
+    n_cycles = feat_df['cycle_id'].nunique() if n_rows else 0
+    print(f'  可用樣本數: {n_rows:,}（涵蓋 {n_cycles} 個完整週期，'
+          f'相較 cycle-level 每週期僅 1 筆樣本大幅提升）')
+
+    if n_rows < 20 or n_cycles < 2:
+        print('  ⚠ 樣本或週期數過少（需要至少 2 個週期、20 筆樣本），略過每分鐘分析')
+        return None
+
+    results = {}
+
+    print('\n  ── 主結果（完整每分鐘特徵集）──')
+    results['main'] = _fit_minute_level(
+        feat_df, FEATURE_NAMES_MINUTE, out_dir, host_tag, tag='main')
+
+    for name, spec in MINUTE_ABLATIONS.items():
+        print(f'\n  ── 消融實驗：{name} ──')
+        print(f'    {spec["desc"]}')
+        sub_df = feat_df
+        if spec['needs_lag_filter']:
+            sub_df = feat_df.dropna(subset=['ch4_lag1', 'ch4_lag2']).reset_index(drop=True)
+
+        if len(sub_df) < 20 or sub_df['cycle_id'].nunique() < 2:
+            print('    ⚠ 樣本不足，略過')
+            results[name] = None
+            continue
+
+        sub_dir = os.path.join(out_dir, f'ablation_{name}')
+        results[name] = _fit_minute_level(
+            sub_df, spec['features'], sub_dir, host_tag, tag=f'ablation_{name}')
+
+    return results
+
+# ─────────────────────────────────────────────────
+# 10. 主程式
+# ─────────────────────────────────────────────────
+
+def build_arg_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(
+        description='CH4 排氣分析：cycle-level baseline 與每分鐘連續迴歸')
+    parser.add_argument('--granularity', choices=['cycle', 'minute', 'both'], default='both',
+                         help='要跑哪種粒度的分析（預設 both，維持既有裸執行行為）')
+    parser.add_argument('--data-dir', default='data/*.csv',
+                         help='CSV 資料來源 glob pattern（預設 data/*.csv）')
+    parser.add_argument('--host-tag', default=platform.node(),
+                         help='本次執行的機器標籤，供監控 PC / Jetson 結果比對用')
+    parser.add_argument('--horizon', type=int, default=0,
+                         help='每分鐘 CH4 迴歸目標的時間位移（分鐘），0=當下濃度（預設）')
+    parser.add_argument('--keep-anomalies', action='store_true',
+                         help='每分鐘分析預設會排除 ORP 內插修正過的異常分鐘，加此旗標則保留')
+    return parser
+
+
+def main():
+    args = build_arg_parser().parse_args()
+
+    print('[1] 載入資料...')
+    df = load_data(args.data_dir)
+    print(f'    總筆數: {len(df):,}  欄位: {list(df.columns)}')
+
+    cycle_summary = None
+    minute_summary = None
+
+    if args.granularity in ('cycle', 'both'):
+        cycle_summary = run_cycle_level_analysis(df, CYCLE_REPORT_DIR)
+
+    if args.granularity in ('minute', 'both'):
+        minute_summary = run_minute_level_analysis(
+            df, MINUTE_REPORT_DIR,
+            host_tag=args.host_tag, horizon=args.horizon,
+            keep_anomalies=args.keep_anomalies,
+        )
+
+    print('\n' + '=' * 60)
+    print('全部分析完成')
+    print('=' * 60)
+    if cycle_summary:
+        print(f'  Cycle-level  : n={cycle_summary["n_cycles"]}  '
+              f'Ridge={cycle_summary["ridge_ga_loo_rmse"]:.2f}%  '
+              f'RF={cycle_summary["rf_ga_loo_rmse"]:.2f}%')
+    if minute_summary and minute_summary.get('main'):
+        m = minute_summary['main']
+        print(f'  Minute-level (main) : n={m["n_rows"]:,} ({m["n_cycles"]} 週期)  '
+              f'Ridge(GroupKFold)={m["rmse"]["ridge_ga_groupkfold"]:.2f}%  '
+              f'RF(GroupKFold)={m["rmse"]["rf_ga_groupkfold"]:.2f}%')
+    if minute_summary:
+        for name, r in minute_summary.items():
+            if name == 'main' or r is None:
+                continue
+            print(f'  Minute-level ablation[{name}]: '
+                  f'Ridge(GroupKFold)={r["rmse"]["ridge_ga_groupkfold"]:.2f}%  '
+                  f'RF(GroupKFold)={r["rmse"]["rf_ga_groupkfold"]:.2f}%')
 
 
 if __name__ == '__main__':
