@@ -124,6 +124,47 @@ const fetchPrediction = async () => {
 }
 
 // ==========================================
+// 生物相位偵測
+// ==========================================
+const phaseData = ref(null)
+
+const fetchPhase = async () => {
+  try {
+    const res = await apiClient.get('/phase')
+    phaseData.value = res.data
+  } catch (e) {
+    console.warn('相位分析取得失敗:', e.message)
+  }
+}
+
+const phaseBadgeClass = computed(() => {
+  const p = phaseData.value?.phase
+  return p === 1 ? 'badge-red' : p === 2 ? 'badge-green' : p === 3 ? 'badge-orange' : 'badge-gray'
+})
+
+const phaseTimeline = computed(() => {
+  const list = phaseData.value?.transitions
+  if (!list?.length) return []
+  const total = list.reduce((s, t) => s + t.duration_min, 0) || 1
+  return list.map(t => ({ ...t, pct: Math.max(2, Math.round(t.duration_min / total * 100)) }))
+})
+
+// ==========================================
+// CH4 峰值預測靜態結果（GA 特徵 LOO-CV，Ridge α=1.0）
+// ==========================================
+const CH4_PEAK_CYCLES = [
+  { id: 'C1', date: '2026-02-23', actual: 66.22, predicted: 65.81, error: -0.41 },
+  { id: 'C2', date: '2026-03-03', actual: 65.16, predicted: 59.45, error: -5.71 },
+  { id: 'C3', date: '2026-03-10', actual: 52.77, predicted: 52.60, error: -0.17 },
+  { id: 'C4', date: '2026-03-16', actual: 51.91, predicted: 53.42, error:  1.51 },
+  { id: 'C5', date: '2026-03-19', actual: 33.87, predicted: 37.58, error:  3.71 },
+  { id: 'C6', date: '2026-03-24', actual: 48.15, predicted: 51.28, error:  3.13 },
+]
+const CH4_RMSE = 3.13
+const CH4_GA_FEATURES = ['cycle_length_min', 'phase2_duration_min', 'phase2_fraction', 'phase3_onset_fraction', 'pressure_mean']
+const showCh4Panel = ref(false)
+
+// ==========================================
 // 特徵分析（穩態 + 漂移率）
 // ==========================================
 const analysis = ref(null)
@@ -606,6 +647,7 @@ let pollTimer = null
 onMounted(async () => {
   await fetchRecords()
   await fetchPrediction()
+  await fetchPhase()
   initChart()
   initGasChart()
   initMqtt()
@@ -614,6 +656,7 @@ onMounted(async () => {
     if (isAutoFetch.value) {
       fetchRecords()
       fetchPrediction()
+      fetchPhase()
     }
   }, 5000)
   window.addEventListener('resize', () => { myChart?.resize(); myGasChart?.resize() })
@@ -806,6 +849,83 @@ onUnmounted(() => {
           </div>
         </div>
 
+        <!-- 生物相位面板 -->
+        <div class="panel phase-panel">
+          <div class="phase-header">
+            <h2 class="panel-title">生物相位偵測 <small>ORP Adaptive Phase Detection</small></h2>
+            <span v-if="phaseData" class="an-badge" :class="phaseBadgeClass">
+              {{ phaseData.phase === 0 ? '資料不足' : `P${phaseData.phase} · ${phaseData.label_zh}` }}
+            </span>
+            <span v-else class="an-badge badge-gray">等待資料...</span>
+          </div>
+
+          <div v-if="phaseData && phaseData.phase > 0" class="phase-body">
+
+            <!-- 指標列 -->
+            <div class="phase-metrics">
+              <div class="pm-block">
+                <span class="an-label">當前相位</span>
+                <span class="an-value phase-num" :style="{ color: phaseData.color }">
+                  Phase {{ phaseData.phase }}
+                </span>
+              </div>
+              <div class="pm-block">
+                <span class="an-label">持續時間</span>
+                <span class="an-value">{{ phaseData.duration_min }} <span class="pred-unit">min</span></span>
+              </div>
+              <div class="pm-block">
+                <span class="an-label">目前斜率</span>
+                <span class="an-value"
+                  :class="phaseData.slope_current > phaseData.thresholds.hi ? 'val-up'
+                         : phaseData.slope_current < phaseData.thresholds.lo ? 'val-down' : 'val-flat'">
+                  {{ phaseData.slope_current > 0 ? '+' : '' }}{{ phaseData.slope_current.toFixed(3) }}
+                  <span class="pred-unit">mV/min</span>
+                </span>
+              </div>
+              <div class="pm-block">
+                <span class="an-label">閾值 lo / hi</span>
+                <span class="an-value" style="font-size:0.78rem">
+                  {{ phaseData.thresholds.lo.toFixed(3) }} /
+                  {{ phaseData.thresholds.hi.toFixed(3) }}
+                </span>
+              </div>
+              <div class="pm-block pm-wide">
+                <span class="an-label">{{ phaseData.label_en }}</span>
+                <span class="phase-desc" :style="{ color: phaseData.color }">
+                  {{ phaseData.phase === 1 ? '嗜氫菌活躍，ORP 下降中'
+                   : phaseData.phase === 2 ? '甲烷菌代謝活躍，ORP 穩定'
+                   : '底物耗盡，ORP 回升' }}
+                </span>
+              </div>
+            </div>
+
+            <!-- 相位時間軸 -->
+            <div v-if="phaseTimeline.length" class="phase-timeline-wrap">
+              <div class="phase-timeline-label">相位歷程（最近 {{ phaseTimeline.length }} 段）</div>
+              <div class="phase-timeline">
+                <div v-for="(seg, i) in phaseTimeline" :key="i"
+                  class="pt-seg"
+                  :class="{ 'pt-current': seg.is_current }"
+                  :style="{ width: seg.pct + '%', background: seg.color + (seg.is_current ? '' : '55') }"
+                  :title="`P${seg.phase} ${seg.label_zh}\n開始：${seg.start}\n持續：${seg.duration_min} min`">
+                  <span v-if="seg.pct >= 8" class="pt-label">P{{ seg.phase }}</span>
+                </div>
+              </div>
+              <div class="phase-timeline-times">
+                <span v-for="(seg, i) in phaseTimeline" :key="i"
+                  class="pt-time" :style="{ width: seg.pct + '%' }">
+                  <span v-if="seg.pct >= 10">{{ seg.duration_min }}m</span>
+                </span>
+              </div>
+            </div>
+
+          </div>
+
+          <div v-else-if="phaseData" class="phase-empty">
+            {{ phaseData.message }}
+          </div>
+        </div>
+
         <!-- ORP 訊號分析圖 -->
         <div class="panel chart-panel">
           <div class="chart-toolbar">
@@ -900,6 +1020,76 @@ onUnmounted(() => {
             </span>
           </div>
           <div ref="gasChartRef" class="chart-container" style="height:180px"></div>
+        </div>
+
+        <!-- CH4 峰值預測結果 -->
+        <div class="panel ch4-panel">
+          <div class="ch4-header">
+            <h2 class="panel-title">CH4 峰值預測結果 <small>GA + Ridge LOO-CV · 6 排氣週期</small></h2>
+            <div class="ch4-badges">
+              <span class="rmse-badge">RMSE = {{ CH4_RMSE }}%</span>
+              <span class="ga-badge">GA 選出 5/11 特徵</span>
+              <button class="btn toggle-ch4-btn" @click="showCh4Panel = !showCh4Panel">
+                {{ showCh4Panel ? '▲ 收起' : '▼ 展開' }}
+              </button>
+            </div>
+          </div>
+
+          <div v-show="showCh4Panel" class="ch4-body">
+
+            <!-- GA 特徵標籤 -->
+            <div class="ga-features">
+              <span class="ga-label">GA 選出特徵：</span>
+              <span v-for="f in CH4_GA_FEATURES" :key="f" class="ga-feat-tag">{{ f }}</span>
+            </div>
+
+            <!-- 預測 vs 實際表格 -->
+            <table class="ch4-table">
+              <thead>
+                <tr>
+                  <th>週期</th>
+                  <th>日期</th>
+                  <th class="ta-r">實際 CH4 峰值</th>
+                  <th class="ta-r">預測值</th>
+                  <th class="ta-r">誤差</th>
+                  <th class="ta-r">誤差條</th>
+                </tr>
+              </thead>
+              <tbody>
+                <tr v-for="c in CH4_PEAK_CYCLES" :key="c.id"
+                  :class="{ 'ch4-row-warn': Math.abs(c.error) > 4 }">
+                  <td class="cy-id">{{ c.id }}</td>
+                  <td class="cy-date">{{ c.date }}</td>
+                  <td class="ta-r cy-val">{{ c.actual.toFixed(2) }}%</td>
+                  <td class="ta-r cy-pred">{{ c.predicted.toFixed(2) }}%</td>
+                  <td class="ta-r cy-err"
+                    :class="c.error < -4 || c.error > 4 ? 'err-large' : 'err-ok'">
+                    {{ c.error > 0 ? '+' : '' }}{{ c.error.toFixed(2) }}%
+                  </td>
+                  <td class="ta-r cy-bar">
+                    <div class="err-bar-wrap">
+                      <div class="err-bar-track">
+                        <div class="err-bar-fill"
+                          :style="{
+                            width: Math.min(Math.abs(c.error) / 7 * 100, 100) + '%',
+                            background: Math.abs(c.error) > 4 ? '#e74c3c' : '#2ecc71',
+                            marginLeft: c.error < 0 ? 'auto' : '0',
+                          }">
+                        </div>
+                      </div>
+                    </div>
+                  </td>
+                </tr>
+              </tbody>
+            </table>
+
+            <!-- RMSE 計算說明 -->
+            <div class="rmse-formula">
+              RMSE = √[(0.41² + 5.71² + 0.17² + 1.51² + 3.71² + 3.13²) / 6]
+              = √(58.64 / 6) = √9.77 = <b>3.13%</b>
+              <span class="rmse-note">（C2 誤差最大；其餘均 &lt; 4%）</span>
+            </div>
+          </div>
         </div>
 
         <!-- 資料表格 -->
@@ -1288,6 +1478,128 @@ td:nth-child(7) { text-align: right; font-family: monospace; color: #888; }
   line-height: 1; font-family: inherit;
 }
 .clear-range-btn:hover { border-color: #555; color: #ccc; }
+
+/* ─── Phase Panel ─── */
+.phase-panel { border-top: 3px solid #2ecc71; }
+
+.phase-header {
+  display: flex; align-items: center; gap: 12px; margin-bottom: 12px;
+}
+.phase-header .panel-title { margin: 0; flex: 1; }
+.phase-header small { font-size: 0.7rem; color: #444; margin-left: 6px; font-weight: 400; }
+
+.phase-body { display: flex; flex-direction: column; gap: 10px; }
+
+.phase-metrics {
+  display: flex; gap: 0; flex-wrap: wrap;
+}
+.pm-block {
+  display: flex; flex-direction: column; gap: 3px;
+  flex: 1 1 0; min-width: 90px; padding: 0 14px;
+  border-right: 1px solid #1a1a1a;
+}
+.pm-block:first-child { padding-left: 0; }
+.pm-block:last-child  { border-right: none; }
+.pm-wide { flex: 2 1 180px; }
+.phase-num { font-size: 1.05rem; font-weight: 700; }
+.phase-desc { font-size: 0.8rem; font-style: italic; margin-top: 2px; }
+
+.phase-timeline-wrap { padding-top: 4px; }
+.phase-timeline-label {
+  font-size: 0.68rem; color: #333; text-transform: uppercase;
+  letter-spacing: 0.05em; margin-bottom: 5px;
+}
+.phase-timeline {
+  display: flex; width: 100%; height: 22px;
+  border-radius: 4px; overflow: hidden; gap: 1px;
+}
+.pt-seg {
+  display: flex; align-items: center; justify-content: center;
+  overflow: hidden; transition: filter 0.2s; cursor: default;
+  min-width: 2%;
+}
+.pt-seg.pt-current { box-shadow: inset 0 0 0 2px rgba(255,255,255,0.25); }
+.pt-seg:hover { filter: brightness(1.25); }
+.pt-label { font-size: 0.65rem; font-weight: 700; color: rgba(255,255,255,0.85); }
+
+.phase-timeline-times {
+  display: flex; width: 100%; margin-top: 2px;
+}
+.pt-time {
+  font-size: 0.62rem; color: #333; text-align: center;
+  overflow: hidden; text-overflow: clip; white-space: nowrap;
+}
+
+.phase-empty {
+  font-size: 0.8rem; color: #333; padding: 12px 0; text-align: center;
+}
+
+/* ─── CH4 Peak Panel ─── */
+.ch4-panel { border-top: 3px solid #e67e22; }
+.ch4-header {
+  display: flex; align-items: center; gap: 10px; flex-wrap: wrap;
+}
+.ch4-header .panel-title { margin: 0; flex: 1; }
+.ch4-header small { font-size: 0.7rem; color: #444; margin-left: 6px; font-weight: 400; }
+.ch4-badges { display: flex; align-items: center; gap: 8px; }
+
+.rmse-badge {
+  font-size: 0.8rem; font-weight: 700; padding: 2px 11px; border-radius: 10px;
+  background: rgba(46,204,113,0.12); color: #2ecc71; border: 1px solid #1a5c35;
+}
+.ga-badge {
+  font-size: 0.72rem; padding: 1px 9px; border-radius: 10px;
+  background: rgba(52,152,219,0.1); color: #3498db; border: 1px solid #1a4a7a;
+}
+.toggle-ch4-btn { font-size: 0.73rem; padding: 3px 9px; }
+
+.ch4-body { margin-top: 10px; display: flex; flex-direction: column; gap: 10px; }
+
+.ga-features {
+  display: flex; align-items: center; flex-wrap: wrap; gap: 6px;
+  font-size: 0.75rem;
+}
+.ga-label { color: #444; flex-shrink: 0; }
+.ga-feat-tag {
+  background: #0d1a2a; border: 1px solid #1a3a5a;
+  color: #3498db; padding: 1px 8px; border-radius: 8px; font-family: monospace;
+  font-size: 0.72rem;
+}
+
+.ch4-table {
+  width: 100%; border-collapse: collapse; font-size: 0.83rem;
+}
+.ch4-table th {
+  padding: 5px 10px; color: #444; font-size: 0.72rem; font-weight: 500;
+  border-bottom: 1px solid #1a1a1a; background: #0d0d0d;
+}
+.ch4-table td { padding: 6px 10px; border-bottom: 1px solid #141414; color: #bbb; }
+.ch4-table tr:hover td { background: #141414; }
+.ch4-row-warn td { background: rgba(231,76,60,0.03); }
+.ta-r { text-align: right; }
+.cy-id   { color: #555; font-family: monospace; font-size: 0.76rem; }
+.cy-date { color: #555; font-family: monospace; font-size: 0.76rem; }
+.cy-val  { color: #bbb; font-family: monospace; font-weight: 600; }
+.cy-pred { color: #3498db; font-family: monospace; font-weight: 600; }
+.cy-err  { font-family: monospace; font-weight: 700; }
+.err-ok    { color: #2ecc71; }
+.err-large { color: #e74c3c; }
+
+.cy-bar { width: 90px; }
+.err-bar-wrap { display: flex; align-items: center; height: 100%; }
+.err-bar-track {
+  width: 100%; height: 6px; background: #1a1a1a; border-radius: 3px;
+  display: flex; align-items: center; overflow: hidden;
+}
+.err-bar-fill { height: 100%; border-radius: 3px; min-width: 3px; }
+
+.rmse-formula {
+  font-size: 0.75rem; color: #444; font-family: monospace;
+  padding: 8px 10px; background: #0a0a0a;
+  border: 1px solid #1a1a1a; border-radius: 4px; line-height: 1.6;
+}
+.rmse-formula b { color: #2ecc71; }
+.rmse-note { color: #333; margin-left: 8px; }
 
 /* ─── Responsive ─── */
 @media (max-width: 1024px) {

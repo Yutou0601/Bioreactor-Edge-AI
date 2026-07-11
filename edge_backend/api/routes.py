@@ -195,6 +195,113 @@ def _sorted_records() -> list:
     return sorted(sensor_records, key=lambda r: r.get("timestamp") or "")
 
 
+# ==========================================
+# 通道 5：生物相位偵測
+# ==========================================
+
+def _compute_phases_from_records(recs: list):
+    """
+    從 sensor_records 的 EMA-ORP 序列計算生物相位標籤序列。
+    移植自 ch4_peak_analysis.detect_phases()，不引入 matplotlib。
+    """
+    import pandas as pd
+
+    n = len(recs)
+    orp_ema = np.array([r['orp'] for r in recs], dtype=float)
+
+    slope = np.zeros(n)
+    if n > 5:
+        slope[5:] = (orp_ema[5:] - orp_ema[:-5]) / 5
+
+    smooth_window = min(60, n)
+    smoothed = (pd.Series(slope)
+                .rolling(window=smooth_window, center=True, min_periods=1)
+                .mean().values)
+
+    mu    = float(np.mean(smoothed))
+    sigma = float(np.std(smoothed)) + 1e-9
+    k     = 0.5
+    lo    = mu - k * sigma
+    hi    = mu + k * sigma
+
+    raw_labels = np.where(smoothed < lo, 1,
+                 np.where(smoothed > hi, 3, 2)).astype(int)
+
+    labels  = raw_labels.copy()
+    min_dur = min(30, max(1, n // 10))
+    i = 0
+    while i < n:
+        cur = labels[i]
+        j = i
+        while j < n and labels[j] == cur:
+            j += 1
+        if (j - i) < min_dur and i > 0:
+            labels[i:j] = labels[i - 1]
+        i = j
+
+    return labels, (mu, sigma, lo, hi), smoothed
+
+
+_PHASE_META = {
+    1: ('底物利用期',    'Phase 1 – Substrate Utilization', '#e74c3c'),
+    2: ('產甲烷活躍期',  'Phase 2 – Active Methanogenesis', '#2ecc71'),
+    3: ('底物耗盡期',    'Phase 3 – Substrate Depletion',   '#e67e22'),
+}
+
+
+@router.get("/phase")
+def get_phase():
+    recs = _sorted_records()
+    n = len(recs)
+    if n < 10:
+        return {
+            'phase': 0, 'label_zh': '資料不足', 'label_en': 'Insufficient Data',
+            'color': '#666', 'duration_min': 0, 'slope_current': 0.0,
+            'thresholds': {'mu': 0, 'sigma': 0, 'lo': 0, 'hi': 0},
+            'transitions': [], 'total_records': n,
+            'message': f'需至少 10 筆資料（目前 {n} 筆）',
+        }
+
+    labels, (mu, sigma, lo, hi), smoothed = _compute_phases_from_records(recs)
+
+    # 建立相位切換歷史（合併連續相同相位）
+    transitions = []
+    prev, seg_start = int(labels[0]), 0
+    for idx in range(1, n):
+        if int(labels[idx]) != prev:
+            meta = _PHASE_META.get(prev, ('未知', '?', '#666'))
+            transitions.append({
+                'phase': prev, 'label_zh': meta[0], 'color': meta[2],
+                'start': (recs[seg_start].get('timestamp') or '')[:16],
+                'duration_min': idx - seg_start, 'is_current': False,
+            })
+            prev, seg_start = int(labels[idx]), idx
+
+    meta = _PHASE_META.get(prev, ('未知', '?', '#666'))
+    transitions.append({
+        'phase': prev, 'label_zh': meta[0], 'color': meta[2],
+        'start': (recs[seg_start].get('timestamp') or '')[:16],
+        'duration_min': n - seg_start, 'is_current': True,
+    })
+
+    current_meta = _PHASE_META.get(prev, ('未知', 'Unknown', '#666'))
+    return {
+        'phase':         prev,
+        'label_zh':      current_meta[0],
+        'label_en':      current_meta[1],
+        'color':         current_meta[2],
+        'duration_min':  n - seg_start,
+        'slope_current': round(float(smoothed[-1]), 4),
+        'thresholds': {
+            'mu': round(mu, 4), 'sigma': round(sigma, 4),
+            'lo': round(lo, 4), 'hi':    round(hi, 4),
+        },
+        'transitions':   transitions[-14:],
+        'total_records': n,
+        'message': f'基於 {n} 筆 ORP 序列，當前相位持續 {n - seg_start} 分鐘',
+    }
+
+
 @router.get("/analysis")
 def get_analysis():
     """
