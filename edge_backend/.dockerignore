@@ -1,0 +1,9 @@
+data/
+reports/
+core/weights/
+__pycache__/
+*.pyc
+venv/
+env/
+*.onnx
+*.onnx.data
