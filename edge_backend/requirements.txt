@@ -17,6 +17,9 @@ joblib>=1.3.2
 # Hardware
 pyserial>=3.5          # USB 感測器接收器
 
+# HTTP client（sensor_simulator.py / batch_import_csv.py 用）
+requests>=2.31.0
+
 # MQTT
 paho-mqtt>=2.0.0
 

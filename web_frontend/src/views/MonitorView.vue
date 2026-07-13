@@ -651,14 +651,14 @@ onMounted(async () => {
   initChart()
   initGasChart()
   initMqtt()
-  // USB 每分鐘一筆，60 秒輪詢一次即可 (目前先測試 5 秒一次)
+  // USB 每分鐘一筆，60 秒輪詢一次即可
   pollTimer = setInterval(() => {
     if (isAutoFetch.value) {
       fetchRecords()
       fetchPrediction()
       fetchPhase()
     }
-  }, 5000)
+  }, 60000)
   window.addEventListener('resize', () => { myChart?.resize(); myGasChart?.resize() })
 })
 onUnmounted(() => {

@@ -1,3 +1,11 @@
+import sys
+
+# Windows 主控台/重導向輸出預設用系統 codepage（如 cp1252），無法編碼中文
+# print 訊息，會直接讓整個服務啟動失敗。強制 stdout/stderr 走 UTF-8。
+if sys.platform == "win32":
+    sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+    sys.stderr.reconfigure(encoding="utf-8", errors="replace")
+
 from contextlib import asynccontextmanager
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware

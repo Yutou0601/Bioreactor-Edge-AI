@@ -3,7 +3,9 @@ import axios from 'axios'
 // 建立一個專屬的 Axios 實體 (Instance)
 const apiClient = axios.create({
   // 統一設定後端 API 的基底網址
-  baseURL: 'http://192.168.55.1:8000/api', 
+  // 開發模式（npm run dev）走 .env.development → localhost
+  // 正式建置（npm run build）走 .env.production → Jetson 固定 IP
+  baseURL: import.meta.env.VITE_API_BASE_URL,
   // timeout 要比 poll 間隔短，避免上一輪請求還掛著下一輪就觸發
   timeout: 3000,
   headers: {
