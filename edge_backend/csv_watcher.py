@@ -88,12 +88,16 @@ def publish_point(client: mqtt.Client, parsed: dict, pt) -> None:
         payload = json.dumps({
             "timestamp":      pt.timestamp,
             "orp":            pt.ema,
+            "orp_raw":        pt.raw,
+            "orp_cleaned":    pt.cleaned,
+            "is_anomaly":     pt.is_anomaly,
             "pressure":       parsed["pressure"],
             "ph":             parsed["ph"],
             "temp":           parsed["temp"],
             "mixer_pressure": parsed["mixer_pressure"],
             "co2_pct":        parsed["co2_pct"],
             "ch4_pct":        parsed["ch4_pct"],
+            "note":           "anomaly" if pt.is_anomaly else "",
         })
         client.publish(MQTT_TOPIC_PUBLISH, payload, qos=1)
         print(f"[MQTT] 已轉發 {pt.timestamp}  ORP(EMA)={pt.ema:.1f}")

@@ -3,6 +3,7 @@ import json
 import threading
 import paho.mqtt.client as mqtt
 from core.inference import get_pressure_prediction
+from core.data_store import append_record
 
 # MQTT 設定
 BROKER_IP = "localhost" # 因為 Broker 就裝在 Jetson 上
@@ -22,6 +23,11 @@ def on_message(client, userdata, msg):
     try:
         payload = json.loads(msg.payload.decode('utf-8'))
         print(f"📩 [MQTT] 收到數據: {payload}")
+
+        # 寫入共用資料倉儲，供 /records、/phase、/analysis 使用（這幾個端點
+        # 讀的是 sensor_records，不是下面餵給 LSTM 的 sensor_buffer，兩邊
+        # 原本沒有互通，buffer 有在漲但相位/表格資料量卻一直是 0 就是漏了這行）。
+        append_record(dict(payload))
 
         # 🌟 新增：在進入神經網路推論前，按下碼表！
         start_time = time.time()
