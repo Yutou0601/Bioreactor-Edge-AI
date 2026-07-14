@@ -7,11 +7,6 @@ import apiClient from '../services/apiClient'
 // ==========================================
 // 系統狀態
 // ==========================================
-const currentPressure   = ref(0.0)
-const predictedPressure = ref(0.0)
-const predictedCH4      = ref(0.0)
-const predStatus        = ref('')
-const inferenceTimeMs   = ref(0.0)
 const lastUpdateTime    = ref('--:--:--')
 const isAutoFetch       = ref(true)
 const isMqttConnected   = ref(false)
@@ -92,35 +87,12 @@ const importCsv = async () => {
       headers: { 'Content-Type': 'multipart/form-data' }
     })
     csvResult.value = res.data
-    // 若後端已預熱 LSTM buffer 並完成推論，直接更新壓力預測面板
-    const p = res.data?.prediction
-    if (p) {
-      if (p.current_pressure_kg_cm2 != null) currentPressure.value   = p.current_pressure_kg_cm2
-      if (p.predicted_pressure_5min != null) predictedPressure.value = p.predicted_pressure_5min
-      if (p.predicted_ch4_5min      != null) predictedCH4.value      = p.predicted_ch4_5min
-      if (p.status                  != null) predStatus.value        = p.status
-    }
     await fetchRecords()
   } catch (e) {
     csvError.value = e.response?.data?.detail || e.message || '匯入失敗'
   } finally {
     csvImporting.value = false
   }
-}
-
-// ==========================================
-// 壓力推論（HTTP fallback，補 MQTT 不在時的空白）
-// ==========================================
-const fetchPrediction = async () => {
-  try {
-    const res = await apiClient.get('/predict_pressure')
-    const d = res.data
-    if (d.current_pressure_kg_cm2 != null) currentPressure.value   = d.current_pressure_kg_cm2
-    if (d.predicted_pressure_5min != null) predictedPressure.value = d.predicted_pressure_5min
-    if (d.predicted_ch4_5min      != null) predictedCH4.value      = d.predicted_ch4_5min
-    if (d.status                  != null) predStatus.value        = d.status
-    if (d.inference_time_ms       != null) inferenceTimeMs.value   = d.inference_time_ms
-  } catch { /* server 未啟動時靜默略過 */ }
 }
 
 // ==========================================
@@ -613,24 +585,6 @@ const initMqtt = () => {
       connectTimeout:  4000,
     })
 
-    mqttClient.on('connect', () => {
-      isMqttConnected.value = true
-      mqttClient.subscribe('reactor/01/prediction', () => {})
-    })
-    mqttClient.on('message', (topic, message) => {
-      if (topic === 'reactor/01/prediction') {
-        try {
-          const d = JSON.parse(message.toString())
-          if (d.current_pressure_kg_cm2  != null) currentPressure.value   = d.current_pressure_kg_cm2
-          if (d.predicted_pressure_5min  != null) predictedPressure.value = d.predicted_pressure_5min
-          if (d.predicted_ch4_5min       != null) predictedCH4.value      = d.predicted_ch4_5min
-          if (d.status                   != null) predStatus.value        = d.status
-          if (d.inference_time_ms        != null) inferenceTimeMs.value   = d.inference_time_ms
-        } catch {}
-      }
-      if (isAutoFetch.value)
-        lastUpdateTime.value = new Date().toLocaleTimeString('zh-TW', { hour12: false })
-    })
     mqttClient.on('connect', () => { isMqttConnected.value = true  })
     mqttClient.on('error',   () => { isMqttConnected.value = false })
     mqttClient.on('offline', () => { isMqttConnected.value = false })
@@ -646,7 +600,6 @@ let pollTimer = null
 
 onMounted(async () => {
   await fetchRecords()
-  await fetchPrediction()
   await fetchPhase()
   initChart()
   initGasChart()
@@ -655,7 +608,6 @@ onMounted(async () => {
   pollTimer = setInterval(() => {
     if (isAutoFetch.value) {
       fetchRecords()
-      fetchPrediction()
       fetchPhase()
     }
   }, 60000)
@@ -810,44 +762,6 @@ onUnmounted(() => {
 
       <!-- ── Right Column ── -->
       <section class="right-col">
-
-        <!-- 壓力預測卡片 -->
-        <div class="panel pred-panel">
-          <div class="pred-header">
-            <h2 class="panel-title">壓力 / CH4 預測 <small>LSTM · 未來 5 min</small></h2>
-            <span class="an-badge"
-              :class="predStatus.includes('危險') ? 'badge-red'
-                    : predStatus.includes('警告') ? 'badge-yellow'
-                    : predStatus.includes('正常') ? 'badge-green'
-                    : 'badge-gray'">
-              {{ predStatus || '等待推論...' }}
-            </span>
-          </div>
-          <div class="pred-body">
-            <div class="pred-block">
-              <span class="an-label">即時壓力</span>
-              <span class="an-value pred-val">{{ currentPressure.toFixed(2) }}<span class="pred-unit"> kg/cm²</span></span>
-            </div>
-            <div class="pred-divider"></div>
-            <div class="pred-block">
-              <span class="an-label">預測壓力（+5min）</span>
-              <span class="an-value pred-val"
-                :class="predictedPressure > 2.6 ? 'val-danger' : ''">
-                {{ predictedPressure.toFixed(2) }}<span class="pred-unit"> kg/cm²</span>
-              </span>
-            </div>
-            <div class="pred-divider"></div>
-            <div class="pred-block">
-              <span class="an-label">預測 CH4（+5min）</span>
-              <span class="an-value pred-val">{{ predictedCH4.toFixed(1) }}<span class="pred-unit"> %</span></span>
-            </div>
-            <div class="pred-divider"></div>
-            <div class="pred-block">
-              <span class="an-label">推論耗時</span>
-              <span class="an-value pred-val">{{ inferenceTimeMs.toFixed(1) }}<span class="pred-unit"> ms</span></span>
-            </div>
-          </div>
-        </div>
 
         <!-- 生物相位面板 -->
         <div class="panel phase-panel">
@@ -1608,28 +1522,6 @@ td:nth-child(7) { text-align: right; font-family: monospace; color: #888; }
   .table-wrapper { max-height: 380px; }
 }
 
-/* ── 壓力預測卡片 ── */
-.pred-panel { border-top: 3px solid #8e44ad; }
-.pred-header {
-  display: flex; align-items: center; justify-content: space-between;
-  margin-bottom: 12px;
-}
-.pred-header .panel-title { margin: 0; }
-.pred-header small { font-size: 0.72rem; color: #555; margin-left: 6px; font-weight: 400; }
-.pred-body {
-  display: flex; align-items: center; gap: 0; flex-wrap: wrap;
-}
-.pred-block {
-  display: flex; flex-direction: column; gap: 4px;
-  flex: 1 1 0; min-width: 100px; padding: 0 16px;
-}
-.pred-block:first-child { padding-left: 0; }
-.pred-divider {
-  width: 1px; height: 40px; background: #222; flex-shrink: 0;
-}
-.pred-val { font-size: 1.15rem; }
 .pred-unit { font-size: 0.72rem; color: #555; font-weight: 400; margin-left: 2px; }
-.val-danger { color: #e74c3c !important; }
-.badge-red    { background: rgba(231,76,60,0.12);  color: #e74c3c; border: 1px solid #5c1a1a; }
-.badge-yellow { background: rgba(241,196,15,0.12); color: #f1c40f; border: 1px solid #5c4a00; }
+.badge-red { background: rgba(231,76,60,0.12); color: #e74c3c; border: 1px solid #5c1a1a; }
 </style>
