@@ -2,7 +2,7 @@ import io
 import re
 import time
 import numpy as np
-from fastapi import APIRouter, HTTPException, File, UploadFile
+from fastapi import APIRouter, HTTPException, File, UploadFile, Query
 from core.inference import get_pressure_prediction, sensor_buffer as _lstm_buffer
 from core.data_store import sensor_records, append_record, clear_all
 from core.signal_processor import ORPSignalProcessor
@@ -322,8 +322,14 @@ def get_analysis():
 
 
 @router.get("/records")
-def get_records():
-    return _sorted_records()
+def get_records(limit: int = Query(1000, ge=0, description="0 = 不限制，回傳全部")):
+    """預設只回傳最近 limit 筆（依時間排序後取尾端），避免長時間運行後資料量
+    過大拖慢前端渲染與每次輪詢的傳輸量。完整歷史仍完整保存在 sensor_records
+    與 CSV 備份中，不受此限制影響，/analysis 等其他端點也不經過這裡。"""
+    recs = _sorted_records()
+    if limit > 0:
+        recs = recs[-limit:]
+    return recs
 
 
 @router.post("/records")
