@@ -13,6 +13,8 @@ import serial
 import threading
 import os
 import csv
+import json
+import paho.mqtt.client as mqtt
 from datetime import datetime
 
 from core.signal_processor import ORPSignalProcessor
@@ -21,6 +23,50 @@ from core.data_store import append_record
 # ── 硬體設定 ────────────────────────────────────────────
 USB_PORT = '/dev/ttyUSB0'
 BAUD_RATE = 9600
+
+# ── MQTT 轉發設定 ───────────────────────────────────────
+# 這支程式跑在監控電腦上，感測器資料要轉發給 Jetson 上的 core/mqtt_client.py
+# （訂閱同一個主題、做推論、發布 reactor/01/prediction）。IP 是 USB-C 直連 Jetson
+# 時的固定位址；若 Jetson 改用 WiFi，這裡要跟著 apiClient.js／.env.production
+# 一起換成新 IP。
+MQTT_BROKER_IP = "192.168.55.1"
+MQTT_PORT = 1883
+MQTT_TOPIC_PUBLISH = "reactor/01/sensors"
+
+_mqtt_client: mqtt.Client | None = None
+
+
+def _init_mqtt() -> None:
+    """背景非阻塞連線，Broker 尚未就緒時 paho 會自動重試，不影響 USB 收資料。"""
+    global _mqtt_client
+    try:
+        client = mqtt.Client(mqtt.CallbackAPIVersion.VERSION2, "usb_receiver")
+        client.connect_async(MQTT_BROKER_IP, MQTT_PORT, keepalive=60)
+        client.loop_start()
+        _mqtt_client = client
+        print(f"[MQTT] 背景連線至 Jetson Broker（{MQTT_BROKER_IP}:{MQTT_PORT}）...")
+    except Exception as e:
+        print(f"[MQTT] 初始化失敗：{e}（感測器資料仍會正常寫入本機，不影響 API）")
+        _mqtt_client = None
+
+
+def _publish_to_mqtt(record: dict) -> None:
+    if _mqtt_client is None:
+        return
+    try:
+        payload = json.dumps({
+            "timestamp":      record["timestamp"],
+            "orp":            record["orp"],
+            "pressure":       record["pressure"],
+            "ph":             record["ph"],
+            "temp":           record["temp"],
+            "mixer_pressure": record["mixer_pressure"],
+            "co2_pct":        record["co2_pct"],
+            "ch4_pct":        record["ch4_pct"],
+        })
+        _mqtt_client.publish(MQTT_TOPIC_PUBLISH, payload, qos=1)
+    except Exception as e:
+        print(f"[MQTT] 發布失敗：{e}")
 
 # ── 訊號處理參數（依 PDF 設定）──────────────────────────
 _processor = ORPSignalProcessor(
@@ -112,6 +158,7 @@ def _listener_loop() -> None:
                     }
                     append_record(record)
                     _write_csv_row(_get_csv_path(), record)
+                    _publish_to_mqtt(record)
 
                     status = "⚠ 突波" if pt.is_anomaly else "✓"
                     print(
@@ -128,6 +175,7 @@ def _listener_loop() -> None:
 
 
 def start_usb_listener() -> threading.Thread:
+    _init_mqtt()
     t = threading.Thread(target=_listener_loop, daemon=True, name="usb-receiver")
     t.start()
     return t
