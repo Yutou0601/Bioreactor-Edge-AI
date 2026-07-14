@@ -72,10 +72,12 @@ def parse_legacy_row(parts: list) -> dict | None:
         return {
             "timestamp":      ts,
             "orp_raw":        float(parts[7]),
-            "pressure":       float(parts[8]),
+            # parts[8]/parts[11] 對調（2026-07-14 現場比對 HMI 面板確認，見
+            # usb_receiver.py 同處註解）。
+            "pressure":       float(parts[11]),  # 反應槽壓力
             "ph":             float(parts[9]),
             "temp":           float(parts[10]),
-            "mixer_pressure": float(parts[11]),
+            "mixer_pressure": float(parts[8]),   # 氣體混合槽壓力
             "co2_pct":        float(parts[12]),
             "ch4_pct":        float(parts[13]),
         }

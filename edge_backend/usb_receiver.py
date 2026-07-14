@@ -96,10 +96,13 @@ def _parse_line(raw_line: str) -> dict | None:
         return {
             "timestamp":      ts,
             "orp_raw":        float(parts[7]),
-            "pressure":       float(parts[8]),   # 反應器壓力
+            # parts[8]/parts[11] 在硬體端接線與 CSV 欄名對調（2026-07-14 現場比對
+            # HMI 面板確認），parts[8] 實際是氣體混合槽壓力、parts[11] 才是反應槽
+            # 壓力，這裡對調回來，讓 pressure/mixer_pressure 這兩個 key 名副其實。
+            "pressure":       float(parts[11]),  # 反應槽壓力
             "ph":             float(parts[9]),
             "temp":           float(parts[10]),
-            "mixer_pressure": float(parts[11]),  # 混合槽壓力
+            "mixer_pressure": float(parts[8]),   # 氣體混合槽壓力
             "co2_pct":        float(parts[12]),
             "ch4_pct":        float(parts[13]),
         }
