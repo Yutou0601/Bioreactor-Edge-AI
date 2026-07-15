@@ -23,6 +23,8 @@ CO2 溶解 / 生物消耗定量分離分析
 """
 
 import argparse
+import glob
+import os
 import sys
 import numpy as np
 import pandas as pd
@@ -135,9 +137,58 @@ def compute_intervals(df: pd.DataFrame, min_change: float = 0.5) -> pd.DataFrame
     return pd.DataFrame(rows)
 
 
+def summarize_file(path: str, min_change: float = 0.5) -> dict:
+    """單一檔案的統計概覽（不輸出逐分鐘/逐區間細節），用於資料夾批次掃描先建立全貌。"""
+    df = load_csv(path)
+    row = {
+        'file':            os.path.basename(path),
+        'rows':            len(df),
+        'start':           df['timestamp'].iloc[0],
+        'end':             df['timestamp'].iloc[-1],
+        'reactor_p_min':   df['reactor_pressure'].min(),
+        'reactor_p_max':   df['reactor_pressure'].max(),
+        'reactor_p_mean':  df['reactor_pressure'].mean(),
+        'co2_min':         df['co2_pct'].min(),
+        'co2_max':         df['co2_pct'].max(),
+        'ch4_min':         df['ch4_pct'].min(),
+        'ch4_max':         df['ch4_pct'].max(),
+        'n_events':        None,
+        'mean_interval_min':          None,
+        'mean_delta_ch4_rel':         None,
+        'mean_delta_co2_dissolved_rel': None,
+    }
+    try:
+        intervals = compute_intervals(df, min_change=min_change)
+        row['n_events'] = len(intervals) + 1
+        row['mean_interval_min'] = intervals['duration_min'].mean()
+        row['mean_delta_ch4_rel'] = intervals['delta_ch4_rel'].mean()
+        row['mean_delta_co2_dissolved_rel'] = intervals['delta_co2_dissolved_rel'].mean()
+    except ValueError:
+        pass
+    return row
+
+
+def summarize_folder(folder: str, min_change: float = 0.5) -> pd.DataFrame:
+    files = sorted(glob.glob(os.path.join(folder, '*.csv')))
+    if not files:
+        raise ValueError(f"{folder} 底下找不到任何 CSV 檔案")
+
+    rows = []
+    for f in files:
+        try:
+            rows.append(summarize_file(f, min_change=min_change))
+        except Exception as e:
+            rows.append({'file': os.path.basename(f), 'rows': 0, 'error': str(e)})
+    return pd.DataFrame(rows)
+
+
 def main():
     parser = argparse.ArgumentParser(description="CO2 溶解/生物消耗定量分離分析（相對單位，未乘 V_gas/R）")
-    parser.add_argument('--csv', required=True, help="BTP_Sensor_log CSV 檔案路徑")
+    parser.add_argument('--csv', default=None, help="單一 BTP_Sensor_log CSV 檔案路徑")
+    parser.add_argument('--folder', default=None,
+                         help="資料夾批次模式：掃描資料夾下所有 CSV，輸出每日統計概覽"
+                              "（壓力/CO2/CH4 範圍、事件數、平均區間長度與平均溶解/消耗量），"
+                              "不輸出逐分鐘細節。與 --csv 二擇一。")
     parser.add_argument('--mode', choices=['interval', 'per_minute'], default='interval',
                          help="interval（預設）：自動偵測 CO2%%/CH4%% 真正更新的時刻，只在相鄰兩次"
                               "更新之間算總量，並附上區間內 ORP/壓力/pH 斜率；"
@@ -150,6 +201,19 @@ def main():
                               "per_minute 模式務必指定為單一週期內的起點，跨過進氣事件會讓質量守恆失真。")
     parser.add_argument('--end', default=None, help="分析區間終點，格式同 --start，不指定則到檔案結尾")
     args = parser.parse_args()
+
+    if args.folder:
+        summary = summarize_folder(args.folder, min_change=args.min_change)
+        pd.set_option('display.width', 200)
+        print(summary.to_string(index=False))
+        out_path = os.path.join(args.folder, '_folder_summary.csv')
+        summary.to_csv(out_path, index=False, encoding='utf-8-sig')
+        print(f"\n已輸出：{out_path}")
+        return
+
+    if not args.csv:
+        print("[錯誤] 請指定 --csv 或 --folder 其中一個")
+        sys.exit(1)
 
     df = load_csv(args.csv)
     if args.start:
