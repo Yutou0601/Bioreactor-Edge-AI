@@ -11,12 +11,20 @@ CO2 溶解 / 生物消耗定量分離分析
 比對 HMI 面板確認，詳見 docs/日報_2026-07-14.md 第 2 項），本腳本讀入後會自動
 對調回正確語意，不需要額外處理。
 
+**重要（2026-07-14 晚間確認）**：CO2%/CH4% 感測器只有在真正排氣時才會更新讀數，
+排氣之間的分鐘讀數是上一次排氣的舊值，不能當成連續訊號逐分鐘套用質量守恆公式。
+預設的 interval 模式會自動偵測排氣事件（CO2% 出現尖峰跳動處），只在「相鄰兩次
+排氣之間」算一個總量，並附上該區間內 ORP/壓力/pH 的線性斜率（這幾個訊號才是
+真正逐分鐘連續、可信的），供後續嘗試用斜率去逼近排氣間看不到的過程。
+
 使用方式：
     python co2_separation_analysis.py --csv "C:\\path\\to\\BTP_Sensor_log-2026-04-20.csv"
+    python co2_separation_analysis.py --csv "...csv" --mode per_minute --start "..." --end "..."
 """
 
 import argparse
 import sys
+import numpy as np
 import pandas as pd
 
 if sys.platform == "win32":
@@ -71,13 +79,75 @@ def compute_separation(df: pd.DataFrame) -> pd.DataFrame:
     return df
 
 
+def detect_reading_updates(df: pd.DataFrame, min_change: float = 0.5) -> list:
+    """找出 CO2%／CH4% 實際發生跳動的列（判定為感測器真正更新讀數的時刻），
+    回傳這些列在 df 裡的 index（含第一列）。中間分鐘的讀數視為前一次更新的
+    舊值，不當作連續訊號使用。min_change：CO2% 或 CH4% 變化超過這個百分點
+    才算一次更新（避免雜訊被誤判成事件）。
+    """
+    co2_diff = df['co2_pct'].diff().abs()
+    ch4_diff = df['ch4_pct'].diff().abs()
+    changed = (co2_diff > min_change) | (ch4_diff > min_change)
+    idx = [0] + df.index[changed].tolist()
+    return sorted(set(idx))
+
+
+def _slope(x: pd.Series, y: pd.Series) -> float:
+    """簡單線性回歸斜率（每分鐘變化量），資料點不足時回傳 NaN。"""
+    if len(x) < 2:
+        return float('nan')
+    x_min = (x - x.iloc[0]).dt.total_seconds() / 60.0
+    return float(np.polyfit(x_min, y, 1)[0])
+
+
+def compute_intervals(df: pd.DataFrame, min_change: float = 0.5) -> pd.DataFrame:
+    """把資料切成「相鄰兩次讀數更新之間」的區間，每段輸出：
+    區間起訖時間、區間長度（分鐘）、該區間總 CO2 消失量／生物消耗量／物理溶解量
+    （用區間頭尾兩個真實讀數點算質量守恆，不假設中間逐分鐘連續），以及區間內
+    ORP／反應槽壓力／pH 的線性斜率（這幾個訊號逐分鐘皆為連續讀值，可信）。
+    """
+    df = df.reset_index(drop=True)
+    boundaries = detect_reading_updates(df, min_change=min_change)
+    if len(boundaries) < 2:
+        raise ValueError("偵測不到至少兩個讀數更新點，無法切出任何區間；"
+                          "可調整 --min-change 門檻，或確認資料本身是否真的有離散跳動")
+
+    df['n_total_rel'] = df['reactor_pressure'] / df['temp_k']
+    df['n_co2_rel'] = df['n_total_rel'] * df['co2_pct'] / 100.0
+    df['n_ch4_rel'] = df['n_total_rel'] * df['ch4_pct'] / 100.0
+
+    rows = []
+    for start_i, end_i in zip(boundaries[:-1], boundaries[1:]):
+        seg = df.iloc[start_i:end_i + 1]
+        delta_ch4    = seg['n_ch4_rel'].iloc[-1] - seg['n_ch4_rel'].iloc[0]
+        delta_co2_lost = seg['n_co2_rel'].iloc[0] - seg['n_co2_rel'].iloc[-1]
+        rows.append({
+            'start':          seg['timestamp'].iloc[0],
+            'end':            seg['timestamp'].iloc[-1],
+            'duration_min':   (seg['timestamp'].iloc[-1] - seg['timestamp'].iloc[0]).total_seconds() / 60.0,
+            'delta_ch4_rel':            delta_ch4,
+            'delta_co2_total_lost_rel': delta_co2_lost,
+            'delta_co2_dissolved_rel':  delta_co2_lost - delta_ch4,
+            'orp_slope_per_min':      _slope(seg['timestamp'], seg['ORP (mV)']),
+            'pressure_slope_per_min': _slope(seg['timestamp'], seg['reactor_pressure']),
+            'ph_slope_per_min':       _slope(seg['timestamp'], seg['酸鹼值 (pH)']),
+        })
+    return pd.DataFrame(rows)
+
+
 def main():
     parser = argparse.ArgumentParser(description="CO2 溶解/生物消耗定量分離分析（相對單位，未乘 V_gas/R）")
     parser.add_argument('--csv', required=True, help="BTP_Sensor_log CSV 檔案路徑")
+    parser.add_argument('--mode', choices=['interval', 'per_minute'], default='interval',
+                         help="interval（預設）：自動偵測 CO2%%/CH4%% 真正更新的時刻，只在相鄰兩次"
+                              "更新之間算總量，並附上區間內 ORP/壓力/pH 斜率；"
+                              "per_minute：假設 CO2%%/CH4%% 逐分鐘連續有效（適用於循環路徑本身"
+                              "會經過感測器、讀數確實連續變化的資料，例如 04-20 那份歷史檔案）。")
+    parser.add_argument('--min-change', type=float, default=0.5,
+                         help="interval 模式：CO2%% 或 CH4%% 變化超過這個百分點才視為一次真正更新（預設 0.5）")
     parser.add_argument('--start', default=None,
-                         help="分析區間起點（單一週期的 t0，例如進氣完成時間），格式 'YYYY-MM-DD HH:MM:SS'。"
-                              "不指定則用檔案第一筆——注意：若區間跨過進氣事件，質量守恆會失真，"
-                              "務必指定為單一週期內的起點。")
+                         help="分析區間起點，格式 'YYYY-MM-DD HH:MM:SS'，不指定則用檔案第一筆。"
+                              "per_minute 模式務必指定為單一週期內的起點，跨過進氣事件會讓質量守恆失真。")
     parser.add_argument('--end', default=None, help="分析區間終點，格式同 --start，不指定則到檔案結尾")
     args = parser.parse_args()
 
@@ -90,14 +160,19 @@ def main():
         print("[錯誤] 指定的時間區間內沒有資料")
         sys.exit(1)
 
-    result = compute_separation(df)
+    if args.mode == 'interval':
+        result = compute_intervals(df, min_change=args.min_change)
+        print(result.to_string(index=False))
+        out_path = args.csv.rsplit('.', 1)[0] + '_co2_intervals.csv'
+    else:
+        result = compute_separation(df)
+        cols = ['timestamp', 'reactor_pressure', 'co2_pct', 'ch4_pct',
+                'delta_ch4_rel', 'delta_co2_total_lost_rel', 'delta_co2_dissolved_rel']
+        result = result[cols]
+        print(result.to_string(index=False))
+        out_path = args.csv.rsplit('.', 1)[0] + '_co2_separation.csv'
 
-    cols = ['timestamp', 'reactor_pressure', 'co2_pct', 'ch4_pct',
-            'delta_ch4_rel', 'delta_co2_total_lost_rel', 'delta_co2_dissolved_rel']
-    print(result[cols].to_string(index=False))
-
-    out_path = args.csv.rsplit('.', 1)[0] + '_co2_separation.csv'
-    result[cols].to_csv(out_path, index=False, encoding='utf-8-sig')
+    result.to_csv(out_path, index=False, encoding='utf-8-sig')
     print(f"\n已輸出：{out_path}")
 
 
