@@ -3,12 +3,16 @@ import re
 import time
 import numpy as np
 from fastapi import APIRouter, HTTPException, File, UploadFile, Query
+from fastapi.responses import StreamingResponse
 from core.inference import get_pressure_prediction, sensor_buffer as _lstm_buffer
 from core.data_store import sensor_records, append_record, clear_all
 from core.signal_processor import ORPSignalProcessor
 from core.feature_extractor import ORPFeatureExtractor
 from data_pipeline.loader import _detect_schema, read_btp_daily
-from api.schemas import PressurePredictionResponse, SensorDataPayload, SensorRecord
+from api.schemas import (PressurePredictionResponse, SensorDataPayload, SensorRecord,
+                         ExperimentRunCreate, ExperimentRunUpdate)
+from core import experiment_store as exp
+from core import experiment_report as exp_report
 
 _feature_extractor = ORPFeatureExtractor(
     window=30,
@@ -446,6 +450,112 @@ def _import_csv_btp_daily(text: str, detected_date: str) -> dict:
             'avg': round(sum(ema_values) / len(ema_values), 1) if ema_values else 0,
         },
     }
+
+
+# ==========================================
+# 通道 6：實驗批次管理
+# ==========================================
+@router.get("/experiment/runs")
+def list_experiment_runs():
+    """所有批次（含由感測訊號自動計算的量測結果）。"""
+    return exp.list_runs()
+
+
+@router.post("/experiment/runs")
+def create_experiment_run(payload: ExperimentRunCreate):
+    """開始一個新批次（記錄起始時間，status=running）。"""
+    try:
+        return exp.add_run(
+            run_id=payload.run_id, n_minutes=payload.n_minutes,
+            gas_ratio=payload.gas_ratio, intake_pressure=payload.intake_pressure,
+            vent_pressure=payload.vent_pressure, note=payload.note or "",
+        )
+    except ValueError as e:
+        raise HTTPException(status_code=409, detail=str(e))
+
+
+@router.post("/experiment/plan")
+def create_experiment_plan(payload: dict = None):
+    """一鍵建立標準批次計畫（3 水準 × 3 重複 = 9 批次，編號 1.1~3.3）。
+    body 可帶 n_levels（預設 [1,5,10]）、repeats（預設 3）、vent_pressure（預設 1.0）。"""
+    payload = payload or {}
+    n_levels = payload.get("n_levels", [1, 5, 10])
+    repeats = int(payload.get("repeats", 3))
+    vent = float(payload.get("vent_pressure", 1.0))
+    intake = float(payload.get("intake_pressure", 1.2))
+    created, skipped = [], []
+    for bi, n in enumerate(n_levels, 1):
+        for rep in range(1, repeats + 1):
+            rid = f"{bi}.{rep}"
+            try:
+                exp.add_run(rid, n_minutes=n, intake_pressure=intake, vent_pressure=vent)
+                created.append(rid)
+            except ValueError:
+                skipped.append(rid)
+    return {"created": created, "skipped": skipped, "runs": exp.list_runs()}
+
+
+@router.post("/experiment/runs/{run_id}/start")
+def start_experiment_run(run_id: str):
+    """開始進氣：記錄起始時間，之後的訊號歸入本批次。"""
+    try:
+        return exp.start_run(run_id)
+    except KeyError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+
+
+@router.post("/experiment/runs/{run_id}/vent")
+def vent_experiment_run(run_id: str):
+    """標記批次排氣（設定結束時間，量測結果隨即由時間窗計算）。"""
+    try:
+        return exp.vent_run(run_id)
+    except KeyError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+
+@router.patch("/experiment/runs/{run_id}")
+def update_experiment_run(run_id: str, payload: ExperimentRunUpdate):
+    try:
+        return exp.update_run(run_id, payload.dict(exclude_unset=True))
+    except KeyError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+
+
+@router.delete("/experiment/runs/{run_id}")
+def delete_experiment_run(run_id: str):
+    try:
+        return exp.delete_run(run_id)
+    except KeyError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+
+
+@router.get("/experiment/runs/{run_id}/live")
+def experiment_run_live(run_id: str):
+    """進行中批次的即時狀態：目前壓力、距排氣目標、預估剩餘時間。"""
+    try:
+        return exp.get_live_status(run_id)
+    except KeyError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+
+
+@router.get("/experiment/export")
+def export_experiment_report(fmt: str = Query("xlsx", pattern="^(xlsx|csv)$")):
+    """匯出批次結果報表。fmt=xlsx（洪博綠底表格）或 csv。"""
+    runs = exp.list_runs()
+    stamp = time.strftime("%Y%m%d_%H%M")
+    if fmt == "csv":
+        text = exp_report.to_csv(runs)
+        data = ("﻿" + text).encode("utf-8")   # BOM 讓 Excel 正確辨識中文
+        return StreamingResponse(
+            io.BytesIO(data), media_type="text/csv",
+            headers={"Content-Disposition": f'attachment; filename="experiment_report_{stamp}.csv"'})
+    data = exp_report.to_xlsx_bytes(runs)
+    return StreamingResponse(
+        io.BytesIO(data),
+        media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        headers={"Content-Disposition": f'attachment; filename="experiment_report_{stamp}.xlsx"'})
 
 
 @router.post("/import_csv")

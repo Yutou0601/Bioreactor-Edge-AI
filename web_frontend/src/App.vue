@@ -7,6 +7,7 @@ import { RouterView, RouterLink } from 'vue-router'
     <nav class="page-nav">
       <span class="nav-brand">BTP Edge AI</span>
       <RouterLink to="/">即時監控</RouterLink>
+      <RouterLink to="/experiment">實驗批次</RouterLink>
       <RouterLink to="/report">研究分析</RouterLink>
     </nav>
     <RouterView />

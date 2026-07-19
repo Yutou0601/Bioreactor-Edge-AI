@@ -13,6 +13,8 @@ numpy>=1.24.4
 pandas>=2.2.1
 scikit-learn>=1.4.1
 joblib>=1.3.2
+pymoo>=0.6.2            # co2_moga_calibration.py：NSGA-II 多目標啟發式演算法
+openpyxl>=3.1.0        # 實驗批次報表匯出（api/experiment/export 的 xlsx）
 
 # Hardware
 pyserial>=3.5          # USB 感測器接收器

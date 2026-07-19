@@ -30,3 +30,24 @@ class SensorRecord(BaseModel):
     co2_pct:         float                    # CO2 濃度 %
     ch4_pct:         float                    # CH4 濃度 %
     note:            Optional[str]   = ""
+
+
+# ── 實驗批次 ─────────────────────────────────────────
+class ExperimentRunCreate(BaseModel):
+    run_id:          str                      # 批次編號，如 "1.1"
+    n_minutes:       float                    # 循環時間（每時幾分）— 控制因子
+    gas_ratio:       Optional[str]   = "4:1"
+    intake_pressure: Optional[float] = 1.2    # 進氣至壓力 kg/cm²
+    vent_pressure:   Optional[float] = 1.0    # 排氣至壓力 kg/cm²
+    note:            Optional[str]   = ""
+
+
+class ExperimentRunUpdate(BaseModel):
+    n_minutes:       Optional[float] = None
+    gas_ratio:       Optional[str]   = None
+    intake_pressure: Optional[float] = None
+    vent_pressure:   Optional[float] = None
+    start_time:      Optional[str]   = None
+    end_time:        Optional[str]   = None
+    status:          Optional[str]   = None
+    note:            Optional[str]   = None
