@@ -73,6 +73,9 @@ CYCLE_COLUMNS = [
     ("pressure_start",    "壓力起"),
     ("pressure_end",      "壓力末"),
     ("drop_rate",         "下降速率(kg/cm²/hr)"),
+    ("slope_early",       "早段斜率"),
+    ("slope_late",        "晚段斜率"),
+    ("flattening",        "平緩化(早-晚·疑產甲烷)"),
     ("pre_injection_orp", "進氣前ORP(菌群共變數)"),
     ("orp_crash",         "ORP崩落"),
 ]
@@ -130,7 +133,7 @@ def cycles_to_xlsx_bytes(cycle_rows: list) -> bytes:
             c.alignment = CEN
             c.border = BORDER
 
-    for j, w in enumerate([8, 15, 8, 18, 10, 9, 9, 18, 18, 10], 1):
+    for j, w in enumerate([8, 15, 8, 18, 10, 9, 9, 18, 10, 10, 16, 18, 10], 1):
         ws.column_dimensions[get_column_letter(j)].width = w
     ws.row_dimensions[hr].height = 34
 

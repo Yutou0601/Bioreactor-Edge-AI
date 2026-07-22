@@ -294,7 +294,7 @@ onUnmounted(() => clearInterval(pollTimer))
                 <div class="cycle-detail">
                   <div class="cd-title">每循環特徵（{{ r.run_id }}）— 進氣前 ORP 為菌群成熟度共變數</div>
                   <table v-if="cyclesMap[r.run_id]?.length" class="cycle-table">
-                    <thead><tr><th>週期</th><th>起</th><th>時長hr</th><th>P起→P末</th><th>下降速率</th><th>進氣前ORP</th><th>ORP崩落</th></tr></thead>
+                    <thead><tr><th>週期</th><th>起</th><th>時長hr</th><th>P起→P末</th><th>下降速率</th><th>早段</th><th>晚段</th><th>平緩化</th><th>進氣前ORP</th><th>ORP崩落</th></tr></thead>
                     <tbody>
                       <tr v-for="cy in cyclesMap[r.run_id]" :key="cy.cycle">
                         <td>{{ cy.cycle }}</td>
@@ -302,6 +302,9 @@ onUnmounted(() => clearInterval(pollTimer))
                         <td class="mono">{{ cy.duration_hr }}</td>
                         <td class="mono">{{ cy.pressure_start }}→{{ cy.pressure_end }}</td>
                         <td class="mono hl">{{ fmt(cy.drop_rate, 5) }}</td>
+                        <td class="mono dim">{{ fmt(cy.slope_early, 4) }}</td>
+                        <td class="mono dim">{{ fmt(cy.slope_late, 4) }}</td>
+                        <td class="mono flat">{{ fmt(cy.flattening, 4) }}</td>
                         <td class="mono cov">{{ cy.pre_injection_orp }}</td>
                         <td class="mono">{{ cy.orp_crash }}</td>
                       </tr>
@@ -386,6 +389,7 @@ onUnmounted(() => clearInterval(pollTimer))
 .mono { font-family: monospace; color: #cfcfcf; }
 .hl { color: #6aa583; font-weight: 700; }
 .cov { color: #c8a06a; font-weight: 700; }
+.flat { color: #9b8ad4; font-weight: 700; }
 .dim { color: #666; }
 .empty { color: #555; padding: 2rem; }
 .badge { font-size: 0.7rem; padding: 2px 8px; border: 1px solid; border-radius: 10px; }

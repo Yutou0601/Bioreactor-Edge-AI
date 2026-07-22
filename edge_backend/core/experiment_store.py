@@ -105,6 +105,21 @@ def compute_cycles(run: dict) -> list:
         crash_end = min(a + ORP_CRASH_WINDOW_MIN, b)
         orp_crash = min(orp[a:crash_end]) if crash_end > a else orp[a]
 
+        # 週期內斜率平緩化（洪博：產甲烷→CH4 稀釋 CO2→溶解變慢→斜率平緩）。
+        # 分早段/晚段各自的下降速率；flattening = 早 − 晚，>0 代表減速（曲線先陡後平）。
+        # 注意：平緩化同時可能來自物理溶解趨近飽和，需搭配 pre_injection_orp 共變數
+        # 才能判斷是生物還是物理造成，單看此值不能分離（見證據鏈文件）。
+        slope_early = slope_late = flattening = None
+        mid = (a + b) // 2
+        if mid - a >= 2 and b - mid >= 2:
+            t_mid = _parse(recs[mid]["timestamp"])
+            hr_e = (t_mid - t0).total_seconds() / 3600.0
+            hr_l = (t1 - t_mid).total_seconds() / 3600.0
+            if hr_e > 0 and hr_l > 0:
+                slope_early = round((p[a] - p[mid]) / hr_e, 5)
+                slope_late = round((p[mid] - p[b - 1]) / hr_l, 5)
+                flattening = round(slope_early - slope_late, 5)
+
         cycles.append({
             "cycle":               k + 1,
             "start":               seg[0]["timestamp"][:16],
@@ -113,6 +128,9 @@ def compute_cycles(run: dict) -> list:
             "pressure_start":      round(p0, 3),
             "pressure_end":        round(p1, 3),
             "drop_rate":           round((p0 - p1) / hours, 5) if hours > 0 else None,
+            "slope_early":         slope_early,   # 早段下降速率
+            "slope_late":          slope_late,    # 晚段下降速率
+            "flattening":          flattening,    # 早−晚，>0=平緩化（疑似產甲烷）
             "pre_injection_orp":   round(pre_orp, 1),   # ← 菌群成熟度共變數
             "orp_crash":           round(orp_crash, 1),
             "is_refill_start":     a in refills,
