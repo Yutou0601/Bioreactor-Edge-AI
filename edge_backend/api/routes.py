@@ -10,7 +10,7 @@ from core.signal_processor import ORPSignalProcessor
 from core.feature_extractor import ORPFeatureExtractor
 from data_pipeline.loader import _detect_schema, read_btp_daily
 from api.schemas import (PressurePredictionResponse, SensorDataPayload, SensorRecord,
-                         ExperimentRunCreate, ExperimentRunUpdate)
+                         ExperimentRunCreate, ExperimentRunUpdate, ExperimentStartPayload)
 from core import experiment_store as exp
 from core import experiment_report as exp_report
 
@@ -463,12 +463,14 @@ def list_experiment_runs():
 
 @router.post("/experiment/runs")
 def create_experiment_run(payload: ExperimentRunCreate):
-    """開始一個新批次（記錄起始時間，status=running）。"""
+    """新增一個批次（status=planned，可帶基準值與排定開始時間）。"""
     try:
         return exp.add_run(
-            run_id=payload.run_id, n_minutes=payload.n_minutes,
-            gas_ratio=payload.gas_ratio, intake_pressure=payload.intake_pressure,
-            vent_pressure=payload.vent_pressure, note=payload.note or "",
+            run_id=payload.run_id, n_minutes=payload.n_minutes, gas_ratio=payload.gas_ratio,
+            intake_lower=payload.intake_lower, intake_upper=payload.intake_upper,
+            baseline_ch4=payload.baseline_ch4, baseline_co2=payload.baseline_co2,
+            baseline_pressure=payload.baseline_pressure, target_hours=payload.target_hours,
+            scheduled_start=payload.scheduled_start, note=payload.note or "",
         )
     except ValueError as e:
         raise HTTPException(status_code=409, detail=str(e))
@@ -476,30 +478,39 @@ def create_experiment_run(payload: ExperimentRunCreate):
 
 @router.post("/experiment/plan")
 def create_experiment_plan(payload: dict = None):
-    """一鍵建立標準批次計畫（3 水準 × 3 重複 = 9 批次，編號 1.1~3.3）。
-    body 可帶 n_levels（預設 [1,5,10]）、repeats（預設 3）、vent_pressure（預設 1.0）。"""
+    """一鍵建立標準批次計畫。依 2026-07-22 協定，每個 n 水準＝一個 48hr 實驗，
+    預設 3 水準（n=1/5/10），故建立 3 個批次（編號 1/2/3）。
+    body 可帶 n_levels（預設 [1,5,10]）、baseline_ch4/co2/pressure、intake_lower/upper。"""
     payload = payload or {}
     n_levels = payload.get("n_levels", [1, 5, 10])
-    repeats = int(payload.get("repeats", 3))
-    vent = float(payload.get("vent_pressure", 1.0))
-    intake = float(payload.get("intake_pressure", 1.2))
+    kw = {k: payload[k] for k in
+          ("baseline_ch4", "baseline_co2", "baseline_pressure",
+           "intake_lower", "intake_upper", "target_hours") if k in payload}
     created, skipped = [], []
     for bi, n in enumerate(n_levels, 1):
-        for rep in range(1, repeats + 1):
-            rid = f"{bi}.{rep}"
-            try:
-                exp.add_run(rid, n_minutes=n, intake_pressure=intake, vent_pressure=vent)
-                created.append(rid)
-            except ValueError:
-                skipped.append(rid)
+        rid = str(bi)
+        try:
+            exp.add_run(rid, n_minutes=n, **kw)
+            created.append(rid)
+        except ValueError:
+            skipped.append(rid)
     return {"created": created, "skipped": skipped, "runs": exp.list_runs()}
 
 
 @router.post("/experiment/runs/{run_id}/start")
-def start_experiment_run(run_id: str):
-    """開始進氣：記錄起始時間，之後的訊號歸入本批次。"""
+def start_experiment_run(run_id: str, payload: ExperimentStartPayload = None):
+    """開始進氣：記錄起始時間（可指定時刻），之後的訊號歸入本批次。"""
     try:
-        return exp.start_run(run_id)
+        return exp.start_run(run_id, at=(payload.at if payload else None))
+    except KeyError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+
+
+@router.get("/experiment/runs/{run_id}/cycles")
+def experiment_run_cycles(run_id: str):
+    """單一批次的每循環特徵表（含進氣前 ORP 共變數）。"""
+    try:
+        return exp.get_cycles(run_id)
     except KeyError as e:
         raise HTTPException(status_code=404, detail=str(e))
 

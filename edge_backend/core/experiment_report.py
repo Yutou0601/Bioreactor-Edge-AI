@@ -11,28 +11,35 @@
 import csv
 import io
 
-# 報表欄位（對應洪博 2026-07-17 批次表）
+# 報表欄位（對應 2026-07-22 定案協定）。前 6 欄＝設定條件，其餘＝量測結果。
 COLUMNS = [
-    ("run_id",             "批次實驗"),
-    ("gas_ratio",          "氣體比例(H2:CO2)"),
-    ("intake_pressure",    "進氣至壓力(kg/cm²)"),
-    ("n_minutes",          "循環時間(每時幾分)"),
-    ("vent_pressure",      "排氣至壓力(kg/cm²)"),
-    ("total_hours",        "總時間(hrs)"),
-    ("pressure_drop_rate", "下降壓力速率(kg/cm²/hr)"),
-    ("vent_ph",            "pH"),
-    ("vent_orp",           "ORP(mV)"),
-    ("vent_ch4_peak_ref",  "CH4%(排氣峰值·參考)"),
-    ("status",             "狀態"),
+    ("run_id",            "批次實驗"),
+    ("gas_ratio",         "氣體比例(H2:CO2)"),
+    ("n_minutes",         "循環時間(每時幾分)"),
+    ("intake_band",       "自動補氣(下限→上限)"),
+    ("baseline",          "基準(CH4%/CO2%/壓力)"),
+    ("target_hours",      "預計時長(hr)"),
+    ("total_hours",       "實際總時間(hr)"),
+    ("n_cycles",          "補氣循環數"),
+    ("drop_rate_median",  "下降速率中位數(kg/cm²/hr)"),
+    ("culture_drift",     "進氣前ORP漂移(末-首)"),
+    ("vent_ph",           "排氣pH"),
+    ("vent_orp",          "排氣ORP(mV)"),
+    ("vent_ch4_peak_ref", "CH4%(排氣峰值·參考)"),
+    ("status",            "狀態"),
 ]
+SETTING_COLS = 6   # 前幾欄為設定條件（灰底），其餘為量測結果（綠底）
 
 
 def _flatten(run: dict) -> dict:
-    """把 run + run['results'] 攤平成單層 dict，方便取欄位。"""
+    """把 run + run['results'] 攤平成單層 dict，並組合衍生欄位。"""
     flat = {k: v for k, v in run.items() if k != "results"}
     flat.update(run.get("results", {}))
-    # 狀態中文化
-    flat["status"] = {"running": "進行中", "done": "已完成"}.get(flat.get("status"), flat.get("status", ""))
+    flat["status"] = {"planned": "已規劃", "running": "進行中", "done": "已完成"}.get(
+        flat.get("status"), flat.get("status", ""))
+    # 衍生欄位
+    flat["intake_band"] = f"{run.get('intake_lower')}→{run.get('intake_upper')}"
+    flat["baseline"] = f"{run.get('baseline_ch4')}/{run.get('baseline_co2')}/{run.get('baseline_pressure')}"
     return flat
 
 
@@ -82,7 +89,7 @@ def to_xlsx_bytes(runs: list) -> bytes:
     for j, (_, zh) in enumerate(COLUMNS, 1):
         c = ws.cell(hr, j, zh)
         c.font = HFONT
-        c.fill = GREY if j <= 5 else GREEN   # 前5欄=設定條件(灰), 其餘=量測結果(綠)
+        c.fill = GREY if j <= SETTING_COLS else GREEN   # 前 N 欄=設定條件(灰), 其餘=量測結果(綠)
         c.alignment = CEN
         c.border = BORDER
 
@@ -94,13 +101,14 @@ def to_xlsx_bytes(runs: list) -> bytes:
             c.alignment = CEN
             c.border = BORDER
 
-    widths = [10, 14, 13, 13, 13, 11, 16, 8, 10, 15, 9]
+    widths = [10, 13, 13, 16, 18, 11, 12, 10, 18, 16, 9, 11, 15, 9]
     for j, w in enumerate(widths, 1):
         ws.column_dimensions[get_column_letter(j)].width = w
-    ws.row_dimensions[hr].height = 34
+    ws.row_dimensions[hr].height = 40
 
     note_row = hr + 1 + len(runs) + 1
     ws.cell(note_row, 1, "※ 灰底＝設定條件，綠底＝量測結果（由感測訊號自動計算）。"
+            "「進氣前ORP漂移」為菌群成熟度共變數，用於分析時扣除菌群漂移。"
             "CH4% 僅取排氣峰值當參考，不作為證據。").font = NOTE
     ws.merge_cells(start_row=note_row, start_column=1, end_row=note_row, end_column=len(COLUMNS))
 

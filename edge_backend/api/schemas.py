@@ -34,20 +34,34 @@ class SensorRecord(BaseModel):
 
 # ── 實驗批次 ─────────────────────────────────────────
 class ExperimentRunCreate(BaseModel):
-    run_id:          str                      # 批次編號，如 "1.1"
-    n_minutes:       float                    # 循環時間（每時幾分）— 控制因子
-    gas_ratio:       Optional[str]   = "4:1"
-    intake_pressure: Optional[float] = 1.2    # 進氣至壓力 kg/cm²
-    vent_pressure:   Optional[float] = 1.0    # 排氣至壓力 kg/cm²
-    note:            Optional[str]   = ""
+    run_id:            str                      # 批次編號，如 "1.1"
+    n_minutes:         float                    # 循環時間（每時幾分）— 控制因子
+    gas_ratio:         Optional[str]   = "4:1"
+    intake_lower:      Optional[float] = 0.90   # 自動補氣下限 kg/cm²
+    intake_upper:      Optional[float] = 1.185  # 自動補氣上限 kg/cm²
+    baseline_ch4:      Optional[float] = 9.0    # 基準 CH4 %
+    baseline_co2:      Optional[float] = 21.0   # 基準 CO2 %
+    baseline_pressure: Optional[float] = 1.185  # 基準壓力 kg/cm²
+    target_hours:      Optional[float] = 48.0   # 預計實驗時長 hr
+    scheduled_start:   Optional[str]   = None   # 排定開始時間 YYYY-MM-DD HH:MM:SS
+    note:              Optional[str]   = ""
 
 
 class ExperimentRunUpdate(BaseModel):
-    n_minutes:       Optional[float] = None
-    gas_ratio:       Optional[str]   = None
-    intake_pressure: Optional[float] = None
-    vent_pressure:   Optional[float] = None
-    start_time:      Optional[str]   = None
-    end_time:        Optional[str]   = None
-    status:          Optional[str]   = None
-    note:            Optional[str]   = None
+    n_minutes:         Optional[float] = None
+    gas_ratio:         Optional[str]   = None
+    intake_lower:      Optional[float] = None
+    intake_upper:      Optional[float] = None
+    baseline_ch4:      Optional[float] = None
+    baseline_co2:      Optional[float] = None
+    baseline_pressure: Optional[float] = None
+    target_hours:      Optional[float] = None
+    scheduled_start:   Optional[str]   = None
+    start_time:        Optional[str]   = None
+    end_time:          Optional[str]   = None
+    status:            Optional[str]   = None
+    note:              Optional[str]   = None
+
+
+class ExperimentStartPayload(BaseModel):
+    at: Optional[str] = None                    # 指定開始時間；未填用排程或當下

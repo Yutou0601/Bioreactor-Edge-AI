@@ -2,14 +2,22 @@
 實驗批次資料倉儲
 ================
 在既有的逐分鐘 sensor_records 之上，加一層「批次（實驗 run）」的概念。
-每個批次標記一段時間窗（進氣→排氣），量測結果由該時間窗內的感測訊號自動計算。
+每個批次＝一個 n 水準的實驗（約 48hr），期間反應槽自動補氣數次，量測結果由
+批次時間窗內的感測訊號自動計算。
 
-設計對應 2026-07-17 與洪博定案的實驗：
-    進氣至 1.2 → 每小時循環 n 分鐘（1/5/10）→ 排氣至 1.0 → 重複
-    3 水準 × 3 重複 = 9 批次（編號 1.1 / 1.2 / 1.3 …）
+設計對應 2026-07-22 與洪博定案的實驗協定：
+    洗管線到基準（CH4 9% / CO2 21% / 壓力 1.185）→ 進氣至 1.185（上限 1.20）
+    → 每小時循環 n 分鐘（第1-2天 n=1、第3-4天 n=5、第5-6天 n=10）
+    → 壓力自動掉到下限 0.90 時自動補氣（約 20hr 一次、48hr 內約 3 次）
+    → 48hr 後排氣、洗管線回基準，換下一個 n。
 
-**只用可信訊號計算量測結果**（反應槽壓力 / ORP / pH）。CO2/CH4 只在排氣峰值取一個
-「參考值」，不參與任何速率或統計計算（依 2026-07-16 確認：拖尾無效、峰值僅供參考）。
+**已知混淆（重要）**：n 與「時間／菌群成熟度」共線——n=1/5/10 分別在不同天，
+而菌群這 6 天持續成熟、成熟度會主導壓力下降速率（見證據鏈文件）。洗管線只重置
+氣相、不重置生物。**因此系統會自動記錄每次補氣「進氣前的 ORP」當菌群成熟度的
+代理共變數**（進氣前 ORP＝上一循環末、H2 耗盡、ORP 已恢復的高點），事後分析時
+可用它把菌群漂移從 n 效應中扣除。見 compute_cycles() 的 pre_injection_orp。
+
+**只用可信訊號計算**（反應槽壓力 / ORP / pH）。CO2/CH4 只在排氣峰值取參考值。
 """
 
 from datetime import datetime
@@ -17,24 +25,25 @@ from typing import List, Optional
 
 from core.data_store import sensor_records
 
-# 每批次以 dict 儲存，欄位見 add_run()
 experiment_runs: List[dict] = []
 
-# 歷史資料換算的中位下降速率（kg/cm²/hr），用於「running 批次」預估排氣剩餘時間。
-# 來源：docs/循環時間與排氣壓力設計說明_2026-07-17.md
-DEFAULT_DROP_RATE = 0.0146
-
-# 排氣峰值取樣：排氣時刻往前幾分鐘內取 CH4 最大值當參考峰值
-VENT_PEAK_WINDOW_MIN = 5
+DEFAULT_DROP_RATE = 0.0146       # 歷史中位下降速率 kg/cm²/hr，資料不足時的預估用
+REFILL_JUMP = 0.05               # 反應槽壓力單步跳升超過此值＝一次自動補氣
+VENT_PEAK_WINDOW_MIN = 5         # 排氣峰值：末段幾分鐘取 CH4 最大值當參考
+ORP_CRASH_WINDOW_MIN = 40        # 進氣後幾分鐘內找 ORP 崩落最低點
 
 
 def _now() -> str:
     return datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
 
+def _parse(ts: str) -> datetime:
+    return datetime.strptime(ts, "%Y-%m-%d %H:%M:%S")
+
+
 def _records_between(start: Optional[str], end: Optional[str]) -> list:
-    """取出 [start, end] 時間窗內的感測記錄（timestamp 為固定格式字串，可字典序比較）。
-    start 為 None（尚未開始）時回傳空；end 為 None（進行中）時取到目前最新一筆。"""
+    """取出 [start, end] 時間窗內的感測記錄。start 為 None（未開始）回傳空；
+    end 為 None（進行中）取到目前最新一筆。"""
     if not start:
         return []
     end = end or "9999-99-99 99:99:99"
@@ -43,38 +52,90 @@ def _records_between(start: Optional[str], end: Optional[str]) -> list:
     return sorted(recs, key=lambda r: r["timestamp"])
 
 
+# ── 每循環（補氣週期）分析 ──────────────────────────────
+def compute_cycles(run: dict) -> list:
+    """把批次時間窗切成「相鄰兩次自動補氣之間」的循環週期，每週期算：
+    下降壓力速率、進氣前 ORP（菌群成熟度共變數）、ORP 崩落深度。
+    這是給模型用的每循環特徵表。"""
+    recs = _records_between(run["start_time"], run.get("end_time"))
+    if len(recs) < 2:
+        return []
+
+    p = [float(r.get("pressure") or 0.0) for r in recs]
+    orp = [float(r.get("orp") or 0.0) for r in recs]
+
+    # 補氣事件＝壓力單步跳升。每次補氣後是一個「高壓起點」，之後壓力下降到下次補氣前。
+    # 一個循環週期＝從補氣後高點 → 下次補氣前的低點（只取下降段，不含下次跳升）。
+    refills = [i for i in range(1, len(recs)) if p[i] - p[i - 1] > REFILL_JUMP]
+    starts = [0] + refills               # 每個都是進氣後的高壓起點（含實驗最初的進氣）
+
+    cycles = []
+    for k, a in enumerate(starts):
+        b = starts[k + 1] if k + 1 < len(starts) else len(recs)   # 下次進氣（不含）或資料末端
+        seg = recs[a:b]
+        if len(seg) < 3:
+            continue
+        t0, t1 = _parse(seg[0]["timestamp"]), _parse(seg[-1]["timestamp"])
+        hours = (t1 - t0).total_seconds() / 3600.0
+        p0, p1 = p[a], p[b - 1]          # 進氣後高點 → 下次進氣前低點
+
+        # 進氣前 ORP：本週期進氣「之前」那一筆（上一循環末、H2 已耗盡、ORP 已恢復的高點）
+        # ＝菌群成熟度代理共變數。第一個週期（實驗最初進氣）沒有「之前」，取起點值。
+        pre_orp = orp[a - 1] if a > 0 else orp[a]
+        crash_end = min(a + ORP_CRASH_WINDOW_MIN, b)
+        orp_crash = min(orp[a:crash_end]) if crash_end > a else orp[a]
+
+        cycles.append({
+            "cycle":               k + 1,
+            "start":               seg[0]["timestamp"][:16],
+            "end":                 seg[-1]["timestamp"][:16],
+            "duration_hr":         round(hours, 2),
+            "pressure_start":      round(p0, 3),
+            "pressure_end":        round(p1, 3),
+            "drop_rate":           round((p0 - p1) / hours, 5) if hours > 0 else None,
+            "pre_injection_orp":   round(pre_orp, 1),   # ← 菌群成熟度共變數
+            "orp_crash":           round(orp_crash, 1),
+            "is_refill_start":     a in refills,
+        })
+    return cycles
+
+
 def compute_results(run: dict) -> dict:
-    """由批次時間窗內的感測訊號自動計算量測結果。核心量化指標＝下降壓力速率。"""
+    """批次的彙整量測結果（跨所有循環週期）。核心量化指標＝各週期下降速率的中位數。"""
     recs = _records_between(run["start_time"], run.get("end_time"))
     out = {
-        "n_points":           len(recs),
-        "total_hours":        None,
-        "pressure_start":     None,
-        "pressure_end":       None,
-        "pressure_drop_rate": None,   # kg/cm²/hr —— 主要量化指標
-        "vent_ph":            None,
-        "vent_orp":           None,
-        "vent_ch4_peak_ref":  None,   # 僅供參考，不得作為證據
+        "n_points":            len(recs),
+        "total_hours":         None,
+        "n_cycles":            0,
+        "drop_rate_median":    None,   # 各週期下降速率中位數 —— 主要量化指標
+        "pre_orp_first":       None,   # 第一次補氣前 ORP
+        "pre_orp_last":        None,   # 最後一次補氣前 ORP
+        "culture_drift":       None,   # 進氣前 ORP 隨週期的漂移（末-首），監測菌群成熟
+        "vent_ph":             None,
+        "vent_orp":            None,
+        "vent_ch4_peak_ref":   None,
     }
     if len(recs) < 2:
         return out
 
     first, last = recs[0], recs[-1]
-    t0 = datetime.strptime(first["timestamp"], "%Y-%m-%d %H:%M:%S")
-    t1 = datetime.strptime(last["timestamp"], "%Y-%m-%d %H:%M:%S")
-    hours = (t1 - t0).total_seconds() / 3600.0
-    p0 = float(first.get("pressure") or 0.0)
-    p1 = float(last.get("pressure") or 0.0)
-
+    hours = (_parse(last["timestamp"]) - _parse(first["timestamp"])).total_seconds() / 3600.0
     out["total_hours"] = round(hours, 2)
-    out["pressure_start"] = round(p0, 3)
-    out["pressure_end"] = round(p1, 3)
-    if hours > 0:
-        out["pressure_drop_rate"] = round((p0 - p1) / hours, 5)
+
+    cycles = compute_cycles(run)
+    out["n_cycles"] = len(cycles)
+    rates = [c["drop_rate"] for c in cycles if c["drop_rate"] is not None]
+    if rates:
+        rates_sorted = sorted(rates)
+        out["drop_rate_median"] = round(rates_sorted[len(rates_sorted) // 2], 5)
+    pre_orps = [c["pre_injection_orp"] for c in cycles if c.get("is_refill_start")]
+    if pre_orps:
+        out["pre_orp_first"] = pre_orps[0]
+        out["pre_orp_last"] = pre_orps[-1]
+        out["culture_drift"] = round(pre_orps[-1] - pre_orps[0], 1)
+
     out["vent_ph"] = round(float(last.get("ph") or 0.0), 2)
     out["vent_orp"] = round(float(last.get("orp") or 0.0), 1)
-
-    # CH4 排氣峰值（僅參考）：末段 VENT_PEAK_WINDOW_MIN 分鐘內的最大值
     tail = recs[-VENT_PEAK_WINDOW_MIN:] if len(recs) >= VENT_PEAK_WINDOW_MIN else recs
     ch4_vals = [float(r.get("ch4_pct") or 0.0) for r in tail]
     if ch4_vals:
@@ -83,58 +144,66 @@ def compute_results(run: dict) -> dict:
 
 
 def _with_results(run: dict) -> dict:
-    """回傳批次 dict（含即時計算的量測結果）。"""
     r = dict(run)
     r["results"] = compute_results(run)
     return r
 
 
+# ── 批次生命週期 ────────────────────────────────────
 def add_run(run_id: str, n_minutes: float, gas_ratio: str = "4:1",
-            intake_pressure: float = 1.2, vent_pressure: float = 1.0,
-            note: str = "") -> dict:
-    """新增一個批次（status=planned，尚未開始）。run_id 不可重複。
-    9 個批次通常一次規劃好、之後分天依序執行，故新增時不記起始時間。"""
+            intake_lower: float = 0.90, intake_upper: float = 1.185,
+            baseline_ch4: float = 9.0, baseline_co2: float = 21.0,
+            baseline_pressure: float = 1.185, target_hours: float = 48.0,
+            scheduled_start: Optional[str] = None, note: str = "") -> dict:
+    """新增一個批次（status=planned）。run_id 不可重複。
+    scheduled_start 可預先排定開始時間；未填則由 start_run 時記為當下。"""
     if any(r["run_id"] == run_id for r in experiment_runs):
         raise ValueError(f"批次 {run_id} 已存在")
     run = {
-        "run_id":          run_id,
-        "n_minutes":       n_minutes,
-        "gas_ratio":       gas_ratio,
-        "intake_pressure": intake_pressure,
-        "vent_pressure":   vent_pressure,
-        "start_time":      None,
-        "end_time":        None,
-        "status":          "planned",
-        "note":            note,
+        "run_id":            run_id,
+        "n_minutes":         n_minutes,
+        "gas_ratio":         gas_ratio,
+        "intake_lower":      intake_lower,
+        "intake_upper":      intake_upper,
+        "baseline_ch4":      baseline_ch4,
+        "baseline_co2":      baseline_co2,
+        "baseline_pressure": baseline_pressure,
+        "target_hours":      target_hours,
+        "scheduled_start":   scheduled_start,
+        "start_time":        None,
+        "end_time":          None,
+        "status":            "planned",
+        "note":              note,
     }
     experiment_runs.append(run)
     return _with_results(run)
 
 
-def start_run(run_id: str) -> dict:
-    """開始進氣：記錄起始時間、status=running。此後這段時間窗的訊號即歸入本批次。"""
+def start_run(run_id: str, at: Optional[str] = None) -> dict:
+    """開始實驗（記錄起始時間）。at 可指定特定時間（如排定的開始時刻），
+    未填則用排程時間 scheduled_start，再退回當下。"""
     run = _find(run_id)
-    run["start_time"] = _now()
+    run["start_time"] = at or run.get("scheduled_start") or _now()
     run["end_time"] = None
     run["status"] = "running"
     return _with_results(run)
 
 
-def vent_run(run_id: str) -> dict:
-    """標記批次排氣（設定 end_time、status=done），量測結果隨即由時間窗計算。"""
+def vent_run(run_id: str, at: Optional[str] = None) -> dict:
+    """標記實驗結束排氣（設定 end_time、status=done）。"""
     run = _find(run_id)
     if not run.get("start_time"):
         raise ValueError(f"批次 {run_id} 尚未開始，無法排氣")
-    run["end_time"] = _now()
+    run["end_time"] = at or _now()
     run["status"] = "done"
     return _with_results(run)
 
 
 def update_run(run_id: str, fields: dict) -> dict:
-    """修改批次設定或手動填入的欄位（例如手動修正起訖時間）。"""
     run = _find(run_id)
-    allowed = {"n_minutes", "gas_ratio", "intake_pressure", "vent_pressure",
-               "start_time", "end_time", "status", "note"}
+    allowed = {"n_minutes", "gas_ratio", "intake_lower", "intake_upper",
+               "baseline_ch4", "baseline_co2", "baseline_pressure", "target_hours",
+               "scheduled_start", "start_time", "end_time", "status", "note"}
     for k, v in fields.items():
         if k in allowed and v is not None:
             run[k] = v
@@ -148,12 +217,17 @@ def delete_run(run_id: str) -> dict:
 
 
 def list_runs() -> list:
-    """所有批次（含量測結果），依 run_id 排序。"""
     return [_with_results(r) for r in sorted(experiment_runs, key=lambda r: _run_sort_key(r["run_id"]))]
 
 
+def get_cycles(run_id: str) -> dict:
+    """單一批次的每循環特徵表。"""
+    run = _find(run_id)
+    return {"run_id": run_id, "n_minutes": run["n_minutes"], "cycles": compute_cycles(run)}
+
+
 def get_live_status(run_id: str) -> dict:
-    """進行中批次的即時狀態：目前壓力、距排氣目標還差多少、預估剩餘時間。"""
+    """進行中批次的即時狀態：目前壓力、距下次自動補氣（下限）、本實驗已跑/剩餘時間。"""
     run = _find(run_id)
     recs = _records_between(run["start_time"], run.get("end_time"))
     if not recs:
@@ -161,28 +235,32 @@ def get_live_status(run_id: str) -> dict:
 
     last = recs[-1]
     cur_p = float(last.get("pressure") or 0.0)
-    target = float(run["vent_pressure"])
+    lower = float(run["intake_lower"])
 
-    # 即時下降速率：用本批次目前資料估；不足則用歷史中位速率
     live_rate = None
     if len(recs) >= 30:
-        res = compute_results(run)
-        live_rate = res.get("pressure_drop_rate")
+        cyc = compute_cycles(run)
+        rates = [c["drop_rate"] for c in cyc if c["drop_rate"]]
+        if rates:
+            live_rate = rates[-1]
     rate = live_rate if (live_rate and live_rate > 0) else DEFAULT_DROP_RATE
 
-    remaining = cur_p - target
-    eta_hours = round(remaining / rate, 1) if rate > 0 and remaining > 0 else 0.0
+    remaining = cur_p - lower
+    eta_refill = round(remaining / rate, 1) if rate > 0 and remaining > 0 else 0.0
+    elapsed = (_parse(last["timestamp"]) - _parse(run["start_time"])).total_seconds() / 3600.0
     return {
-        "run_id":         run_id,
-        "status":         run["status"],
-        "current_pressure": round(cur_p, 3),
-        "vent_target":    target,
-        "remaining_kg":   round(remaining, 3),
-        "rate_used":      round(rate, 5),
-        "rate_is_live":   bool(live_rate and live_rate > 0),
-        "eta_hours":      eta_hours,
-        "reached_target": remaining <= 0,
-        "n_points":       len(recs),
+        "run_id":            run_id,
+        "status":            run["status"],
+        "current_pressure":  round(cur_p, 3),
+        "current_orp":       round(float(last.get("orp") or 0.0), 1),
+        "intake_lower":      lower,
+        "remaining_kg":      round(remaining, 3),
+        "rate_used":         round(rate, 5),
+        "rate_is_live":      bool(live_rate and live_rate > 0),
+        "eta_refill_hours":  eta_refill,
+        "elapsed_hours":     round(elapsed, 1),
+        "target_hours":      run.get("target_hours"),
+        "n_cycles_so_far":   len(compute_cycles(run)),
     }
 
 
@@ -195,10 +273,8 @@ def _find(run_id: str) -> dict:
 
 
 def _run_sort_key(run_id: str):
-    """讓 "1.1" < "1.2" < "2.1" < "10.1" 正確排序。"""
     try:
-        parts = run_id.split(".")
-        return tuple(int(p) for p in parts)
+        return tuple(int(p) for p in run_id.split("."))
     except (ValueError, AttributeError):
         return (float("inf"), run_id)
 
