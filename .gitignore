@@ -35,3 +35,6 @@ edge_backend/generate_report.py
 node_modules/
 dist/
 .DS_Store
+
+# 實驗批次落地儲存（機器本地執行期資料，不上傳）
+edge_backend/experiment_runs.json

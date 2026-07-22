@@ -20,12 +20,18 @@
 **只用可信訊號計算**（反應槽壓力 / ORP / pH）。CO2/CH4 只在排氣峰值取參考值。
 """
 
+import json
+import os
 from datetime import datetime
 from typing import List, Optional
 
 from core.data_store import sensor_records
 
 experiment_runs: List[dict] = []
+
+# 批次設定落地儲存：只存 run 設定 + 起訖時間（量測結果由 sensor_records 重算，不落地）。
+# 重開後端會自動還原批次，配合重新匯入 sensor 資料即可恢復量測結果。
+_STORE_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "experiment_runs.json")
 
 DEFAULT_DROP_RATE = 0.0146       # 歷史中位下降速率 kg/cm²/hr，資料不足時的預估用
 REFILL_JUMP = 0.05               # 反應槽壓力單步跳升超過此值＝一次自動補氣
@@ -190,6 +196,7 @@ def add_run(run_id: str, n_minutes: float, gas_ratio: str = "4:1",
         "note":              note,
     }
     experiment_runs.append(run)
+    _save()
     return _with_results(run)
 
 
@@ -200,6 +207,7 @@ def start_run(run_id: str, at: Optional[str] = None) -> dict:
     run["start_time"] = _normalize_ts(at) or run.get("scheduled_start") or _now()
     run["end_time"] = None
     run["status"] = "running"
+    _save()
     return _with_results(run)
 
 
@@ -210,6 +218,7 @@ def vent_run(run_id: str, at: Optional[str] = None) -> dict:
         raise ValueError(f"批次 {run_id} 尚未開始，無法排氣")
     run["end_time"] = _normalize_ts(at) or _now()
     run["status"] = "done"
+    _save()
     return _with_results(run)
 
 
@@ -222,12 +231,14 @@ def update_run(run_id: str, fields: dict) -> dict:
     for k, v in fields.items():
         if k in allowed and v is not None:
             run[k] = _normalize_ts(v) if k in time_fields else v
+    _save()
     return _with_results(run)
 
 
 def delete_run(run_id: str) -> dict:
     run = _find(run_id)
     experiment_runs.remove(run)
+    _save()
     return {"status": "deleted", "run_id": run_id}
 
 
@@ -308,4 +319,34 @@ def _run_sort_key(run_id: str):
 def clear_all() -> int:
     count = len(experiment_runs)
     experiment_runs.clear()
+    _save()
     return count
+
+
+# ── 落地儲存 ──────────────────────────────────────────
+def _save() -> None:
+    """把批次設定寫入 JSON（原子寫入：先寫暫存再改名，避免中途中斷寫壞）。"""
+    try:
+        tmp = _STORE_PATH + ".tmp"
+        with open(tmp, "w", encoding="utf-8") as f:
+            json.dump(experiment_runs, f, ensure_ascii=False, indent=2)
+        os.replace(tmp, _STORE_PATH)
+    except Exception as e:
+        print(f"[experiment_store] 批次儲存失敗（不影響運作）: {e}")
+
+
+def _load() -> None:
+    """模組載入時從 JSON 還原批次（檔案不存在或損壞則從空白開始，不中斷服務）。"""
+    try:
+        if os.path.exists(_STORE_PATH):
+            with open(_STORE_PATH, encoding="utf-8") as f:
+                loaded = json.load(f)
+            if isinstance(loaded, list):
+                experiment_runs.clear()
+                experiment_runs.extend(loaded)
+                print(f"[experiment_store] 已還原 {len(loaded)} 個批次")
+    except Exception as e:
+        print(f"[experiment_store] 批次還原失敗（從空白開始）: {e}")
+
+
+_load()   # 模組載入時自動還原
