@@ -9,6 +9,8 @@ const msg = ref('')
 const liveMap = ref({})
 const expanded = ref(null)      // 展開顯示每循環明細的 run_id
 const cyclesMap = ref({})       // run_id -> cycles[]
+const editRow = ref(null)       // 正在編輯起訖時間的 run_id
+const editForm = ref({ start_time: '', end_time: '' })
 
 // 基準值（洗管線到此標準；2026-07-22 定案）
 const baseline = ref({ baseline_ch4: 9.0, baseline_co2: 21.0, baseline_pressure: 1.185 })
@@ -17,6 +19,14 @@ const baseline = ref({ baseline_ch4: 9.0, baseline_co2: 21.0, baseline_pressure:
 const newRun = ref({ run_id: '', n_minutes: 1, scheduled_start: '' })
 
 let pollTimer = null
+
+// "YYYY-MM-DD HH:MM:SS" → "YYYY-MM-DDTHH:MM"（datetime-local 顯示用）
+function toLocal(ts) { return ts ? ts.replace(' ', 'T').slice(0, 16) : '' }
+// 當下時間的 datetime-local 字串
+function nowLocal() {
+  const d = new Date(); d.setMinutes(d.getMinutes() - d.getTimezoneOffset())
+  return d.toISOString().slice(0, 16)
+}
 
 const STATUS_META = {
   planned: { label: '已規劃', color: '#7f8c8d' },
@@ -77,14 +87,41 @@ async function startRun(r) {
   await loadRuns()
 }
 
-async function ventRun(r) {
-  if (!confirm(`確定批次 ${r.run_id} 現在排氣結束？此刻起計算量測結果。`)) return
+// 排氣：開啟時間編輯列（預設當下，可人工改成實際排氣時刻或往後抓峰值）
+function openVent(r) {
+  editRow.value = r.run_id
+  editForm.value = { start_time: toLocal(r.start_time), end_time: nowLocal(), _vent: true }
+}
+async function confirmVent(r) {
   try {
-    await apiClient.post(`/experiment/runs/${r.run_id}/vent`)
-    flash(`批次 ${r.run_id} 已排氣，量測結果已計算`)
+    // 若同時改了起始時間，先存起來
+    if (editForm.value.start_time && editForm.value.start_time !== toLocal(r.start_time)) {
+      await apiClient.patch(`/experiment/runs/${r.run_id}`, { start_time: editForm.value.start_time })
+    }
+    await apiClient.post(`/experiment/runs/${r.run_id}/vent`, { at: editForm.value.end_time || null })
+    editRow.value = null
+    flash(`批次 ${r.run_id} 已排氣（結束時間 ${editForm.value.end_time.replace('T',' ')}），量測結果已計算`)
     await loadRuns()
   } catch (e) { flash(e.response?.data?.detail || '排氣失敗') }
 }
+
+// 編輯起訖時間（事後修正，可對齊 CSV 時間）
+function openEdit(r) {
+  editRow.value = r.run_id
+  editForm.value = { start_time: toLocal(r.start_time), end_time: toLocal(r.end_time), _vent: false }
+}
+async function saveEdit(r) {
+  try {
+    await apiClient.patch(`/experiment/runs/${r.run_id}`, {
+      start_time: editForm.value.start_time || null,
+      end_time: editForm.value.end_time || null,
+    })
+    editRow.value = null
+    flash(`批次 ${r.run_id} 時間已更新，量測結果已重算`)
+    await loadRuns()
+  } catch (e) { flash(e.response?.data?.detail || '更新失敗') }
+}
+function cancelEdit() { editRow.value = null }
 
 async function deleteRun(r) {
   if (!confirm(`刪除批次 ${r.run_id}？`)) return
@@ -174,7 +211,7 @@ onUnmounted(() => clearInterval(pollTimer))
         <option :value="5">循環 5 分</option>
         <option :value="10">循環 10 分</option>
       </select>
-      <label class="sched">排定開始
+      <label class="sched">開始時間（可填過去，抓既有資料）
         <input v-model="newRun.scheduled_start" type="datetime-local" class="inp" />
       </label>
       <button class="btn btn-ghost" @click="addRun">＋ 新增批次</button>
@@ -222,8 +259,22 @@ onUnmounted(() => clearInterval(pollTimer))
               <td class="mono">{{ fmt(r.results.vent_orp, 0) }}</td>
               <td class="ops">
                 <button v-if="r.status === 'planned'" class="op op-start" @click="startRun(r)">開始</button>
-                <button v-if="r.status === 'running'" class="op op-vent" @click="ventRun(r)">排氣</button>
+                <button v-if="r.status === 'running'" class="op op-vent" @click="openVent(r)">排氣</button>
+                <button v-if="r.status !== 'planned'" class="op op-edit" @click="openEdit(r)" title="編輯起訖時間">編輯</button>
                 <button class="op op-del" @click="deleteRun(r)">刪</button>
+              </td>
+            </tr>
+            <!-- 排氣 / 編輯時間列（人工輸入，可修改） -->
+            <tr v-if="editRow === r.run_id" class="detail-row">
+              <td colspan="13">
+                <div class="time-edit">
+                  <span class="te-title">{{ editForm._vent ? '排氣時間（可改成實際排氣時刻，往後幾分鐘可抓 CH4 峰值）' : '編輯起訖時間（可對齊 CSV）' }}</span>
+                  <label>開始 <input v-model="editForm.start_time" type="datetime-local" class="inp" /></label>
+                  <label>結束 <input v-model="editForm.end_time" type="datetime-local" class="inp" /></label>
+                  <button v-if="editForm._vent" class="btn-sm ok" @click="confirmVent(r)">確定排氣</button>
+                  <button v-else class="btn-sm ok" @click="saveEdit(r)">儲存</button>
+                  <button class="btn-sm cancel" @click="cancelEdit">取消</button>
+                </div>
               </td>
             </tr>
             <!-- 每循環明細 -->
@@ -342,8 +393,18 @@ onUnmounted(() => clearInterval(pollTimer))
   border: 1px solid #2a2a2a; background: #161616; color: #999; }
 .op-start { border-color: #2c5a7a; color: #6cb6e8; }
 .op-vent { border-color: #7a5a2c; color: #e0a860; }
+.op-edit { border-color: #3a3a3a; color: #999; }
 .op-del { border-color: #5a2c2c; color: #c07070; }
 .op:hover { filter: brightness(1.3); }
+
+/* 時間編輯列 */
+.time-edit { padding: 12px 20px; display: flex; align-items: center; gap: 14px; flex-wrap: wrap; background: #0a0f14; }
+.te-title { font-size: 0.78rem; color: #e0a860; font-weight: 600; }
+.time-edit label { font-size: 0.76rem; color: #778; display: flex; align-items: center; gap: 5px; }
+.btn-sm { font-family: inherit; font-size: 0.76rem; padding: 5px 14px; border-radius: 4px; cursor: pointer; border: 1px solid; }
+.btn-sm.ok { background: rgba(46,204,113,0.12); border-color: #2c7a4a; color: #7fe0a3; }
+.btn-sm.cancel { background: #161616; border-color: #333; color: #888; }
+.btn-sm:hover { filter: brightness(1.25); }
 
 .footnote { font-size: 0.72rem; color: #667; margin-top: 1rem; line-height: 1.7; }
 

@@ -37,6 +37,20 @@ def _now() -> str:
     return datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
 
+def _normalize_ts(ts: Optional[str]) -> Optional[str]:
+    """把外部傳入的時間字串正規化成感測器的 'YYYY-MM-DD HH:MM:SS' 格式。
+    前端 <input type=datetime-local> 送出的是 '2026-07-22T14:30'（T 分隔、無秒），
+    直接拿去跟感測器時間戳字串比較會失效（'T' > 空格），且 strptime 會失敗——
+    這會讓「指定過去時間開始」抓不到既有資料。此函式修正該問題。"""
+    if not ts:
+        return ts
+    ts = ts.strip().replace("T", " ")
+    date_time = ts.split(" ")
+    if len(date_time) == 2 and date_time[1].count(":") == 1:   # 只有 HH:MM，補上 :00
+        ts = f"{date_time[0]} {date_time[1]}:00"
+    return ts
+
+
 def _parse(ts: str) -> datetime:
     return datetime.strptime(ts, "%Y-%m-%d %H:%M:%S")
 
@@ -169,7 +183,7 @@ def add_run(run_id: str, n_minutes: float, gas_ratio: str = "4:1",
         "baseline_co2":      baseline_co2,
         "baseline_pressure": baseline_pressure,
         "target_hours":      target_hours,
-        "scheduled_start":   scheduled_start,
+        "scheduled_start":   _normalize_ts(scheduled_start),
         "start_time":        None,
         "end_time":          None,
         "status":            "planned",
@@ -183,7 +197,7 @@ def start_run(run_id: str, at: Optional[str] = None) -> dict:
     """開始實驗（記錄起始時間）。at 可指定特定時間（如排定的開始時刻），
     未填則用排程時間 scheduled_start，再退回當下。"""
     run = _find(run_id)
-    run["start_time"] = at or run.get("scheduled_start") or _now()
+    run["start_time"] = _normalize_ts(at) or run.get("scheduled_start") or _now()
     run["end_time"] = None
     run["status"] = "running"
     return _with_results(run)
@@ -194,7 +208,7 @@ def vent_run(run_id: str, at: Optional[str] = None) -> dict:
     run = _find(run_id)
     if not run.get("start_time"):
         raise ValueError(f"批次 {run_id} 尚未開始，無法排氣")
-    run["end_time"] = at or _now()
+    run["end_time"] = _normalize_ts(at) or _now()
     run["status"] = "done"
     return _with_results(run)
 
@@ -204,9 +218,10 @@ def update_run(run_id: str, fields: dict) -> dict:
     allowed = {"n_minutes", "gas_ratio", "intake_lower", "intake_upper",
                "baseline_ch4", "baseline_co2", "baseline_pressure", "target_hours",
                "scheduled_start", "start_time", "end_time", "status", "note"}
+    time_fields = {"scheduled_start", "start_time", "end_time"}
     for k, v in fields.items():
         if k in allowed and v is not None:
-            run[k] = v
+            run[k] = _normalize_ts(v) if k in time_fields else v
     return _with_results(run)
 
 
