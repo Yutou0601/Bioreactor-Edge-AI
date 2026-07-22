@@ -138,15 +138,18 @@ async function toggleCycles(r) {
   } catch { cyclesMap.value = { ...cyclesMap.value, [r.run_id]: [] } }
 }
 
-async function exportReport(f) {
+// level: 'runs'（批次彙整）或 'cycles'（每循環特徵，餵模型用）
+async function exportReport(f, level = 'runs') {
+  const path = level === 'cycles' ? '/experiment/export/cycles' : '/experiment/export'
+  const name = level === 'cycles' ? 'experiment_cycles' : 'experiment_report'
   try {
-    const resp = await apiClient.get(`/experiment/export?fmt=${f}`, { responseType: 'blob', timeout: 15000 })
+    const resp = await apiClient.get(`${path}?fmt=${f}`, { responseType: 'blob', timeout: 15000 })
     const url = URL.createObjectURL(new Blob([resp.data]))
     const a = document.createElement('a')
     a.href = url
-    a.download = `experiment_report_${new Date().toISOString().slice(0,16).replace(/[-:T]/g,'')}.${f}`
+    a.download = `${name}_${new Date().toISOString().slice(0,16).replace(/[-:T]/g,'')}.${f}`
     document.body.appendChild(a); a.click(); a.remove(); URL.revokeObjectURL(url)
-    flash(`已匯出 ${f.toUpperCase()} 報表`)
+    flash(`已匯出 ${level === 'cycles' ? '每循環' : '批次'} ${f.toUpperCase()}`)
   } catch (e) { flash('匯出失敗：' + (e.message || '')) }
 }
 
@@ -162,8 +165,16 @@ onUnmounted(() => clearInterval(pollTimer))
         <p class="subtitle">洗管線至基準 → 進氣 → 每時循環 n 分鐘 → 自動補氣 → 48hr 後排氣。量測結果自動計算。</p>
       </div>
       <div class="header-actions">
-        <button class="btn btn-ghost" @click="exportReport('xlsx')">匯出 Excel</button>
-        <button class="btn btn-ghost" @click="exportReport('csv')">匯出 CSV</button>
+        <div class="exp-group">
+          <span class="eg-label">批次彙整</span>
+          <button class="btn btn-ghost" @click="exportReport('xlsx','runs')">Excel</button>
+          <button class="btn btn-ghost" @click="exportReport('csv','runs')">CSV</button>
+        </div>
+        <div class="exp-group">
+          <span class="eg-label">每循環（餵模型）</span>
+          <button class="btn btn-ghost" @click="exportReport('xlsx','cycles')">Excel</button>
+          <button class="btn btn-ghost" @click="exportReport('csv','cycles')">CSV</button>
+        </div>
       </div>
     </header>
 
@@ -320,7 +331,10 @@ onUnmounted(() => clearInterval(pollTimer))
   padding-bottom: 1rem; margin-bottom: 1rem; border-bottom: 1px solid #1a1a1a; }
 .exp-header h1 { font-size: 1.2rem; font-weight: 700; color: #fff; margin-bottom: 3px; }
 .subtitle { font-size: 0.76rem; color: #555; }
-.header-actions { display: flex; gap: 8px; }
+.header-actions { display: flex; gap: 16px; align-items: flex-end; }
+.exp-group { display: flex; align-items: center; gap: 5px; }
+.exp-group .btn { padding: 5px 12px; }
+.eg-label { font-size: 0.68rem; color: #556; margin-right: 2px; }
 
 .btn { font-family: inherit; font-size: 0.82rem; padding: 7px 16px; border-radius: 4px;
   cursor: pointer; border: 1px solid #262626; transition: all 0.15s; }

@@ -63,6 +63,87 @@ def to_csv(runs: list) -> str:
     return buf.getvalue()
 
 
+# ── 每循環特徵表（餵模型用；每列＝一個循環週期）──────────
+CYCLE_COLUMNS = [
+    ("run_id",            "批次"),
+    ("n_minutes",         "循環時間(每時幾分)"),
+    ("cycle",             "週期序"),
+    ("start",             "起始時間"),
+    ("duration_hr",       "時長(hr)"),
+    ("pressure_start",    "壓力起"),
+    ("pressure_end",      "壓力末"),
+    ("drop_rate",         "下降速率(kg/cm²/hr)"),
+    ("pre_injection_orp", "進氣前ORP(菌群共變數)"),
+    ("orp_crash",         "ORP崩落"),
+]
+
+
+def _cycle_cell(row: dict, key: str):
+    v = row.get(key)
+    if v is None:
+        return ""
+    if key == "n_minutes":
+        return f"{v:g} 分"
+    return v
+
+
+def cycles_to_csv(cycle_rows: list) -> str:
+    buf = io.StringIO()
+    w = csv.writer(buf)
+    w.writerow([zh for _, zh in CYCLE_COLUMNS])
+    for row in cycle_rows:
+        w.writerow([_cycle_cell(row, key) for key, _ in CYCLE_COLUMNS])
+    return buf.getvalue()
+
+
+def cycles_to_xlsx_bytes(cycle_rows: list) -> bytes:
+    from openpyxl import Workbook
+    from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
+    from openpyxl.utils import get_column_letter
+
+    GREEN = PatternFill("solid", fgColor="92D050")
+    COV = PatternFill("solid", fgColor="FCE4A0")   # 共變數欄位淡黃強調
+    HFONT = Font(name="微軟正黑體", size=11, bold=True, color="000000")
+    BFONT = Font(name="微軟正黑體", size=11)
+    NOTE = Font(name="微軟正黑體", size=9, italic=True, color="595959")
+    THIN = Side(style="thin", color="000000")
+    BORDER = Border(left=THIN, right=THIN, top=THIN, bottom=THIN)
+    CEN = Alignment(horizontal="center", vertical="center", wrap_text=True)
+
+    wb = Workbook()
+    ws = wb.active
+    ws.title = "每循環特徵"
+    ws.cell(1, 1, "生物甲烷化 — 每循環特徵表（餵模型用）").font = Font(name="微軟正黑體", size=13, bold=True)
+    ws.merge_cells(start_row=1, start_column=1, end_row=1, end_column=len(CYCLE_COLUMNS))
+
+    hr = 3
+    for j, (key, zh) in enumerate(CYCLE_COLUMNS, 1):
+        c = ws.cell(hr, j, zh)
+        c.font = HFONT
+        c.fill = COV if key == "pre_injection_orp" else GREEN
+        c.alignment = CEN
+        c.border = BORDER
+    for i, row in enumerate(cycle_rows):
+        for j, (key, _) in enumerate(CYCLE_COLUMNS, 1):
+            c = ws.cell(hr + 1 + i, j, _cycle_cell(row, key))
+            c.font = BFONT
+            c.alignment = CEN
+            c.border = BORDER
+
+    for j, w in enumerate([8, 15, 8, 18, 10, 9, 9, 18, 18, 10], 1):
+        ws.column_dimensions[get_column_letter(j)].width = w
+    ws.row_dimensions[hr].height = 34
+
+    note_row = hr + 1 + len(cycle_rows) + 1
+    ws.cell(note_row, 1, "※ 每列＝一個補氣循環。下降速率為反應變數、進氣前ORP為菌群成熟度共變數、"
+            "循環時間(n)為控制因子。分析時用進氣前ORP扣除菌群漂移。").font = NOTE
+    ws.merge_cells(start_row=note_row, start_column=1, end_row=note_row, end_column=len(CYCLE_COLUMNS))
+
+    out = io.BytesIO()
+    wb.save(out)
+    return out.getvalue()
+
+
 def to_xlsx_bytes(runs: list) -> bytes:
     """輸出 .xlsx 位元組（綠底表格，比照洪博格式）。"""
     from openpyxl import Workbook

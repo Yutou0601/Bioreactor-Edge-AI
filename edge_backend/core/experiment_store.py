@@ -241,6 +241,17 @@ def get_cycles(run_id: str) -> dict:
     return {"run_id": run_id, "n_minutes": run["n_minutes"], "cycles": compute_cycles(run)}
 
 
+def all_cycles() -> list:
+    """所有批次的每循環特徵攤平成一張表（每列＝一個循環週期，含批次/n 標籤）。
+    這才是餵模型的資料：drop_rate 為反應變數、pre_injection_orp 為菌群共變數、
+    n_minutes 為控制因子。"""
+    rows = []
+    for run in sorted(experiment_runs, key=lambda r: _run_sort_key(r["run_id"])):
+        for cy in compute_cycles(run):
+            rows.append({"run_id": run["run_id"], "n_minutes": run["n_minutes"], **cy})
+    return rows
+
+
 def get_live_status(run_id: str) -> dict:
     """進行中批次的即時狀態：目前壓力、距下次自動補氣（下限）、本實驗已跑/剩餘時間。"""
     run = _find(run_id)

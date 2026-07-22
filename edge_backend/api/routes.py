@@ -570,6 +570,23 @@ def export_experiment_report(fmt: str = Query("xlsx", pattern="^(xlsx|csv)$")):
         headers={"Content-Disposition": f'attachment; filename="experiment_report_{stamp}.xlsx"'})
 
 
+@router.get("/experiment/export/cycles")
+def export_experiment_cycles(fmt: str = Query("xlsx", pattern="^(xlsx|csv)$")):
+    """匯出每循環特徵表（餵模型用，每列＝一個補氣循環，含進氣前 ORP 共變數）。"""
+    rows = exp.all_cycles()
+    stamp = time.strftime("%Y%m%d_%H%M")
+    if fmt == "csv":
+        data = ("﻿" + exp_report.cycles_to_csv(rows)).encode("utf-8")
+        return StreamingResponse(
+            io.BytesIO(data), media_type="text/csv",
+            headers={"Content-Disposition": f'attachment; filename="experiment_cycles_{stamp}.csv"'})
+    data = exp_report.cycles_to_xlsx_bytes(rows)
+    return StreamingResponse(
+        io.BytesIO(data),
+        media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        headers={"Content-Disposition": f'attachment; filename="experiment_cycles_{stamp}.xlsx"'})
+
+
 @router.post("/import_csv")
 async def import_csv(file: UploadFile = File(...)):
     """
