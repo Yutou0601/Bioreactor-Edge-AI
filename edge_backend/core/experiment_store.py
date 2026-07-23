@@ -20,9 +20,10 @@
 **只用可信訊號計算**（反應槽壓力 / ORP / pH）。CO2/CH4 只在排氣峰值取參考值。
 """
 
+import bisect
 import json
 import os
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import List, Optional
 
 from core.data_store import sensor_records
@@ -37,6 +38,8 @@ DEFAULT_DROP_RATE = 0.0146       # 歷史中位下降速率 kg/cm²/hr，資料�
 REFILL_JUMP = 0.05               # 反應槽壓力單步跳升超過此值＝一次自動補氣
 VENT_PEAK_WINDOW_MIN = 5         # 排氣峰值：末段幾分鐘取 CH4 最大值當參考
 ORP_CRASH_WINDOW_MIN = 40        # 進氣後幾分鐘內找 ORP 崩落最低點
+GAP_MINUTES = 5                  # 相鄰兩筆記錄間隔超過此值＝記錄中斷（正常為 1 筆/分）
+MIN_CYCLE_MINUTES = 20           # 短於此的片段視為切分雜訊（如多步補氣），不計為循環
 
 
 def _now() -> str:
@@ -73,55 +76,97 @@ def _records_between(start: Optional[str], end: Optional[str]) -> list:
 
 
 # ── 每循環（補氣週期）分析 ──────────────────────────────
+def _segment(recs: list):
+    """把記錄序列切成「相鄰兩次補氣／記錄中斷之間」的段落起點。
+    回傳 (p, orp, ts, refills, gaps, starts)，供 compute_cycles 與即時面板共用，
+    確保切段邏輯只有一份。切段點有兩種：
+      - 補氣：反應槽壓力單步跳升（refills）
+      - 記錄中斷：相鄰兩筆時間間隔過大（gaps）——反應器仍在跑但沒記到，不可跨越
+    切開後每一段都是「連續記錄、中間沒有補氣」的純下降段，速率才有意義。"""
+    p = [float(r.get("pressure") or 0.0) for r in recs]
+    orp = [float(r.get("orp") or 0.0) for r in recs]
+    ts = [_parse(r["timestamp"]) for r in recs]
+    refills = {i for i in range(1, len(recs)) if p[i] - p[i - 1] > REFILL_JUMP}
+    gaps = {i for i in range(1, len(recs))
+            if (ts[i] - ts[i - 1]).total_seconds() > GAP_MINUTES * 60}
+    starts = sorted({0} | refills | gaps)
+    return p, orp, ts, refills, gaps, starts
+
+
 def compute_cycles(run: dict) -> list:
     """把批次時間窗切成「相鄰兩次自動補氣之間」的循環週期，每週期算：
-    下降壓力速率、進氣前 ORP（菌群成熟度共變數）、ORP 崩落深度。
-    這是給模型用的每循環特徵表。"""
+    下降壓力速率、進氣前 ORP（菌群成熟度共變數）、ORP 崩落深度、斜率平緩化。
+    這是給模型用的每循環特徵表。
+
+    **記錄中斷處必須切段**（2026-07-22 監控電腦自動更新事件後補強）：記錄中斷
+    期間反應器仍在跑、仍會自動補氣，但那次補氣沒有被記到。若讓一個週期跨過斷點，
+    會把「斷線前的下降」和「斷線後另一次補氣的下降」黏成同一段，得到
+    偏低的下降速率與**假的斜率平緩化（看起來像產甲烷）**——正是本研究要量的訊號，
+    且匯出後從數值上看不出異常。故在斷點處一律切開，並標記資料完整性。
+    """
     recs = _records_between(run["start_time"], run.get("end_time"))
     if len(recs) < 2:
         return []
 
-    p = [float(r.get("pressure") or 0.0) for r in recs]
-    orp = [float(r.get("orp") or 0.0) for r in recs]
+    p, orp, ts, refills, gaps, starts = _segment(recs)
 
-    # 補氣事件＝壓力單步跳升。每次補氣後是一個「高壓起點」，之後壓力下降到下次補氣前。
-    # 一個循環週期＝從補氣後高點 → 下次補氣前的低點（只取下降段，不含下次跳升）。
-    refills = [i for i in range(1, len(recs)) if p[i] - p[i - 1] > REFILL_JUMP]
-    starts = [0] + refills               # 每個都是進氣後的高壓起點（含實驗最初的進氣）
+    # 第一段的起點沒有「跳升」可觀測（記錄從實驗開始才有）。若起始壓力就在基準值
+    # 附近，代表批次是從進氣當下開始記的，該段為完整循環；否則是從半途接上的殘段。
+    base_p = float(run.get("baseline_pressure") or 0.0)
+    head_complete = base_p > 0 and abs(p[0] - base_p) <= REFILL_JUMP
 
     cycles = []
     for k, a in enumerate(starts):
-        b = starts[k + 1] if k + 1 < len(starts) else len(recs)   # 下次進氣（不含）或資料末端
+        b = starts[k + 1] if k + 1 < len(starts) else len(recs)   # 下個切點（不含）或資料末端
         seg = recs[a:b]
         if len(seg) < 3:
             continue
-        t0, t1 = _parse(seg[0]["timestamp"]), _parse(seg[-1]["timestamp"])
+        t0, t1 = ts[a], ts[b - 1]
         hours = (t1 - t0).total_seconds() / 3600.0
-        p0, p1 = p[a], p[b - 1]          # 進氣後高點 → 下次進氣前低點
+        if hours * 60 < MIN_CYCLE_MINUTES:      # 過短＝切分雜訊（例如分多步完成的補氣）
+            continue
+        p0, p1 = p[a], p[b - 1]          # 段首高點 → 段末低點
+
+        # 資料完整性：起點要是「有觀測到的補氣」、終點要是「有觀測到的下次補氣」，
+        # 且兩端都不是記錄中斷造成的。中斷處的壓力跳升不算補氣——我們無從得知
+        # 那次補氣發生在斷線期間的哪個時刻，起始高點也可能已經掉了一段。
+        started_by_refill = (a in refills and a not in gaps) if a > 0 else head_complete
+        ended_by_refill = b < len(recs) and b in refills and b not in gaps
+        complete = started_by_refill and ended_by_refill
+        if complete:
+            quality = "完整"
+        elif (a in gaps) or (b < len(recs) and b in gaps):
+            quality = "記錄中斷"
+        elif b >= len(recs):
+            quality = "進行中"
+        else:
+            quality = "起點未觀測"
 
         # 進氣前 ORP：本週期進氣「之前」那一筆（上一循環末、H2 已耗盡、ORP 已恢復的高點）
-        # ＝菌群成熟度代理共變數。第一個週期（實驗最初進氣）沒有「之前」，取起點值。
-        pre_orp = orp[a - 1] if a > 0 else orp[a]
-        crash_end = min(a + ORP_CRASH_WINDOW_MIN, b)
-        orp_crash = min(orp[a:crash_end]) if crash_end > a else orp[a]
+        # ＝菌群成熟度代理共變數。段首非實際觀測到的補氣時，此值不具意義。
+        pre_orp = round(orp[a - 1], 1) if (a > 0 and started_by_refill) else None
+        crash_to = bisect.bisect_right(ts, t0 + timedelta(minutes=ORP_CRASH_WINDOW_MIN), a, b)
+        orp_crash = round(min(orp[a:crash_to]), 1) if crash_to > a else round(orp[a], 1)
 
         # 週期內斜率平緩化（洪博：產甲烷→CH4 稀釋 CO2→溶解變慢→斜率平緩）。
         # 分早段/晚段各自的下降速率；flattening = 早 − 晚，>0 代表減速（曲線先陡後平）。
+        # 以「時間中點」而非索引中點切分（記錄有缺漏時兩者不一致）。
+        # 只對完整週期計算：殘段的早/晚段不是同一件事，比較沒有意義。
         # 注意：平緩化同時可能來自物理溶解趨近飽和，需搭配 pre_injection_orp 共變數
         # 才能判斷是生物還是物理造成，單看此值不能分離（見證據鏈文件）。
         slope_early = slope_late = flattening = None
-        mid = (a + b) // 2
-        if mid - a >= 2 and b - mid >= 2:
-            t_mid = _parse(recs[mid]["timestamp"])
-            hr_e = (t_mid - t0).total_seconds() / 3600.0
-            hr_l = (t1 - t_mid).total_seconds() / 3600.0
-            if hr_e > 0 and hr_l > 0:
-                slope_early = round((p[a] - p[mid]) / hr_e, 5)
-                slope_late = round((p[mid] - p[b - 1]) / hr_l, 5)
-                flattening = round(slope_early - slope_late, 5)
+        if complete:
+            mid = bisect.bisect_left(ts, t0 + (t1 - t0) / 2, a, b)
+            if mid - a >= 2 and b - mid >= 2:
+                hr_e = (ts[mid] - t0).total_seconds() / 3600.0
+                hr_l = (t1 - ts[mid]).total_seconds() / 3600.0
+                if hr_e > 0 and hr_l > 0:
+                    slope_early = round((p[a] - p[mid]) / hr_e, 5)
+                    slope_late = round((p[mid] - p[b - 1]) / hr_l, 5)
+                    flattening = round(slope_early - slope_late, 5)
 
         cycles.append({
-            "cycle":               k + 1,
+            "cycle":               len(cycles) + 1,
             "start":               seg[0]["timestamp"][:16],
             "end":                 seg[-1]["timestamp"][:16],
             "duration_hr":         round(hours, 2),
@@ -131,9 +176,11 @@ def compute_cycles(run: dict) -> list:
             "slope_early":         slope_early,   # 早段下降速率
             "slope_late":          slope_late,    # 晚段下降速率
             "flattening":          flattening,    # 早−晚，>0=平緩化（疑似產甲烷）
-            "pre_injection_orp":   round(pre_orp, 1),   # ← 菌群成熟度共變數
-            "orp_crash":           round(orp_crash, 1),
-            "is_refill_start":     a in refills,
+            "pre_injection_orp":   pre_orp,       # ← 菌群成熟度共變數
+            "orp_crash":           orp_crash,
+            "is_refill_start":     started_by_refill,
+            "complete":            complete,      # 僅完整週期進入統計與建模
+            "quality":             quality,
         })
     return cycles
 
@@ -145,7 +192,13 @@ def compute_results(run: dict) -> dict:
         "n_points":            len(recs),
         "total_hours":         None,
         "n_cycles":            0,
-        "drop_rate_median":    None,   # 各週期下降速率中位數 —— 主要量化指標
+        "n_cycles_complete":   0,      # 完整週期數 —— 只有這些進入統計與建模
+        "n_gaps":              0,      # 記錄中斷次數
+        "gap_hours":           None,   # 記錄中斷合計時數（反應器仍在跑，只是沒記到）
+        "drop_rate_median":    None,   # 完整週期下降速率中位數 —— 主要量化指標
+        "drop_rate_iqr":       None,   # 下降速率四分位距（離散度，投稿需附）
+        "drop_rate_min":       None,
+        "drop_rate_max":       None,
         "pre_orp_first":       None,   # 第一次補氣前 ORP
         "pre_orp_last":        None,   # 最後一次補氣前 ORP
         "culture_drift":       None,   # 進氣前 ORP 隨週期的漂移（末-首），監測菌群成熟
@@ -160,17 +213,34 @@ def compute_results(run: dict) -> dict:
     hours = (_parse(last["timestamp"]) - _parse(first["timestamp"])).total_seconds() / 3600.0
     out["total_hours"] = round(hours, 2)
 
+    # 記錄中斷統計：讓「這批資料到底有多完整」在報表上是明講的，而不是要人自己發現
+    ts = [_parse(r["timestamp"]) for r in recs]
+    gaps = [(ts[i] - ts[i - 1]).total_seconds() / 3600.0 for i in range(1, len(ts))
+            if (ts[i] - ts[i - 1]).total_seconds() > GAP_MINUTES * 60]
+    out["n_gaps"] = len(gaps)
+    out["gap_hours"] = round(sum(gaps), 2) if gaps else 0.0
+
     cycles = compute_cycles(run)
     out["n_cycles"] = len(cycles)
-    rates = [c["drop_rate"] for c in cycles if c["drop_rate"] is not None]
+    done = [c for c in cycles if c.get("complete")]
+    out["n_cycles_complete"] = len(done)
+    # 只用完整週期算中位數：殘段的起點不是進氣後高點，速率會系統性偏低
+    rates = [c["drop_rate"] for c in done if c["drop_rate"] is not None]
     if rates:
-        rates_sorted = sorted(rates)
-        out["drop_rate_median"] = round(rates_sorted[len(rates_sorted) // 2], 5)
-    pre_orps = [c["pre_injection_orp"] for c in cycles if c.get("is_refill_start")]
+        out["drop_rate_median"] = round(_quantile(rates, 0.5), 5)
+        out["drop_rate_min"] = round(min(rates), 5)
+        out["drop_rate_max"] = round(max(rates), 5)
+        # IQR 需至少 2 點才有意義；單一完整循環時留 None，不要報 0 讓人以為「零散布」
+        if len(rates) >= 2:
+            out["drop_rate_iqr"] = round(_quantile(rates, 0.75) - _quantile(rates, 0.25), 5)
+    pre_orps = [c["pre_injection_orp"] for c in cycles
+                if c.get("is_refill_start") and c.get("pre_injection_orp") is not None]
     if pre_orps:
         out["pre_orp_first"] = pre_orps[0]
         out["pre_orp_last"] = pre_orps[-1]
-        out["culture_drift"] = round(pre_orps[-1] - pre_orps[0], 1)
+        # 漂移要有頭尾兩點才算得出來；只有一次補氣時留 None，不要報 0 讓人誤讀成「沒漂移」
+        if len(pre_orps) >= 2:
+            out["culture_drift"] = round(pre_orps[-1] - pre_orps[0], 1)
 
     out["vent_ph"] = round(float(last.get("ph") or 0.0), 2)
     out["vent_orp"] = round(float(last.get("orp") or 0.0), 1)
@@ -290,24 +360,60 @@ def get_live_status(run_id: str) -> dict:
 
     last = recs[-1]
     cur_p = float(last.get("pressure") or 0.0)
+    cur_orp = float(last.get("orp") or 0.0)
     lower = float(run["intake_lower"])
+    base_p = float(run.get("baseline_pressure") or 0.0)
+
+    p, orp, ts, refills, gaps, starts = _segment(recs)
+
+    # ── 記錄健康度（2026-07-22 事故後新增）：面板凍住時要能一眼看出是記錄死了 ──
+    # staleness＝最後一筆距現在多久。逾 GAP_MINUTES 代表記錄可能已中斷，前端轉紅告警。
+    # 負值＝最後一筆時間在未來，通常是記錄端與本機時鐘不同步，另行標記。
+    raw_stale = (datetime.now() - ts[-1]).total_seconds() / 60.0
+    clock_skew = raw_stale < -GAP_MINUTES
+    staleness_min = round(max(raw_stale, 0.0), 1)
+    gap_hours = round(sum((ts[i] - ts[i - 1]).total_seconds() / 3600.0 for i in gaps), 2)
+
+    # ── 本循環（最後一段）即時曲線 + 早晚段斜率，供前端小圖與平緩化觀測 ──
+    seg_a = starts[-1]
+    seg = recs[seg_a:]
+    series = _downsample([{"t": r["timestamp"][11:16], "p": round(p[seg_a + j], 3)}
+                          for j, r in enumerate(seg)], 80)
+    cyc = compute_cycles(run)
+
+    # 本循環還沒結束，compute_cycles 不會給它算平緩化（完整性未達）。但即時觀測正需要
+    # 看它「正在」變平沒有，故在此另算一份**臨時**早/晚段斜率——僅供顯示、不落地、不進建模。
+    prov_early = prov_late = prov_flat = None
+    if len(seg) >= 6:
+        t0, t1 = ts[seg_a], ts[-1]
+        mid = bisect.bisect_left(ts, t0 + (t1 - t0) / 2, seg_a, len(recs))
+        if mid - seg_a >= 2 and len(recs) - mid >= 2:
+            hr_e = (ts[mid] - t0).total_seconds() / 3600.0
+            hr_l = (t1 - ts[mid]).total_seconds() / 3600.0
+            if hr_e > 0 and hr_l > 0:
+                prov_early = round((p[seg_a] - p[mid]) / hr_e, 5)
+                prov_late = round((p[mid] - p[-1]) / hr_l, 5)
+                prov_flat = round(prov_early - prov_late, 5)
 
     live_rate = None
     if len(recs) >= 30:
-        cyc = compute_cycles(run)
-        rates = [c["drop_rate"] for c in cyc if c["drop_rate"]]
+        rates = [c["drop_rate"] for c in cyc if c.get("complete") and c["drop_rate"]]
         if rates:
             live_rate = rates[-1]
     rate = live_rate if (live_rate and live_rate > 0) else DEFAULT_DROP_RATE
 
+    # 進氣前 ORP 參考值：本批次最近一個「有觀測到補氣」的循環之共變數
+    pre_orps = [c["pre_injection_orp"] for c in cyc
+                if c.get("is_refill_start") and c.get("pre_injection_orp") is not None]
+
     remaining = cur_p - lower
     eta_refill = round(remaining / rate, 1) if rate > 0 and remaining > 0 else 0.0
-    elapsed = (_parse(last["timestamp"]) - _parse(run["start_time"])).total_seconds() / 3600.0
+    elapsed = (ts[-1] - _parse(run["start_time"])).total_seconds() / 3600.0
     return {
         "run_id":            run_id,
         "status":            run["status"],
         "current_pressure":  round(cur_p, 3),
-        "current_orp":       round(float(last.get("orp") or 0.0), 1),
+        "current_orp":       round(cur_orp, 1),
         "intake_lower":      lower,
         "remaining_kg":      round(remaining, 3),
         "rate_used":         round(rate, 5),
@@ -315,7 +421,25 @@ def get_live_status(run_id: str) -> dict:
         "eta_refill_hours":  eta_refill,
         "elapsed_hours":     round(elapsed, 1),
         "target_hours":      run.get("target_hours"),
-        "n_cycles_so_far":   len(compute_cycles(run)),
+        "n_cycles_so_far":   len(cyc),
+        # ── 記錄健康度 ──
+        "last_timestamp":    last["timestamp"],
+        "staleness_min":     staleness_min,
+        "stale":             staleness_min > GAP_MINUTES,
+        "clock_skew":        clock_skew,
+        "n_gaps":            len(gaps),
+        "gap_hours":         gap_hours,
+        # ── 基準對照（只顯示，不建議調整閾值）──
+        "baseline_pressure": round(base_p, 3) if base_p else None,
+        "pressure_vs_base":  round(cur_p - base_p, 3) if base_p else None,
+        "pre_injection_orp": pre_orps[-1] if pre_orps else None,
+        "orp_vs_pre":        round(cur_orp - pre_orps[-1], 1) if pre_orps else None,
+        # ── 本循環即時觀測（臨時值，循環未結束前僅供觀測，不進建模）──
+        "cycle_series":      series,
+        "cycle_slope_early": prov_early,
+        "cycle_slope_late":  prov_late,
+        "cycle_flattening":  prov_flat,
+        "cycle_provisional": True,
     }
 
 
@@ -332,6 +456,28 @@ def _run_sort_key(run_id: str):
         return tuple(int(p) for p in run_id.split("."))
     except (ValueError, AttributeError):
         return (float("inf"), run_id)
+
+
+def _downsample(seq: list, n: int) -> list:
+    """把序列均勻抽稀到最多 n 點（保留首末），控制即時面板傳輸量。"""
+    if len(seq) <= n:
+        return seq
+    step = (len(seq) - 1) / (n - 1)
+    idx = sorted({round(i * step) for i in range(n)} | {len(seq) - 1})
+    return [seq[i] for i in idx]
+
+
+def _quantile(vals: list, q: float) -> float:
+    """線性內插分位數（不引入 numpy，維持後端輕量）。vals 需非空。"""
+    s = sorted(vals)
+    if len(s) == 1:
+        return s[0]
+    pos = q * (len(s) - 1)
+    lo = int(pos)
+    frac = pos - lo
+    if lo + 1 < len(s):
+        return s[lo] + frac * (s[lo + 1] - s[lo])
+    return s[lo]
 
 
 def clear_all() -> int:

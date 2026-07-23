@@ -20,8 +20,10 @@ COLUMNS = [
     ("baseline",          "基準(CH4%/CO2%/壓力)"),
     ("target_hours",      "預計時長(hr)"),
     ("total_hours",       "實際總時間(hr)"),
-    ("n_cycles",          "補氣循環數"),
+    ("cycle_count",       "循環數(完整/全部)"),
+    ("gap_note",          "記錄中斷"),
     ("drop_rate_median",  "下降速率中位數(kg/cm²/hr)"),
+    ("drop_rate_spread",  "下降速率離散(IQR·範圍)"),
     ("culture_drift",     "進氣前ORP漂移(末-首)"),
     ("vent_ph",           "排氣pH"),
     ("vent_orp",          "排氣ORP(mV)"),
@@ -40,6 +42,18 @@ def _flatten(run: dict) -> dict:
     # 衍生欄位
     flat["intake_band"] = f"{run.get('intake_lower')}→{run.get('intake_upper')}"
     flat["baseline"] = f"{run.get('baseline_ch4')}/{run.get('baseline_co2')}/{run.get('baseline_pressure')}"
+    # 完整週期／總週期分開寫，讓「這批有多少可用資料」在表上一眼看得到
+    flat["cycle_count"] = f"{flat.get('n_cycles_complete', 0)} / {flat.get('n_cycles', 0)}"
+    n_gaps = flat.get("n_gaps") or 0
+    flat["gap_note"] = f"{n_gaps} 次 / {flat.get('gap_hours') or 0} hr" if n_gaps else "無"
+    # 離散度：投稿時中位數需附散布。IQR 需 ≥2 完整循環才算得出來，否則只列範圍
+    iqr, lo, hi = flat.get("drop_rate_iqr"), flat.get("drop_rate_min"), flat.get("drop_rate_max")
+    if iqr is not None:
+        flat["drop_rate_spread"] = f"IQR {iqr} ({lo}–{hi})"
+    elif lo is not None:
+        flat["drop_rate_spread"] = f"n=1 ({lo})"
+    else:
+        flat["drop_rate_spread"] = ""
     return flat
 
 
@@ -78,6 +92,7 @@ CYCLE_COLUMNS = [
     ("flattening",        "平緩化(早-晚·疑產甲烷)"),
     ("pre_injection_orp", "進氣前ORP(菌群共變數)"),
     ("orp_crash",         "ORP崩落"),
+    ("quality",           "資料完整性"),
 ]
 
 
@@ -126,20 +141,26 @@ def cycles_to_xlsx_bytes(cycle_rows: list) -> bytes:
         c.fill = COV if key == "pre_injection_orp" else GREEN
         c.alignment = CEN
         c.border = BORDER
+    WARN = PatternFill("solid", fgColor="FFC7CE")   # 非完整週期標紅，避免誤用
     for i, row in enumerate(cycle_rows):
+        incomplete = not row.get("complete")
         for j, (key, _) in enumerate(CYCLE_COLUMNS, 1):
             c = ws.cell(hr + 1 + i, j, _cycle_cell(row, key))
             c.font = BFONT
             c.alignment = CEN
             c.border = BORDER
+            if incomplete and key == "quality":
+                c.fill = WARN
 
-    for j, w in enumerate([8, 15, 8, 18, 10, 9, 9, 18, 10, 10, 16, 18, 10], 1):
+    for j, w in enumerate([8, 15, 8, 18, 10, 9, 9, 18, 10, 10, 16, 18, 10, 14], 1):
         ws.column_dimensions[get_column_letter(j)].width = w
     ws.row_dimensions[hr].height = 34
 
     note_row = hr + 1 + len(cycle_rows) + 1
     ws.cell(note_row, 1, "※ 每列＝一個補氣循環。下降速率為反應變數、進氣前ORP為菌群成熟度共變數、"
-            "循環時間(n)為控制因子。分析時用進氣前ORP扣除菌群漂移。").font = NOTE
+            "循環時間(n)為控制因子。分析時用進氣前ORP扣除菌群漂移。"
+            "※ 建模只取「資料完整性＝完整」之列；標紅者起點或終點的補氣未被觀測到"
+            "（多為記錄中斷），其斜率平緩化不予計算。").font = NOTE
     ws.merge_cells(start_row=note_row, start_column=1, end_row=note_row, end_column=len(CYCLE_COLUMNS))
 
     out = io.BytesIO()
@@ -185,7 +206,7 @@ def to_xlsx_bytes(runs: list) -> bytes:
             c.alignment = CEN
             c.border = BORDER
 
-    widths = [10, 13, 13, 16, 18, 11, 12, 10, 18, 16, 9, 11, 15, 9]
+    widths = [10, 13, 13, 16, 18, 11, 12, 16, 14, 18, 20, 16, 9, 11, 15, 9]
     for j, w in enumerate(widths, 1):
         ws.column_dimensions[get_column_letter(j)].width = w
     ws.row_dimensions[hr].height = 40
@@ -193,7 +214,9 @@ def to_xlsx_bytes(runs: list) -> bytes:
     note_row = hr + 1 + len(runs) + 1
     ws.cell(note_row, 1, "※ 灰底＝設定條件，綠底＝量測結果（由感測訊號自動計算）。"
             "「進氣前ORP漂移」為菌群成熟度共變數，用於分析時扣除菌群漂移。"
-            "CH4% 僅取排氣峰值當參考，不作為證據。").font = NOTE
+            "CH4% 僅取排氣峰值當參考，不作為證據。"
+            "※ 下降速率中位數只採計完整循環；「記錄中斷」非零時，該批次期間反應器仍在運轉，"
+            "僅資料未被記錄，中斷期間的補氣無法還原。").font = NOTE
     ws.merge_cells(start_row=note_row, start_column=1, end_row=note_row, end_column=len(COLUMNS))
 
     out = io.BytesIO()

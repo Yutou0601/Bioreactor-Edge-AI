@@ -35,9 +35,31 @@ const STATUS_META = {
 }
 
 const runningRun = computed(() => runs.value.find(r => r.status === 'running'))
+const live = computed(() => runningRun.value ? liveMap.value[runningRun.value.run_id] : null)
 
 function flash(t) { msg.value = t; setTimeout(() => { if (msg.value === t) msg.value = '' }, 3000) }
 function fmt(v, d = 3) { return (v === null || v === undefined) ? '—' : Number(v).toFixed(d) }
+
+// 本循環即時壓力小圖：把 cycle_series 轉成 SVG polyline，並標出補氣下限參考線。
+// 無外部繪圖庫（維持後端/前端輕量、CSP 安全），純算座標。
+const W = 460, H = 96, PAD = 6
+const liveChart = computed(() => {
+  const s = live.value?.cycle_series
+  if (!s || s.length < 2) return null
+  const ps = s.map(d => d.p)
+  const lower = live.value.intake_lower
+  const base = live.value.baseline_pressure
+  let lo = Math.min(...ps, lower), hi = Math.max(...ps, base ?? -Infinity)
+  if (hi - lo < 0.02) hi = lo + 0.02                       // 避免平線時擠成一條
+  const x = i => PAD + (W - 2 * PAD) * i / (s.length - 1)
+  const y = p => PAD + (H - 2 * PAD) * (1 - (p - lo) / (hi - lo))
+  return {
+    line: ps.map((p, i) => `${x(i).toFixed(1)},${y(p).toFixed(1)}`).join(' '),
+    lowerY: y(lower).toFixed(1),
+    baseY: base != null ? y(base).toFixed(1) : null,
+    t0: s[0].t, t1: s[s.length - 1].t,
+  }
+})
 
 async function loadRuns() {
   try {
@@ -182,24 +204,69 @@ onUnmounted(() => clearInterval(pollTimer))
     <div v-if="error" class="toast err">{{ error }}</div>
 
     <!-- 進行中批次即時面板 -->
-    <div v-if="runningRun && liveMap[runningRun.run_id]" class="live-panel">
+    <div v-if="live" class="live-panel" :class="{ 'panel-stale': live.stale }">
       <div class="live-title">
-        <span class="dot"></span> 進行中：批次 {{ runningRun.run_id }}
-        <span class="live-sub">循環 {{ runningRun.n_minutes }} 分／小時 · 已完成 {{ liveMap[runningRun.run_id].n_cycles_so_far }} 次補氣</span>
+        <span class="dot" :class="{ dead: live.stale }"></span> 進行中：批次 {{ runningRun.run_id }}
+        <span class="live-sub">循環 {{ runningRun.n_minutes }} 分／小時 · 已完成 {{ live.n_cycles_so_far }} 次補氣</span>
       </div>
+
+      <!-- 記錄健康度：昨天記錄死掉 17.5hr 無告警，此列即為防呆 -->
+      <div class="rec-health" :class="live.stale ? 'rh-bad' : (live.n_gaps ? 'rh-warn' : 'rh-ok')">
+        <template v-if="live.stale">
+          ⛔ 記錄可能已中斷：最後一筆在 <b>{{ live.staleness_min }}</b> 分鐘前（{{ live.last_timestamp?.slice(5,16) }}）。反應器仍在運轉，請檢查記錄程式。
+        </template>
+        <template v-else>
+          ✓ 記錄正常，最後一筆 {{ live.staleness_min }} 分前
+        </template>
+        <span v-if="live.n_gaps" class="rh-gap">· 本批次已中斷 {{ live.n_gaps }} 次／{{ live.gap_hours }}hr</span>
+        <span v-if="live.clock_skew" class="rh-gap">· ⚠ 記錄端時鐘與本機不同步</span>
+      </div>
+
       <div class="live-grid">
-        <div class="live-cell"><span class="lv">{{ fmt(liveMap[runningRun.run_id].current_pressure) }}</span><span class="ll">目前壓力 kg/cm²</span></div>
-        <div class="live-cell"><span class="lv">{{ fmt(liveMap[runningRun.run_id].current_orp, 0) }}</span><span class="ll">目前 ORP mV</span></div>
         <div class="live-cell">
-          <span class="lv" :class="{ ready: liveMap[runningRun.run_id].remaining_kg <= 0 }">
-            {{ liveMap[runningRun.run_id].remaining_kg <= 0 ? '即將補氣' : liveMap[runningRun.run_id].eta_refill_hours + ' hr' }}
+          <span class="lv">{{ fmt(live.current_pressure) }}</span>
+          <span class="ll">目前壓力 kg/cm²
+            <b v-if="live.pressure_vs_base != null" class="ref">基準{{ live.pressure_vs_base >= 0 ? '+' : '' }}{{ fmt(live.pressure_vs_base) }}</b>
           </span>
-          <span class="ll">距下次補氣（降到 {{ liveMap[runningRun.run_id].intake_lower }}）</span>
         </div>
         <div class="live-cell">
-          <span class="lv">{{ fmt(liveMap[runningRun.run_id].elapsed_hours, 1) }} <small>/ {{ liveMap[runningRun.run_id].target_hours }}</small></span>
+          <span class="lv">{{ fmt(live.current_orp, 0) }}</span>
+          <span class="ll">目前 ORP mV
+            <b v-if="live.orp_vs_pre != null" class="ref">進氣前{{ live.orp_vs_pre >= 0 ? '+' : '' }}{{ fmt(live.orp_vs_pre, 0) }}</b>
+          </span>
+        </div>
+        <div class="live-cell">
+          <span class="lv" :class="{ ready: live.remaining_kg <= 0 }">
+            {{ live.remaining_kg <= 0 ? '即將補氣' : live.eta_refill_hours + ' hr' }}
+          </span>
+          <span class="ll">距下次補氣（降到 {{ live.intake_lower }}）
+            <b class="ref">{{ live.rate_is_live ? '實測速率' : '預估速率' }}</b>
+          </span>
+        </div>
+        <div class="live-cell">
+          <span class="lv">{{ fmt(live.elapsed_hours, 1) }} <small>/ {{ live.target_hours }}</small></span>
           <span class="ll">實驗已跑 / 預計 hr</span>
         </div>
+      </div>
+
+      <!-- 本循環即時壓力曲線 + 臨時平緩化（觀測用，未結束不進建模）-->
+      <div class="live-chart" v-if="liveChart">
+        <div class="lc-head">
+          <span>本循環壓力曲線</span>
+          <span class="lc-slopes">
+            早段 {{ fmt(live.cycle_slope_early, 4) }} · 晚段 {{ fmt(live.cycle_slope_late, 4) }} ·
+            <b class="flat" :class="{ 'flat-pos': live.cycle_flattening > 0.0005 }">
+              平緩化 {{ fmt(live.cycle_flattening, 4) }}
+            </b>
+            <span class="lc-prov">（進行中·臨時值）</span>
+          </span>
+        </div>
+        <svg :viewBox="`0 0 ${W} ${H}`" class="lc-svg" preserveAspectRatio="none">
+          <line v-if="liveChart.baseY" x1="0" :y1="liveChart.baseY" :x2="W" :y2="liveChart.baseY" class="lc-base" />
+          <line x1="0" :y1="liveChart.lowerY" :x2="W" :y2="liveChart.lowerY" class="lc-lower" />
+          <polyline :points="liveChart.line" class="lc-line" />
+        </svg>
+        <div class="lc-axis"><span>{{ liveChart.t0 }}</span><span class="lc-lbl">— 下限補氣線 ·· 基準線</span><span>{{ liveChart.t1 }}</span></div>
       </div>
     </div>
 
@@ -238,6 +305,7 @@ onUnmounted(() => clearInterval(pollTimer))
             <th class="grp">總時間<br><small>hr</small></th>
             <th class="grp">補氣<br>循環數</th>
             <th class="grp">下降速率中位<br><small>kg/cm²/hr</small></th>
+            <th class="grp">離散度<br><small>IQR·範圍</small></th>
             <th class="grp cov">進氣前ORP漂移<br><small>菌群共變數</small></th>
             <th class="grp">排氣pH</th>
             <th class="grp">排氣ORP</th>
@@ -263,8 +331,19 @@ onUnmounted(() => clearInterval(pollTimer))
                 <div v-if="r.status === 'planned' && r.scheduled_start" class="sched-hint">排定 {{ r.scheduled_start.slice(5,16) }}</div>
               </td>
               <td class="mono">{{ fmt(r.results.total_hours, 1) }}</td>
-              <td class="mono">{{ r.results.n_cycles || '—' }}</td>
+              <td class="mono">
+                <template v-if="r.results.n_cycles">{{ r.results.n_cycles_complete }}/{{ r.results.n_cycles }}</template>
+                <template v-else>—</template>
+                <div v-if="r.results.n_gaps" class="gap-warn" :title="`記錄中斷 ${r.results.n_gaps} 次，合計 ${r.results.gap_hours} 小時。反應器仍在運轉，僅資料未記錄。`">
+                  ⚠ 中斷 {{ r.results.n_gaps }} 次／{{ r.results.gap_hours }}hr
+                </div>
+              </td>
               <td class="mono hl">{{ fmt(r.results.drop_rate_median, 5) }}</td>
+              <td class="mono dim sm">
+                <template v-if="r.results.drop_rate_iqr != null">IQR {{ fmt(r.results.drop_rate_iqr, 4) }}<br>{{ fmt(r.results.drop_rate_min, 4) }}–{{ fmt(r.results.drop_rate_max, 4) }}</template>
+                <template v-else-if="r.results.drop_rate_min != null">n=1</template>
+                <template v-else>—</template>
+              </td>
               <td class="mono cov">{{ fmt(r.results.culture_drift, 1) }}</td>
               <td class="mono">{{ fmt(r.results.vent_ph, 2) }}</td>
               <td class="mono">{{ fmt(r.results.vent_orp, 0) }}</td>
@@ -277,7 +356,7 @@ onUnmounted(() => clearInterval(pollTimer))
             </tr>
             <!-- 排氣 / 編輯時間列（人工輸入，可修改） -->
             <tr v-if="editRow === r.run_id" class="detail-row">
-              <td colspan="13">
+              <td colspan="14">
                 <div class="time-edit">
                   <span class="te-title">{{ editForm._vent ? '排氣時間（可改成實際排氣時刻，往後幾分鐘可抓 CH4 峰值）' : '編輯起訖時間（可對齊 CSV）' }}</span>
                   <label>開始 <input v-model="editForm.start_time" type="datetime-local" class="inp" /></label>
@@ -290,13 +369,13 @@ onUnmounted(() => clearInterval(pollTimer))
             </tr>
             <!-- 每循環明細 -->
             <tr v-if="expanded === r.run_id" class="detail-row">
-              <td colspan="13">
+              <td colspan="14">
                 <div class="cycle-detail">
                   <div class="cd-title">每循環特徵（{{ r.run_id }}）— 進氣前 ORP 為菌群成熟度共變數</div>
                   <table v-if="cyclesMap[r.run_id]?.length" class="cycle-table">
-                    <thead><tr><th>週期</th><th>起</th><th>時長hr</th><th>P起→P末</th><th>下降速率</th><th>早段</th><th>晚段</th><th>平緩化</th><th>進氣前ORP</th><th>ORP崩落</th></tr></thead>
+                    <thead><tr><th>週期</th><th>起</th><th>時長hr</th><th>P起→P末</th><th>下降速率</th><th>早段</th><th>晚段</th><th>平緩化</th><th>進氣前ORP</th><th>ORP崩落</th><th>完整性</th></tr></thead>
                     <tbody>
-                      <tr v-for="cy in cyclesMap[r.run_id]" :key="cy.cycle">
+                      <tr v-for="cy in cyclesMap[r.run_id]" :key="cy.cycle" :class="{ 'row-partial': !cy.complete }">
                         <td>{{ cy.cycle }}</td>
                         <td class="mono dim">{{ cy.start.slice(5) }}</td>
                         <td class="mono">{{ cy.duration_hr }}</td>
@@ -305,8 +384,9 @@ onUnmounted(() => clearInterval(pollTimer))
                         <td class="mono dim">{{ fmt(cy.slope_early, 4) }}</td>
                         <td class="mono dim">{{ fmt(cy.slope_late, 4) }}</td>
                         <td class="mono flat">{{ fmt(cy.flattening, 4) }}</td>
-                        <td class="mono cov">{{ cy.pre_injection_orp }}</td>
-                        <td class="mono">{{ cy.orp_crash }}</td>
+                        <td class="mono cov">{{ fmt(cy.pre_injection_orp, 1) }}</td>
+                        <td class="mono">{{ fmt(cy.orp_crash, 1) }}</td>
+                        <td><span class="q-tag" :class="cy.complete ? 'q-ok' : 'q-bad'">{{ cy.quality }}</span></td>
                       </tr>
                     </tbody>
                   </table>
@@ -315,7 +395,7 @@ onUnmounted(() => clearInterval(pollTimer))
               </td>
             </tr>
           </template>
-          <tr v-if="!runs.length"><td colspan="13" class="empty">尚無批次。點「建立標準計畫」開始。</td></tr>
+          <tr v-if="!runs.length"><td colspan="14" class="empty">尚無批次。點「建立標準計畫」開始。</td></tr>
         </tbody>
       </table>
     </div>
@@ -364,6 +444,31 @@ onUnmounted(() => clearInterval(pollTimer))
 .lv small { font-size: 0.7rem; color: #557; }
 .lv.ready { color: #2ecc71; }
 .ll { font-size: 0.68rem; color: #557; margin-top: 4px; }
+.ll .ref { color: #7a90a4; font-weight: 700; margin-left: 4px; }
+
+/* 記錄健康度告警列 */
+.panel-stale { border-color: #7a2a2a; background: #1a1012; }
+.dot.dead { background: #e05a5a; animation: none; }
+.rec-health { font-size: 0.76rem; padding: 8px 12px; border-radius: 6px; margin-bottom: 12px; line-height: 1.5; }
+.rh-ok { color: #6aa88a; background: #0d1a14; }
+.rh-warn { color: #d0a24a; background: #1c1710; }
+.rh-bad { color: #f0a0a0; background: #241012; border: 1px solid #7a2a2a; font-weight: 600; }
+.rh-gap { color: #b0763a; margin-left: 4px; }
+
+/* 本循環即時壓力曲線 */
+.live-chart { margin-top: 12px; background: #0b131c; border: 1px solid #16242f; border-radius: 6px; padding: 10px 12px; }
+.lc-head { display: flex; justify-content: space-between; align-items: baseline; font-size: 0.72rem; color: #6a8296; margin-bottom: 6px; flex-wrap: wrap; gap: 4px; }
+.lc-slopes { font-family: monospace; color: #7a90a4; }
+.lc-slopes .flat { color: #9b8ad4; }
+.lc-slopes .flat.flat-pos { color: #b89ae8; }
+.lc-prov { color: #4a5a68; font-family: inherit; }
+.lc-svg { width: 100%; height: 96px; display: block; }
+.lc-line { fill: none; stroke: #4fa8e8; stroke-width: 1.6; vector-effect: non-scaling-stroke; }
+.lc-lower { stroke: #c85a5a; stroke-width: 1; stroke-dasharray: 5 3; vector-effect: non-scaling-stroke; }
+.lc-base { stroke: #4a6a4a; stroke-width: 1; stroke-dasharray: 2 3; vector-effect: non-scaling-stroke; }
+.lc-axis { display: flex; justify-content: space-between; font-size: 0.62rem; color: #4a5a68; margin-top: 3px; font-family: monospace; }
+.lc-axis .lc-lbl { font-family: inherit; }
+.sm { font-size: 0.68rem; line-height: 1.3; }
 
 .toolbar { display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 12px; margin-bottom: 10px; }
 .baseline-box { display: flex; align-items: center; gap: 10px; background: #121212; border: 1px solid #222;
@@ -405,6 +510,13 @@ onUnmounted(() => clearInterval(pollTimer))
 .cycle-table th { background: #12160f; color: #778; padding: 5px 14px; border: 1px solid #1a1a1a; }
 .cycle-table td { padding: 5px 14px; border: 1px solid #161616; text-align: center; }
 .cd-empty { font-size: 0.76rem; color: #556; padding: 8px 0; }
+
+/* 資料完整性：非完整週期不進入統計與建模，需一眼看得出來 */
+.gap-warn { font-size: 0.62rem; color: #e08c4a; margin-top: 3px; white-space: nowrap; cursor: help; }
+.row-partial { background: rgba(224,140,74,0.05); }
+.q-tag { font-size: 0.64rem; padding: 2px 6px; border: 1px solid; border-radius: 8px; white-space: nowrap; }
+.q-ok { color: #4caf82; border-color: #2d5f49; }
+.q-bad { color: #e08c4a; border-color: #6b4526; }
 
 .ops { display: flex; gap: 4px; justify-content: center; }
 .op { font-family: inherit; font-size: 0.7rem; padding: 4px 8px; border-radius: 4px; cursor: pointer;
