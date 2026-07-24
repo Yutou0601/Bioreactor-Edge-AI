@@ -37,12 +37,24 @@ VENV_PY = BACKEND_DIR / "venv" / "Scripts" / "python.exe"
 VENV_PYW = BACKEND_DIR / "venv" / "Scripts" / "pythonw.exe"
 CONFIG_PATH = ROOT / "control_panel.json"
 
-API_BASE = "http://127.0.0.1:8000/api"
 BACKEND_PORT = 8000
 PREVIEW_PORT = 4173
 PREVIEW_URL = f"http://localhost:{PREVIEW_PORT}"
 
+# 正式部署時後端跑在 Jetson 上（web_frontend/.env.production 指向 192.168.55.1:8000），
+# 本機只跑 CSV 監看與網頁前端。開發模式才用 127.0.0.1。
+DEFAULT_BACKEND_HOST = "192.168.55.1"
+DEFAULT_SSH_USER = "lee"
+DEFAULT_JETSON_DIR = "~/edge_ai_project"
+
+# ssh 一律加 BatchMode：金鑰沒設好時「立刻失敗」而不是卡在看不見的密碼提示。
+# 控制台是隱藏視窗＋接管輸出，互動式提示會無聲卡死，比報錯更難查。
+SSH_OPTS = ["-o", "BatchMode=yes", "-o", "ConnectTimeout=6",
+            "-o", "StrictHostKeyChecking=accept-new"]
+SSH_KEY = Path.home() / ".ssh" / "id_ed25519"
+
 POLL_MS = 3000            # 狀態輪詢間隔
+SSH_POLL_MS = 30000       # SSH 檢查間隔（獨立時鐘，逾時較久不可與狀態列同排）
 GIT_POLL_EVERY = 20       # 每 N 次輪詢才查一次 git（較慢，不用每次）
 CREATE_NO_WINDOW = 0x08000000
 
@@ -88,6 +100,7 @@ class ControlPanel:
         self.busy = False
         self.poll_count = 0
         self.git_info = {"commit": "—", "behind": None}
+        self.ssh_ok = None          # None=未知 / True=免密碼可用 / False=需設定
 
         root.title("生物甲烷化系統 — 控制台")
         root.geometry("760x620")
@@ -97,10 +110,41 @@ class ControlPanel:
         self._build_ui()
         self._drain_log()
         self._poll()
+        self._ssh_poll()
 
         if autostart:
             self.log("以「開機自動啟動」模式啟動，正在自動拉起所有服務…", "info")
             self.root.after(800, self.start_all)
+
+    # ── 連線設定 ────────────────────────────────────────
+    @property
+    def backend_host(self) -> str:
+        return self.cfg.get("backend_host", DEFAULT_BACKEND_HOST)
+
+    @property
+    def is_remote(self) -> bool:
+        """後端是否跑在 Jetson（正式部署）而非本機（開發）。"""
+        return self.backend_host not in ("127.0.0.1", "localhost")
+
+    @property
+    def ssh_target(self) -> str:
+        return f"{self.cfg.get('ssh_user', DEFAULT_SSH_USER)}@{self.backend_host}"
+
+    @property
+    def api_base(self) -> str:
+        return f"http://{self.backend_host}:{BACKEND_PORT}/api"
+
+    def _ssh(self, remote_cmd: str) -> list:
+        return ["ssh", *SSH_OPTS, self.ssh_target, remote_cmd]
+
+    def _ssh_check(self) -> bool:
+        """測試免密碼登入是否可用。BatchMode 下若需密碼會直接失敗，不會卡住。"""
+        try:
+            p = subprocess.run(self._ssh("echo ok"), capture_output=True, text=True,
+                               timeout=12, creationflags=CREATE_NO_WINDOW)
+            return p.returncode == 0 and "ok" in p.stdout
+        except Exception:
+            return False
 
     # ── 介面 ────────────────────────────────────────────
     def _build_ui(self):
@@ -114,7 +158,8 @@ class ControlPanel:
         box.pack(fill="x", padx=16)
         self.rows = {}
         for key, label in [("backend", "後端 API"), ("data", "資料記錄"),
-                           ("watcher", "CSV 監看"), ("frontend", "網頁前端")]:
+                           ("ssh", "Jetson 連線"), ("watcher", "CSV 監看"),
+                           ("frontend", "網頁前端")]:
             r = tk.Frame(box, bg=C_PANEL)
             r.pack(fill="x", padx=14, pady=(9 if key == "backend" else 3, 3))
             dot = tk.Label(r, text="●", bg=C_PANEL, fg=C_IDLE, font=("Segoe UI", 11))
@@ -139,7 +184,9 @@ class ControlPanel:
                  ("restart", "重啟後端", self.restart_backend, "#2a4a6b"),
                  ("update", "檢查更新", self.check_update, "#4a3a6b"),
                  ("web", "開啟網頁", self.open_web, "#2a2a2a"),
-                 ("csv", "匯入 CSV", self.import_csv, "#2a2a2a")]
+                 ("csv", "匯入 CSV", self.import_csv, "#2a2a2a"),
+                 ("sshkey", "設定 Jetson 免密登入", self.setup_ssh_key, "#5a4a2a"),
+                 ("target", "切換後端位置", self.switch_target, "#2a2a2a")]
         for i, (k, text, cmd, color) in enumerate(specs):
             b = tk.Button(btns, text=text, command=cmd, bg=color, fg="#e8e8e8",
                           activebackground=color, relief="flat", bd=0, padx=10, pady=8,
@@ -148,6 +195,8 @@ class ControlPanel:
             self.btn[k] = b
         for c in range(3):
             btns.columnconfigure(c, weight=1)
+        self.btn["sshkey"].configure(font=("Microsoft JhengHei UI", 9, "bold"))
+        self.btn["target"].configure(font=("Microsoft JhengHei UI", 9))
 
         # 開機自動啟動
         opt = tk.Frame(self.root, bg=C_BG)
@@ -195,14 +244,26 @@ class ControlPanel:
         threading.Thread(target=self._poll_worker, daemon=True).start()
         self.root.after(POLL_MS, self._poll)
 
+    def _ssh_poll(self):
+        """SSH 檢查獨立一條執行緒與時鐘——它逾時可長達 12 秒，若與健康檢查同排，
+        會週期性凍住整個狀態列。"""
+        if self.is_remote and not self.busy:
+            threading.Thread(target=self._ssh_poll_worker, daemon=True).start()
+        self.root.after(SSH_POLL_MS, self._ssh_poll)
+
+    def _ssh_poll_worker(self):
+        ok = self._ssh_check()
+        self.root.after(0, lambda: setattr(self, "ssh_ok", ok))
+
     def _poll_worker(self):
         health = None
-        if port_open(BACKEND_PORT):
-            try:
-                with urllib.request.urlopen(f"{API_BASE}/health", timeout=2) as r:
-                    health = json.loads(r.read().decode("utf-8"))
-            except Exception:
-                health = {}
+        try:
+            with urllib.request.urlopen(f"{self.api_base}/health", timeout=2.5) as r:
+                health = json.loads(r.read().decode("utf-8"))
+        except urllib.error.URLError:
+            health = None                      # 連不上＝後端沒跑（或 Jetson 沒接）
+        except Exception:
+            health = {}                        # 連得上但回應不對
         fe = port_open(PREVIEW_PORT)
         watcher = self._proc_alive("watcher")
 
@@ -212,14 +273,15 @@ class ControlPanel:
         self.root.after(0, lambda: self._render(health, fe, watcher))
 
     def _render(self, health, fe_up, watcher_up):
+        where = f"Jetson {self.backend_host}" if self.is_remote else "本機"
         # 後端
         if health is None:
-            self._row("backend", C_BAD, "未執行")
+            self._row("backend", C_BAD, f"未執行（{where}:{BACKEND_PORT} 連不上）")
         elif not health:
-            self._row("backend", C_WARN, f"port {BACKEND_PORT} 有回應但 /health 失敗")
+            self._row("backend", C_WARN, f"{where} 有回應但 /health 失敗")
         else:
             self._row("backend", C_OK,
-                      f"執行中 :{BACKEND_PORT} · 已運行 {health.get('uptime_min', 0)} 分 · "
+                      f"執行中 {where}:{BACKEND_PORT} · 已運行 {health.get('uptime_min', 0)} 分 · "
                       f"{health.get('record_count', 0)} 筆")
 
         # 資料記錄（本控制台的重點：後端活著不代表資料有在進來）
@@ -238,6 +300,17 @@ class ControlPanel:
             self._row("data", C_OK,
                       f"正常 · 最後一筆 {health['staleness_min']} 分前"
                       + (f" · 進行中批次 {run}" if run else ""))
+
+        # Jetson 連線：免密碼登入是否已設定（決定能不能遠端啟動後端）
+        if not self.is_remote:
+            self._row("ssh", C_IDLE, "—（後端設為本機，不需 SSH）")
+        elif self.ssh_ok is None:
+            self._row("ssh", C_IDLE, "檢查中…")
+        elif self.ssh_ok:
+            self._row("ssh", C_OK, f"免密碼登入正常 · {self.ssh_target}")
+        else:
+            self._row("ssh", C_WARN,
+                      f"需設定免密碼登入（按下方按鈕，只需輸入一次密碼）· {self.ssh_target}")
 
         self._row("watcher", C_OK if watcher_up else C_IDLE,
                   "執行中" if watcher_up else "未由本控制台啟動")
@@ -346,14 +419,48 @@ class ControlPanel:
             return
         self._task(self._start_all_worker)
 
-    def _start_all_worker(self):
-        if not self._check_venv():
-            return
-        if port_open(BACKEND_PORT):
+    def _backend_up(self) -> bool:
+        try:
+            with urllib.request.urlopen(f"{self.api_base}/health", timeout=2.5):
+                return True
+        except Exception:
+            return False
+
+    def _start_backend(self) -> None:
+        """啟動後端。正式部署時後端在 Jetson，需 SSH 遠端啟動。"""
+        if self._backend_up():
             self.log("後端已在執行中，略過啟動", "info")
-        else:
-            self.log("啟動後端…", "cmd")
+            return
+
+        if not self.is_remote:
+            if not self._check_venv():
+                return
+            self.log("啟動本機後端…", "cmd")
             self._spawn("backend", [str(VENV_PY), "main.py"], BACKEND_DIR, "後端")
+            return
+
+        # ── 遠端（Jetson）──
+        if not self._ssh_check():
+            self.ssh_ok = False
+            self.log("無法免密碼連線 Jetson，不能遠端啟動後端。", "bad")
+            self.log("請按「設定 Jetson 免密登入」（只需輸入一次密碼）後再試。", "warn")
+            return
+        self.ssh_ok = True
+        jdir = self.cfg.get("jetson_dir", DEFAULT_JETSON_DIR)
+        # 不呼叫 start_backend.sh —— 它結尾有 `read -p "Press Enter"` 會卡住 SSH。
+        # 改為釋放埠後用 nohup 背景啟動，SSH 斷線後仍繼續執行。
+        remote = (f"cd {jdir}/edge_backend && "
+                  "(fuser -k 8000/tcp 2>/dev/null || true) && sleep 1 && "
+                  "nohup python3 main.py > /tmp/bioreactor_backend.log 2>&1 & "
+                  "sleep 3; echo launched")
+        self.log(f"透過 SSH 啟動 Jetson 後端（{self.ssh_target}）…", "cmd")
+        if self._run_stream(self._ssh(remote), ROOT, "Jetson"):
+            self.log("Jetson 後端啟動指令已送出，等待服務起來…", "info")
+        else:
+            self.log("Jetson 後端啟動失敗，詳見上方輸出。", "bad")
+
+    def _start_all_worker(self):
+        self._start_backend()
 
         data_dir = self.cfg.get("csv_dir")
         if not data_dir:
@@ -361,8 +468,9 @@ class ControlPanel:
         elif self._proc_alive("watcher"):
             self.log("CSV 監看已在執行中，略過", "info")
         else:
-            self.log(f"啟動 CSV 監看：{data_dir}", "cmd")
-            self._spawn("watcher", [str(VENV_PY), "csv_watcher.py", "--dir", data_dir],
+            self.log(f"啟動 CSV 監看：{data_dir} → broker {self.backend_host}", "cmd")
+            self._spawn("watcher", [str(VENV_PY), "csv_watcher.py", "--dir", data_dir,
+                                    "--broker", self.backend_host],
                         BACKEND_DIR, "CSV監看")
 
         if port_open(PREVIEW_PORT):
@@ -383,8 +491,12 @@ class ControlPanel:
     def stop_all(self):
         if not self._guard():
             return
-        if not messagebox.askyesno("停止全部", "確定要停止後端、CSV 監看與前端嗎？\n"
-                                               "（反應器本身不受影響，僅停止本電腦的記錄與介面）"):
+        extra = ("\n\n注意：Jetson 上的後端**不會**被停止（它正在記錄資料）。\n"
+                 "若真要停止 Jetson 後端，請用「重啟後端」或到 Jetson 上操作。"
+                 if self.is_remote else "")
+        if not messagebox.askyesno("停止全部",
+                                   "確定要停止本機的服務嗎？\n"
+                                   "（反應器本身不受影響）" + extra):
             return
         self._task(self._stop_all_worker)
 
@@ -394,8 +506,12 @@ class ControlPanel:
             if p and p.poll() is None:
                 p.terminate()
                 self.log(f"{label} 已停止", "info")
-        self._kill_port(BACKEND_PORT)
-        self.log("全部停止完成。", "ok")
+        if self.is_remote:
+            # 刻意不動 Jetson 後端：它正在記錄資料，靜默停掉正是要避免的事故模式
+            self.log("Jetson 後端未被停止（仍在記錄資料）。", "info")
+        else:
+            self._kill_port(BACKEND_PORT)
+        self.log("停止完成。", "ok")
 
     def restart_backend(self):
         if not self._guard():
@@ -403,14 +519,21 @@ class ControlPanel:
         self._task(self._restart_backend_worker)
 
     def _restart_backend_worker(self):
-        if not self._check_venv():
-            return
         self.log("重啟後端…", "cmd")
-        p = self.procs.get("backend")
-        if p and p.poll() is None:
-            p.terminate()
-        self._kill_port(BACKEND_PORT)
-        self._spawn("backend", [str(VENV_PY), "main.py"], BACKEND_DIR, "後端")
+        if self.is_remote:
+            if not self._ssh_check():
+                self.log("無法免密碼連線 Jetson，請先按「設定 Jetson 免密登入」。", "bad")
+                return
+            self._run_stream(self._ssh("fuser -k 8000/tcp 2>/dev/null || true"), ROOT, "Jetson")
+            self._start_backend()
+        else:
+            if not self._check_venv():
+                return
+            p = self.procs.get("backend")
+            if p and p.poll() is None:
+                p.terminate()
+            self._kill_port(BACKEND_PORT)
+            self._spawn("backend", [str(VENV_PY), "main.py"], BACKEND_DIR, "後端")
         self.log("後端已重啟。注意：重啟後記憶體資料會清空，需要時請重新匯入 CSV。", "warn")
 
     def check_update(self):
@@ -481,7 +604,7 @@ class ControlPanel:
     def import_csv(self):
         if not self._guard():
             return
-        if not port_open(BACKEND_PORT):
+        if not self._backend_up():
             self.log("後端未執行，無法匯入。請先啟動後端。", "warn")
             return
         folder = filedialog.askdirectory(title="選擇 CSV 資料夾（BTP_Sensor_log-*.csv）",
@@ -490,9 +613,93 @@ class ControlPanel:
             return
         self.cfg["csv_dir"] = folder          # 記住，之後「全部啟動」可直接拉起 CSV 監看
         save_config(self.cfg)
-        self.log(f"匯入資料夾：{folder}", "cmd")
+        self.log(f"匯入資料夾：{folder} → {self.api_base}", "cmd")
+        # 後端可能在 Jetson 上，要把 API 位址一起帶過去（預設是 127.0.0.1）
         self._task(lambda: self._run_stream(
-            [str(VENV_PY), "batch_import_csv.py", "--dir", folder], BACKEND_DIR, "匯入"))
+            [str(VENV_PY), "batch_import_csv.py", "--dir", folder, "--api", self.api_base],
+            BACKEND_DIR, "匯入"))
+
+    # ── Jetson 免密碼登入 ───────────────────────────────
+    def setup_ssh_key(self):
+        """一次性設定 SSH 金鑰。設定完成後所有遠端操作都不再需要密碼。
+
+        Windows 內建的 ssh.exe 無法用參數或管線餵密碼（它直接讀終端機），
+        故不可能把密碼寫死在程式裡自動登入；金鑰是唯一能無人值守運作的方式，
+        也避免把密碼存在檔案中。安裝公鑰那一步需要輸入密碼，僅此一次。
+        """
+        if not self.is_remote:
+            self.log("目前後端設為本機，不需要 SSH 金鑰。", "info")
+            return
+        if not messagebox.askyesno(
+                "設定 Jetson 免密登入",
+                f"將對 {self.ssh_target} 設定 SSH 金鑰登入。\n\n"
+                "步驟：\n"
+                "1. 若尚無金鑰，會自動產生（不設通行碼）\n"
+                "2. 開啟一個命令視窗安裝公鑰到 Jetson\n"
+                "   → 該視窗會要求輸入 Jetson 密碼，**只需要這一次**\n\n"
+                "完成後控制台即可自動啟動／重啟 Jetson 後端。\n"
+                "要繼續嗎？"):
+            return
+        self._task(self._setup_ssh_key_worker)
+
+    def _setup_ssh_key_worker(self):
+        if not SSH_KEY.exists():
+            self.log("產生 SSH 金鑰…", "cmd")
+            SSH_KEY.parent.mkdir(parents=True, exist_ok=True)
+            if not self._run_stream(
+                    ["ssh-keygen", "-t", "ed25519", "-f", str(SSH_KEY), "-N", "", "-q"],
+                    ROOT, "ssh-keygen"):
+                self.log("金鑰產生失敗。", "bad")
+                return
+            self.log(f"已產生金鑰：{SSH_KEY}", "ok")
+        else:
+            self.log(f"已有金鑰，沿用：{SSH_KEY}", "info")
+
+        pub = Path(str(SSH_KEY) + ".pub")
+        try:
+            pubkey = pub.read_text(encoding="utf-8").strip()
+        except Exception as e:
+            self.log(f"讀不到公鑰 {pub}：{e}", "bad")
+            return
+
+        # 安裝公鑰需要輸入一次密碼 → 必須用「看得見的視窗」，不能隱藏也不能接管輸出，
+        # 否則密碼提示會無聲卡死（這正是不能把密碼寫死自動登入的原因）。
+        remote = (f"mkdir -p ~/.ssh && chmod 700 ~/.ssh && "
+                  f"touch ~/.ssh/authorized_keys && chmod 600 ~/.ssh/authorized_keys && "
+                  f"grep -qxF '{pubkey}' ~/.ssh/authorized_keys || echo '{pubkey}' >> ~/.ssh/authorized_keys")
+        self.log("開啟命令視窗安裝公鑰——請在該視窗輸入 Jetson 密碼（只需這一次）…", "warn")
+        try:
+            p = subprocess.Popen(
+                ["cmd", "/c", "start", "/wait", "cmd", "/c",
+                 f'echo 請輸入 Jetson ({self.ssh_target}) 的密碼： && '
+                 f'ssh -o StrictHostKeyChecking=accept-new {self.ssh_target} "{remote}" && '
+                 f'echo. && echo 公鑰安裝完成，本視窗即將關閉。 && timeout /t 3'],
+                cwd=str(ROOT))
+            p.wait(timeout=300)
+        except Exception as e:
+            self.log(f"安裝公鑰失敗：{e}", "bad")
+            return
+
+        if self._ssh_check():
+            self.ssh_ok = True
+            self.log("免密碼登入設定成功，之後不再需要輸入密碼。", "ok")
+        else:
+            self.ssh_ok = False
+            self.log("仍無法免密碼登入。請確認密碼是否正確、Jetson 是否連線（USB-C 或網路）。", "bad")
+
+    def switch_target(self):
+        """在「Jetson（正式）」與「本機（開發）」之間切換後端位置。"""
+        to_local = self.is_remote
+        target = "本機 127.0.0.1" if to_local else f"Jetson {DEFAULT_BACKEND_HOST}"
+        if not messagebox.askyesno("切換後端位置",
+                                   f"要把後端位置切換成「{target}」嗎？\n\n"
+                                   "正式部署時後端跑在 Jetson 上（前端正式版也是打 Jetson）；\n"
+                                   "本機模式僅供開發測試使用。"):
+            return
+        self.cfg["backend_host"] = "127.0.0.1" if to_local else DEFAULT_BACKEND_HOST
+        save_config(self.cfg)
+        self.ssh_ok = None
+        self.log(f"後端位置已切換為 {target}。", "ok")
 
     # ── 開機自動啟動 ────────────────────────────────────
     def autostart_enabled(self) -> bool:
