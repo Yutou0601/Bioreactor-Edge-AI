@@ -38,8 +38,13 @@ VENV_PYW = BACKEND_DIR / "venv" / "Scripts" / "pythonw.exe"
 CONFIG_PATH = ROOT / "control_panel.json"
 
 BACKEND_PORT = 8000
-PREVIEW_PORT = 4173
-PREVIEW_URL = f"http://localhost:{PREVIEW_PORT}"
+
+# 前端有兩種跑法，**必須跟後端位置一致**，否則網頁會去打錯的機器：
+#   npm run preview :4173 → 用 .env.production，API 寫死 192.168.55.1（Jetson）
+#   npm run dev     :5173 → 用 .env.development，API 指向 localhost
+# 本機模式若開 preview，網頁會去找 Jetson 而顯示「後端無回應」。
+PREVIEW_PORT = 4173      # 正式建置（打 Jetson）
+DEV_PORT = 5173          # 開發模式（打 localhost）
 
 # 正式部署時後端跑在 Jetson 上（web_frontend/.env.production 指向 192.168.55.1:8000），
 # 本機只跑 CSV 監看與網頁前端。開發模式才用 127.0.0.1。
@@ -140,6 +145,19 @@ class ControlPanel:
     @property
     def api_base(self) -> str:
         return f"http://{self.backend_host}:{BACKEND_PORT}/api"
+
+    # 前端跑法跟著後端位置走，確保網頁打的是同一台機器
+    @property
+    def fe_port(self) -> int:
+        return PREVIEW_PORT if self.is_remote else DEV_PORT
+
+    @property
+    def fe_mode(self) -> str:
+        return "preview" if self.is_remote else "dev"
+
+    @property
+    def fe_url(self) -> str:
+        return f"http://localhost:{self.fe_port}"
 
     def _ssh(self, remote_cmd: str) -> list:
         return ["ssh", *SSH_OPTS, self.ssh_target, remote_cmd]
@@ -271,7 +289,7 @@ class ControlPanel:
             health = None                      # 連不上＝後端沒跑（或 Jetson 沒接）
         except Exception:
             health = {}                        # 連得上但回應不對
-        fe = port_open(PREVIEW_PORT)
+        fe = port_open(self.fe_port)
         watcher = self._proc_alive("watcher")
 
         self.poll_count += 1
@@ -322,7 +340,8 @@ class ControlPanel:
         self._row("watcher", C_OK if watcher_up else C_IDLE,
                   "執行中" if watcher_up else "未由本控制台啟動")
         self._row("frontend", C_OK if fe_up else C_IDLE,
-                  f"執行中 {PREVIEW_URL}" if fe_up else "未執行")
+                  f"執行中 {self.fe_url}（{self.fe_mode}）" if fe_up
+                  else f"未執行（本模式應跑 npm run {self.fe_mode}）")
 
         behind = self.git_info["behind"]
         ver = f"版本 {self.git_info['commit']}"
@@ -517,13 +536,14 @@ class ControlPanel:
                                     "--broker", self.backend_host],
                         BACKEND_DIR, "CSV監看")
 
-        if port_open(PREVIEW_PORT):
+        if port_open(self.fe_port):
             self.log("網頁前端已在執行中，略過", "info")
         else:
             npm = self._npm()
             if npm:
                 self.log("啟動網頁前端…", "cmd")
-                self._spawn("frontend", [npm, "run", "preview"], FRONTEND_DIR, "前端")
+                # preview 走正式建置（API 打 Jetson）、dev 走開發設定（API 打 localhost）
+                self._spawn("frontend", [npm, "run", self.fe_mode], FRONTEND_DIR, "前端")
             else:
                 self.log("找不到 npm，略過前端啟動", "warn")
         self.log("啟動程序完成。", "ok")
@@ -665,11 +685,11 @@ class ControlPanel:
         return p.wait() == 0
 
     def open_web(self):
-        if not port_open(PREVIEW_PORT):
+        if not port_open(self.fe_port):
             self.log("網頁前端未執行，請先按「全部啟動」。", "warn")
             return
-        webbrowser.open(PREVIEW_URL)
-        self.log(f"已開啟 {PREVIEW_URL}", "info")
+        webbrowser.open(self.fe_url)
+        self.log(f"已開啟 {self.fe_url}（{self.fe_mode} 模式，API → {self.api_base}）", "info")
 
     def import_csv(self):
         if not self._guard():
