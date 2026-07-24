@@ -60,6 +60,13 @@ CREATE_NO_WINDOW = 0x08000000
 
 AUTOSTART_BAT = "bioreactor_autostart.bat"
 
+# 啟動前的快速相依檢查（import 測試約 0.3 秒，遠快於每次都跑 pip install）
+REQUIRED_MODULES = ["fastapi", "uvicorn", "pandas", "numpy", "openpyxl", "paho.mqtt.client"]
+
+# Jetson 上**只**安裝這些新增套件。絕不在 Jetson 跑完整 requirements.txt——
+# 那會覆蓋掉 NVIDIA 版的 CUDA torch/onnxruntime（sync_jetson.bat 既有的刻意決定）。
+JETSON_SAFE_DEPS = ["openpyxl"]
+
 # 配色（深色系，與網頁前端一致）
 C_BG, C_PANEL, C_LINE = "#0d0d0d", "#141a20", "#1e2a34"
 C_TEXT, C_DIM = "#e0e0e0", "#6a7a88"
@@ -419,6 +426,43 @@ class ControlPanel:
             return
         self._task(self._start_all_worker)
 
+    def _missing_modules(self) -> list:
+        """用 venv 的 python 試 import，找出缺哪些套件（比每次跑 pip 快得多）。
+        所有模組在**同一個** python 行程內檢查——分別開 6 個行程要近 2 秒，
+        併成一次約 0.3 秒，才不會拖慢每次啟動。"""
+        probe = (
+            "import importlib.util as u\n"
+            f"mods = {REQUIRED_MODULES!r}\n"
+            "print(','.join(m for m in mods if u.find_spec(m) is None))"
+        )
+        try:
+            p = subprocess.run([str(VENV_PY), "-c", probe], capture_output=True,
+                               text=True, timeout=60, creationflags=CREATE_NO_WINDOW)
+        except Exception:
+            return list(REQUIRED_MODULES)      # venv 不存在／叫不動＝全部視為缺
+        if p.returncode != 0:
+            return list(REQUIRED_MODULES)
+        return [m for m in p.stdout.strip().split(",") if m]
+
+    def _ensure_deps(self) -> bool:
+        """啟動本機後端前確保套件齊全；缺了才自動安裝。
+        僅適用本機 venv——Jetson 另有安全清單，見 JETSON_SAFE_DEPS。"""
+        missing = self._missing_modules()
+        if not missing:
+            return True
+        self.log(f"偵測到缺少套件：{', '.join(missing)}，自動安裝中…", "warn")
+        ok = self._run_stream([str(VENV_PY), "-m", "pip", "install", "-r", "requirements.txt"],
+                              BACKEND_DIR, "pip")
+        if not ok:
+            self.log("套件安裝失敗，後端可能無法啟動。請看上方輸出。", "bad")
+            return False
+        still = self._missing_modules()
+        if still:
+            self.log(f"安裝後仍缺：{', '.join(still)}", "bad")
+            return False
+        self.log("套件已補齊。", "ok")
+        return True
+
     def _backend_up(self) -> bool:
         try:
             with urllib.request.urlopen(f"{self.api_base}/health", timeout=2.5):
@@ -433,7 +477,7 @@ class ControlPanel:
             return
 
         if not self.is_remote:
-            if not self._check_venv():
+            if not self._check_venv() or not self._ensure_deps():
                 return
             self.log("啟動本機後端…", "cmd")
             self._spawn("backend", [str(VENV_PY), "main.py"], BACKEND_DIR, "後端")
@@ -560,14 +604,17 @@ class ControlPanel:
             self.log("已取消更新。", "info")
             return
 
-        for label, cmd, cwd in [
-            ("git pull", ["git", "pull"], ROOT),
-            ("安裝後端套件", [str(VENV_PY), "-m", "pip", "install", "-r", "requirements.txt"], BACKEND_DIR),
-        ]:
-            self.log(f"執行 {label}…", "cmd")
-            if not self._run_stream(cmd, cwd, label):
-                self.log(f"{label} 失敗，中止更新。", "bad")
-                return
+        self.log("執行 git pull（本機）…", "cmd")
+        if not self._run_stream(["git", "pull"], ROOT, "git pull"):
+            self.log("git pull 失敗，中止更新。", "bad")
+            return
+
+        if VENV_PY.exists():
+            self.log("安裝本機後端套件…", "cmd")
+            self._run_stream([str(VENV_PY), "-m", "pip", "install", "-r", "requirements.txt"],
+                             BACKEND_DIR, "pip")
+        else:
+            self.log("本機無 venv，略過套件安裝（後端在 Jetson 時屬正常）。", "info")
 
         npm = self._npm()
         if npm:
@@ -575,6 +622,20 @@ class ControlPanel:
             self._run_stream([npm, "run", "build"], FRONTEND_DIR, "npm build")
         else:
             self.log("找不到 npm，略過前端重建。", "warn")
+
+        # 後端在 Jetson 時，Jetson 上的程式碼也要更新，否則只有前端換了新版
+        if self.is_remote:
+            if self._ssh_check():
+                jdir = self.cfg.get("jetson_dir", DEFAULT_JETSON_DIR)
+                self.log("更新 Jetson 程式碼…", "cmd")
+                self._run_stream(self._ssh(f"cd {jdir} && git pull"), ROOT, "Jetson git")
+                # 只裝安全清單，不跑完整 requirements.txt——避免覆蓋 NVIDIA CUDA 版
+                # 的 torch/onnxruntime（沿用 sync_jetson.bat 的刻意決定）
+                self.log(f"安裝 Jetson 新增套件（僅 {', '.join(JETSON_SAFE_DEPS)}）…", "cmd")
+                self._run_stream(self._ssh(f"pip3 install {' '.join(JETSON_SAFE_DEPS)}"),
+                                 ROOT, "Jetson pip")
+            else:
+                self.log("無法連線 Jetson，其程式碼未更新！請設定免密登入後重試。", "bad")
 
         self._restart_backend_worker()
         self._refresh_git()
