@@ -172,7 +172,7 @@ class _Ridge:
 def _loo_rmse(X: np.ndarray, y: np.ndarray) -> Optional[float]:
     """留一交叉驗證 RMSE。樣本極少時這是唯一還說得過去的估計方式。"""
     n = len(y)
-    if n < 3:
+    if n < 3 or X.shape[1] == 0:
         return None
     errs = []
     for i in range(n):
@@ -188,6 +188,92 @@ def _loo_rmse(X: np.ndarray, y: np.ndarray) -> Optional[float]:
     return float(np.sqrt(np.mean(errs))) if errs else None
 
 
+# ── GA 特徵選擇（目標：最小化 LOO-CV RMSE）───────────────
+GA_POP, GA_GEN, GA_MUT, GA_ELITE = 24, 25, 0.12, 2
+_ga_cache: dict = {}          # 以訓練集指紋為 key，避免每次輪詢都重跑
+
+
+def _ga_select(X: np.ndarray, y: np.ndarray, seed: int = 42):
+    """基因演算法挑特徵子集，適應度＝該子集的 LOO-CV RMSE（越小越好）。
+
+    與 ch4_peak_analysis.ga_feature_selection 同一套目標函式，差別只在此處為
+    線上即時計算、且用純 numpy 的 Ridge。加入子集大小的輕微懲罰，避免在
+    小樣本下靠塞入更多特徵來壓低 LOO-CV（過度配適的常見表現）。
+    """
+    rng = np.random.default_rng(seed)
+    d = X.shape[1]
+
+    def fitness(mask: np.ndarray) -> float:
+        if not mask.any():
+            return 1e9
+        r = _loo_rmse(X[:, mask], y)
+        if r is None:
+            return 1e9
+        return r + 0.02 * mask.sum()          # 簡約性懲罰
+
+    pop = rng.random((GA_POP, d)) < 0.5
+    pop[0] = np.ones(d, dtype=bool)           # 全特徵基準也放進族群
+    scores = np.array([fitness(m) for m in pop])
+    history = [float(scores.min())]
+
+    for _ in range(GA_GEN):
+        order = np.argsort(scores)
+        new = [pop[i].copy() for i in order[:GA_ELITE]]     # 菁英保留
+        while len(new) < GA_POP:
+            # 錦標賽選擇
+            a, b = rng.integers(0, GA_POP, 2)
+            p1 = pop[a] if scores[a] < scores[b] else pop[b]
+            a, b = rng.integers(0, GA_POP, 2)
+            p2 = pop[a] if scores[a] < scores[b] else pop[b]
+            pt = rng.integers(1, d) if d > 1 else 1
+            child = np.concatenate([p1[:pt], p2[pt:]])
+            flip = rng.random(d) < GA_MUT
+            child = np.where(flip, ~child, child)
+            new.append(child)
+        pop = np.array(new)
+        scores = np.array([fitness(m) for m in pop])
+        history.append(float(scores.min()))
+
+    best = pop[int(np.argmin(scores))]
+    if not best.any():
+        best = np.ones(d, dtype=bool)
+    return best, _loo_rmse(X[:, best], y), history
+
+
+def feature_analysis(X: np.ndarray, y: np.ndarray, fingerprint: str) -> dict:
+    """GA 選特徵 + Ridge 係數重要度。結果依訓練集指紋快取——每 15 秒輪詢一次
+    不該每次重跑 GA，只有新的排氣週期進來時才需要重算。"""
+    if fingerprint in _ga_cache:
+        return {**_ga_cache[fingerprint], "cached": True}
+
+    mask, rmse_sel, hist = _ga_select(X, y)
+    rmse_all = _loo_rmse(X, y)
+
+    # 特徵已標準化，故 |係數| 可直接互相比較，作為重要度
+    model = _Ridge().fit(X[:, mask], y)
+    coefs = model.beta
+    total = float(np.abs(coefs).sum()) or 1.0
+    imp = sorted(
+        [{"feature": FEATURE_NAMES[i], "coef": round(float(c), 4),
+          "weight": round(float(abs(c)) / total, 4)}
+         for i, c in zip(np.where(mask)[0], coefs)],
+        key=lambda d: -d["weight"])
+
+    res = {
+        "selected":      [FEATURE_NAMES[i] for i in np.where(mask)[0]],
+        "n_selected":    int(mask.sum()),
+        "n_total":       len(FEATURE_NAMES),
+        "rmse_selected": round(rmse_sel, 3) if rmse_sel is not None else None,
+        "rmse_all":      round(rmse_all, 3) if rmse_all is not None else None,
+        "ga_history":    [round(h, 3) for h in hist],
+        "importances":   imp,
+        "cached":        False,
+    }
+    _ga_cache.clear()          # 只留最新一份，避免長期執行累積
+    _ga_cache[fingerprint] = res
+    return res
+
+
 def predict(recs: list) -> dict:
     """對「進行中（最後一次排氣之後）」的週期預測其排氣時的 CH4 峰值。"""
     out = {
@@ -201,6 +287,7 @@ def predict(recs: list) -> dict:
         "history":       [],
         "cycle_progress": None,
         "too_early":     False,
+        "feature_selection": None,
         "caveat":        "CH4 為參考級訊號（排氣瞬間外皆為管路拖尾），"
                          "預測僅供操作參考，不作為證據。",
     }
@@ -228,14 +315,26 @@ def predict(recs: list) -> dict:
         out["reliability"] = "目前週期資料過短，尚無法預測"
         return out
 
+    # GA 選特徵 + Ridge 重要度（即時計算，依訓練集指紋快取）
+    fp = f"{len(y)}|{meta[-1]['vent_time'] if meta else ''}"
     try:
-        model = _Ridge().fit(X, y)
-        pred = float(model.predict(np.array([[cur[k] for k in FEATURE_NAMES]]))[0])
+        fa = feature_analysis(X, y, fp)
+        out["feature_selection"] = fa
+    except Exception as e:
+        out["feature_selection"] = {"error": f"{type(e).__name__}: {e}"}
+        fa = None
+
+    # 預測改用 GA 選中的子集——特徵選擇的意義就在於用它來建模
+    try:
+        cols = ([FEATURE_NAMES.index(f) for f in fa["selected"]]
+                if fa and fa.get("selected") else list(range(len(FEATURE_NAMES))))
+        model = _Ridge().fit(X[:, cols], y)
+        pred = float(model.predict(np.array([[cur[FEATURE_NAMES[i]] for i in cols]]))[0])
     except np.linalg.LinAlgError:
         out["reliability"] = "特徵矩陣退化（樣本間變異不足），無法求解"
         return out
 
-    rmse = _loo_rmse(X, y)
+    rmse = _loo_rmse(X[:, cols], y)
     out["cv_rmse"] = round(rmse, 2) if rmse is not None else None
 
     # ── 週期進度：部分特徵（週期長度、Phase2 時長）會隨週期進行才長大，
@@ -272,6 +371,6 @@ def predict(recs: list) -> dict:
         out["reliability"] = f"樣本 {len(y)} 週期，達穩定建模門檻"
 
     # 樣本內配適值供對照——不是樣本外效能，僅用來看模型有沒有抓到趨勢
-    fitted = model.predict(X)
+    fitted = model.predict(X[:, cols])
     out["history"] = [{**m, "fitted": round(float(f), 2)} for m, f in zip(meta, fitted)]
     return out

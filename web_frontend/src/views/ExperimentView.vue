@@ -69,6 +69,20 @@ const PHASE_META = {
   2: { label: 'Phase 2 產甲烷活躍期', color: '#2ecc71' },
   3: { label: 'Phase 3 底物耗盡期', color: '#e67e22' },
 }
+// 特徵的中文說明，讓重要度圖不必看程式碼也讀得懂
+const FEATURE_LABEL = {
+  cycle_length_min:      '週期長度',
+  phase2_duration_min:   'Phase2 時長',
+  phase2_fraction:       'Phase2 佔比',
+  phase1_mean_slope:     'Phase1 平均 ORP 斜率',
+  phase2_orp_mean:       'Phase2 ORP 均值',
+  phase2_orp_std:        'Phase2 ORP 標準差',
+  phase2_macd_mean:      'Phase2 MACD 均值',
+  orp_drop_magnitude:    'ORP 崩落幅度',
+  phase3_onset_fraction: 'Phase3 起始位置',
+  pressure_mean:         '壓力均值',
+  ph_mean:               'pH 均值',
+}
 async function loadCh4() {
   try {
     const { data } = await apiClient.get('/ch4_prediction')
@@ -322,6 +336,43 @@ onUnmounted(() => clearInterval(pollTimer))
         </div>
       </div>
 
+      <!-- GA 特徵選擇 + Ridge 特徵重要度（即時計算）-->
+      <div v-if="ch4.feature_selection && !ch4.feature_selection.error" class="fi-block">
+        <div class="fi-head">
+          <span class="fi-title">特徵重要度</span>
+          <span class="fi-meta">
+            GA 自 {{ ch4.feature_selection.n_total }} 個特徵選出
+            <b>{{ ch4.feature_selection.n_selected }}</b> 個 ·
+            LOO-CV RMSE <b>{{ ch4.feature_selection.rmse_selected }}</b>
+            <span class="fi-base">（全特徵 {{ ch4.feature_selection.rmse_all }}）</span>
+          </span>
+          <!-- ≥2 序列必須有圖例；顏色不單獨承載意義，數值另以正負號標示 -->
+          <span class="fi-legend">
+            <i class="sw sw-pos"></i>正向
+            <i class="sw sw-neg"></i>負向
+          </span>
+        </div>
+
+        <div class="fi-rows">
+          <div v-for="f in ch4.feature_selection.importances" :key="f.feature" class="fi-row"
+               :title="`${FEATURE_LABEL[f.feature] || f.feature}：權重 ${(f.weight*100).toFixed(1)}%，標準化係數 ${f.coef}`">
+            <span class="fi-label">{{ FEATURE_LABEL[f.feature] || f.feature }}</span>
+            <span class="fi-track">
+              <span class="fi-bar" :class="f.coef >= 0 ? 'bar-pos' : 'bar-neg'"
+                    :style="{ width: Math.max(f.weight * 100, 1.5) + '%' }"></span>
+            </span>
+            <span class="fi-val">
+              {{ (f.weight * 100).toFixed(1) }}%
+              <span class="fi-coef">{{ f.coef >= 0 ? '+' : '' }}{{ f.coef }}</span>
+            </span>
+          </div>
+        </div>
+        <div class="fi-note">
+          權重＝|標準化 Ridge 係數| 佔比；符號表示該特徵推高（+）或壓低（−）CH4 峰值。
+          <b>樣本 {{ ch4.n_train }} 週期下，特徵選擇本身即有選擇偏差，排序僅供探索。</b>
+        </div>
+      </div>
+
       <div v-if="ch4.history?.length" class="ch4-hist">
         <span class="hist-label">歷次排氣（實際 → 樣本內配適）</span>
         <span v-for="h in ch4.history.slice(-6)" :key="h.vent_time" class="hist-item">
@@ -541,9 +592,12 @@ onUnmounted(() => clearInterval(pollTimer))
 .phase-tag { font-size: 0.68rem; padding: 2px 8px; border: 1px solid; border-radius: 10px; }
 .ch4-body { display: flex; gap: 1.5rem; align-items: flex-start; flex-wrap: wrap; }
 .ch4-main { display: flex; flex-direction: column; min-width: 190px; }
-.ch4-val { font-size: 2rem; font-weight: 700; font-family: monospace; color: #d8c8f0; line-height: 1.1; }
+/* hero 數字用比例字：等寬數字在大字級下會顯得鬆散（見 dataviz anti-patterns）。
+   下方 .fi-val 則保留等寬，因為那些數字是逐列垂直對齊的表格值 */
+.ch4-val { font-size: 2rem; font-weight: 700; color: #d8c8f0; line-height: 1.1;
+  font-variant-numeric: proportional-nums; }
 .ch4-val small { font-size: 0.9rem; color: #7a6a94; margin-left: 2px; }
-.ch4-na { font-size: 2rem; font-weight: 700; font-family: monospace; color: #4a4458; line-height: 1.1; }
+.ch4-na { font-size: 2rem; font-weight: 700; color: #4a4458; line-height: 1.1; }
 .ch4-sub { font-size: 0.66rem; color: #6a5f80; margin-top: 4px; }
 .ch4-meta { flex: 1; min-width: 240px; font-size: 0.72rem; color: #8a7fa0; line-height: 1.7; }
 .ch4-meta b { color: #c8b8e0; }
@@ -557,6 +611,38 @@ onUnmounted(() => clearInterval(pollTimer))
 .hist-item b { color: #b8a8d0; }
 .hist-fit { color: #55495f; }
 .ch4-caveat { margin-top: 8px; font-size: 0.64rem; color: #6a5a5a; line-height: 1.5; }
+
+/* 特徵重要度：發散配色（正/負），已用 dataviz validator 對本面板底色 #16121c
+   驗過 CVD ΔE 23.6 / normal 31.9 / 對比 ≥3:1，全數通過 */
+.fi-block { margin-top: 12px; padding-top: 10px; border-top: 1px solid #241c30; }
+.fi-head { display: flex; align-items: baseline; gap: 10px; flex-wrap: wrap; margin-bottom: 8px; }
+.fi-title { font-size: 0.78rem; font-weight: 700; color: #b8a8d0; }
+.fi-meta { font-size: 0.68rem; color: #7a6f8c; }
+.fi-meta b { color: #c8b8e0; }
+.fi-base { color: #55495f; }
+.fi-legend { margin-left: auto; font-size: 0.66rem; color: #7a6f8c; display: flex;
+  align-items: center; gap: 5px; }
+.sw { width: 9px; height: 9px; border-radius: 2px; display: inline-block; }
+.sw-pos { background: #3987e5; }
+.sw-neg { background: #e34948; margin-left: 6px; }
+
+.fi-rows { display: flex; flex-direction: column; gap: 2px; }   /* 2px 條間留白 */
+.fi-row { display: flex; align-items: center; gap: 9px; padding: 1px 0; }
+.fi-row:hover { background: #1b1622; }
+.fi-label { flex: 0 0 150px; font-size: 0.68rem; color: #9a8fb0; text-align: right; }
+.fi-track { flex: 1; height: 13px; background: #201a2a; border-radius: 2px; overflow: hidden; }
+.fi-bar { display: block; height: 100%; border-radius: 0 4px 4px 0; }  /* 資料端圓角 4px */
+.bar-pos { background: #3987e5; }
+.bar-neg { background: #e34948; }
+.fi-val { flex: 0 0 110px; font-size: 0.68rem; font-family: monospace; color: #c8b8e0; }
+.fi-coef { color: #6a5f80; margin-left: 4px; }
+.fi-note { margin-top: 7px; font-size: 0.63rem; color: #6a5f80; line-height: 1.55; }
+.fi-note b { color: #a08a70; }
+
+@media (max-width: 700px) {
+  .fi-label { flex-basis: 96px; }
+  .fi-val { flex-basis: 84px; }
+}
 
 .toolbar { display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 12px; margin-bottom: 10px; }
 .baseline-box { display: flex; align-items: center; gap: 10px; background: #121212; border: 1px solid #222;
