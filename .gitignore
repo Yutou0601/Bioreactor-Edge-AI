@@ -38,3 +38,6 @@ dist/
 
 # 實驗批次落地儲存（機器本地執行期資料，不上傳）
 edge_backend/experiment_runs.json
+
+# 控制台的本機設定（各台機器的 CSV 路徑不同，不上傳）
+control_panel.json

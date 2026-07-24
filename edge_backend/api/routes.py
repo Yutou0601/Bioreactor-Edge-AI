@@ -1,6 +1,7 @@
 import io
 import re
 import time
+from datetime import datetime
 import numpy as np
 from fastapi import APIRouter, HTTPException, File, UploadFile, Query
 from fastapi.responses import StreamingResponse
@@ -23,6 +24,44 @@ _feature_extractor = ORPFeatureExtractor(
 )
 
 router = APIRouter()
+
+_BOOT_TS = time.time()
+
+
+# ==========================================
+# 健康檢查（給桌面控制台輪詢用）
+# ==========================================
+@router.get("/health")
+def health():
+    """極輕量的存活與資料新鮮度檢查——控制台每幾秒打一次，不可做重運算。
+
+    2026-07-22 監控電腦自動更新後記錄靜默中斷 17.5 小時無人察覺，故此端點的
+    重點不只是「後端活著」，而是「**資料還有在進來嗎**」：data_stale 為 True
+    代表後端雖然活著，但已經很久沒收到新的感測資料，需要人介入檢查記錄來源。
+    """
+    last_ts = None
+    stale_min = None
+    if sensor_records:
+        last_ts = max((r.get("timestamp") or "") for r in sensor_records) or None
+        if last_ts:
+            try:
+                delta = datetime.now() - datetime.strptime(last_ts, "%Y-%m-%d %H:%M:%S")
+                stale_min = round(max(delta.total_seconds() / 60.0, 0.0), 1)
+            except ValueError:
+                pass
+
+    running = next((r for r in exp.experiment_runs if r.get("status") == "running"), None)
+    return {
+        "status":         "ok",
+        "uptime_min":     round((time.time() - _BOOT_TS) / 60.0, 1),
+        "record_count":   len(sensor_records),
+        "last_timestamp": last_ts,
+        "staleness_min":  stale_min,
+        # 門檻與 experiment_store 的斷點判定一致，兩邊對「多久算沒資料」有共同定義
+        "data_stale":     stale_min is not None and stale_min > exp.GAP_MINUTES,
+        "running_run":    running["run_id"] if running else None,
+        "n_runs":         len(exp.experiment_runs),
+    }
 
 
 # ==========================================
