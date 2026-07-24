@@ -589,20 +589,29 @@ class ControlPanel:
         self.log("檢查更新中…", "cmd")
         self._refresh_git()
         behind = self.git_info["behind"]
-        if behind == 0:
-            self.log("已是最新版本，無需更新。", "ok")
-            return
-        if behind is None:
-            self.log("無法確認遠端狀態（可能沒網路）。仍可手動執行更新。", "warn")
 
-        if not messagebox.askyesno(
-                "執行更新",
-                f"遠端有 {behind if behind else '未知數量'} 個新 commit。\n\n"
-                "更新會執行：git pull → 安裝套件 → 重建前端 → 重啟後端。\n"
-                "期間記錄會短暫中斷，且後端記憶體資料會清空（需重新匯入 CSV）。\n\n"
-                "確定要現在更新嗎？"):
-            self.log("已取消更新。", "info")
-            return
+        if behind == 0:
+            # 已在最新版不代表「不用做事」：若剛才是手動 git pull 拉的，
+            # 前端還沒重建、Jetson 也還沒同步，直接跳過會留下前後端版本不一致。
+            if not messagebox.askyesno(
+                    "已是最新版本",
+                    "程式碼已是最新（可能是剛才手動 git pull 過）。\n\n"
+                    "但**前端可能尚未重建、Jetson 可能尚未同步**。\n"
+                    "要重新執行「安裝套件 → 重建前端 → 同步 Jetson → 重啟後端」嗎？"):
+                self.log("已是最新版本，未執行其他動作。", "ok")
+                return
+            self.log("已是最新版，仍執行重建與同步…", "info")
+        else:
+            if behind is None:
+                self.log("無法確認遠端狀態（可能沒網路）。", "warn")
+            if not messagebox.askyesno(
+                    "執行更新",
+                    f"遠端有 {behind if behind else '未知數量'} 個新 commit。\n\n"
+                    "更新會執行：git pull → 安裝套件 → 重建前端 → 同步 Jetson → 重啟後端。\n"
+                    "期間記錄會短暫中斷，且後端記憶體資料會清空（需重新匯入 CSV）。\n\n"
+                    "確定要現在更新嗎？"):
+                self.log("已取消更新。", "info")
+                return
 
         self.log("執行 git pull（本機）…", "cmd")
         if not self._run_stream(["git", "pull"], ROOT, "git pull"):
