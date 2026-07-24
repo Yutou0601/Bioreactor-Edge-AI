@@ -61,6 +61,21 @@ const liveChart = computed(() => {
   }
 })
 
+// CH4 峰值即時預測。目標訊號（CH4）本身只有排氣瞬間有效、樣本又少，
+// 故一律連同 n_train / cv_rmse / 可靠度一起顯示，狀態非 ok 時不顯示數字。
+const ch4 = ref(null)
+const PHASE_META = {
+  1: { label: 'Phase 1 底物利用期', color: '#e74c3c' },
+  2: { label: 'Phase 2 產甲烷活躍期', color: '#2ecc71' },
+  3: { label: 'Phase 3 底物耗盡期', color: '#e67e22' },
+}
+async function loadCh4() {
+  try {
+    const { data } = await apiClient.get('/ch4_prediction')
+    ch4.value = data
+  } catch { ch4.value = null }
+}
+
 async function loadRuns() {
   try {
     const { data } = await apiClient.get('/experiment/runs')
@@ -175,7 +190,10 @@ async function exportReport(f, level = 'runs') {
   } catch (e) { flash('匯出失敗：' + (e.message || '')) }
 }
 
-onMounted(() => { loadRuns(); pollTimer = setInterval(loadRuns, 15000) })
+onMounted(() => {
+  loadRuns(); loadCh4()
+  pollTimer = setInterval(() => { loadRuns(); loadCh4() }, 15000)
+})
 onUnmounted(() => clearInterval(pollTimer))
 </script>
 
@@ -268,6 +286,51 @@ onUnmounted(() => clearInterval(pollTimer))
         </svg>
         <div class="lc-axis"><span>{{ liveChart.t0 }}</span><span class="lc-lbl">— 下限補氣線 ·· 基準線</span><span>{{ liveChart.t1 }}</span></div>
       </div>
+    </div>
+
+    <!-- CH4 峰值即時預測 -->
+    <div v-if="ch4" class="ch4-panel">
+      <div class="ch4-head">
+        <span class="ch4-title">CH4 排氣峰值 · 即時預測</span>
+        <span v-if="ch4.current_phase" class="phase-tag"
+              :style="{ color: PHASE_META[ch4.current_phase]?.color, borderColor: PHASE_META[ch4.current_phase]?.color }">
+          {{ PHASE_META[ch4.current_phase]?.label }}
+        </span>
+      </div>
+
+      <div class="ch4-body">
+        <!-- 只有 status=ok 才顯示數字。其餘狀態一律顯示原因，不顯示可能誤導的值 -->
+        <div class="ch4-main">
+          <template v-if="ch4.status === 'ok'">
+            <span class="ch4-val">{{ fmt(ch4.predicted_peak, 1) }}<small>%</small></span>
+            <span class="ch4-sub">預測峰值 · ±{{ fmt(ch4.cv_rmse, 1) }} (LOO-CV RMSE)</span>
+          </template>
+          <template v-else>
+            <span class="ch4-na">—</span>
+            <span class="ch4-sub">尚不提供預測值</span>
+          </template>
+        </div>
+
+        <div class="ch4-meta">
+          <div><b>{{ ch4.n_train }}</b> 個已完成排氣週期（訓練樣本）</div>
+          <div v-if="ch4.cycle_progress !== null">
+            本週期進度 <b>{{ (ch4.cycle_progress * 100).toFixed(0) }}%</b>
+          </div>
+          <div class="ch4-why" :class="ch4.status === 'ok' ? 'w-warn' : 'w-block'">
+            {{ ch4.reliability }}
+          </div>
+        </div>
+      </div>
+
+      <div v-if="ch4.history?.length" class="ch4-hist">
+        <span class="hist-label">歷次排氣（實際 → 樣本內配適）</span>
+        <span v-for="h in ch4.history.slice(-6)" :key="h.vent_time" class="hist-item">
+          {{ h.vent_time.slice(5, 10) }}
+          <b>{{ h.actual_peak }}</b><span class="hist-fit">/{{ h.fitted }}</span>
+        </span>
+      </div>
+
+      <div class="ch4-caveat">⚠ {{ ch4.caveat }}</div>
     </div>
 
     <!-- 基準值 + 建立計畫 + 手動新增 -->
@@ -469,6 +532,31 @@ onUnmounted(() => clearInterval(pollTimer))
 .lc-axis { display: flex; justify-content: space-between; font-size: 0.62rem; color: #4a5a68; margin-top: 3px; font-family: monospace; }
 .lc-axis .lc-lbl { font-family: inherit; }
 .sm { font-size: 0.68rem; line-height: 1.3; }
+
+/* CH4 峰值即時預測 */
+.ch4-panel { background: #16121c; border: 1px solid #2e2440; border-radius: 8px;
+  padding: 1rem 1.25rem; margin-bottom: 1.25rem; }
+.ch4-head { display: flex; align-items: center; gap: 10px; margin-bottom: 10px; flex-wrap: wrap; }
+.ch4-title { font-size: 0.95rem; font-weight: 700; color: #b89ae8; }
+.phase-tag { font-size: 0.68rem; padding: 2px 8px; border: 1px solid; border-radius: 10px; }
+.ch4-body { display: flex; gap: 1.5rem; align-items: flex-start; flex-wrap: wrap; }
+.ch4-main { display: flex; flex-direction: column; min-width: 190px; }
+.ch4-val { font-size: 2rem; font-weight: 700; font-family: monospace; color: #d8c8f0; line-height: 1.1; }
+.ch4-val small { font-size: 0.9rem; color: #7a6a94; margin-left: 2px; }
+.ch4-na { font-size: 2rem; font-weight: 700; font-family: monospace; color: #4a4458; line-height: 1.1; }
+.ch4-sub { font-size: 0.66rem; color: #6a5f80; margin-top: 4px; }
+.ch4-meta { flex: 1; min-width: 240px; font-size: 0.72rem; color: #8a7fa0; line-height: 1.7; }
+.ch4-meta b { color: #c8b8e0; }
+.ch4-why { margin-top: 4px; padding: 5px 9px; border-radius: 5px; line-height: 1.5; }
+.w-warn { background: #1e1810; color: #d0a24a; }
+.w-block { background: #241820; color: #c88aa8; }
+.ch4-hist { margin-top: 10px; padding-top: 9px; border-top: 1px solid #241c30;
+  font-size: 0.68rem; color: #6a5f80; display: flex; gap: 10px; flex-wrap: wrap; align-items: baseline; }
+.hist-label { color: #55495f; }
+.hist-item { font-family: monospace; }
+.hist-item b { color: #b8a8d0; }
+.hist-fit { color: #55495f; }
+.ch4-caveat { margin-top: 8px; font-size: 0.64rem; color: #6a5a5a; line-height: 1.5; }
 
 .toolbar { display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 12px; margin-bottom: 10px; }
 .baseline-box { display: flex; align-items: center; gap: 10px; background: #121212; border: 1px solid #222;

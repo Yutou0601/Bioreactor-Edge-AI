@@ -345,6 +345,28 @@ def get_phase():
     }
 
 
+# ==========================================
+# 通道 6：CH4 峰值即時預測
+# ==========================================
+@router.get("/ch4_prediction")
+def ch4_prediction():
+    """對進行中的週期即時預測排氣時的 CH4 峰值。
+
+    回傳一律附帶 n_train / cv_rmse / reliability / caveat——CH4 為參考級訊號
+    且歷史完整週期樣本極少，只給數字會誤導。樣本不足時回 status="insufficient"
+    且不給預測值，這是刻意設計。
+    """
+    from core import ch4_realtime
+    try:
+        return ch4_realtime.predict(_sorted_records())
+    except Exception as e:
+        # 這是選配的分析功能，壞掉不應讓前端整頁報錯或讓控制台誤判後端掛了
+        return {"status": "error", "n_train": 0, "predicted_peak": None,
+                "cv_rmse": None, "current_phase": None, "features": None, "history": [],
+                "reliability": f"分析失敗：{type(e).__name__}: {e}",
+                "caveat": "CH4 為參考級訊號，預測僅供操作參考，不作為證據。"}
+
+
 @router.get("/analysis")
 def get_analysis():
     """
