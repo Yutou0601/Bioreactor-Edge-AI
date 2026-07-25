@@ -1,0 +1,220 @@
+"""
+每循環共變數關聯分析 —— 進氣前 ORP → 下降速率 / 斜率平緩化
+===========================================================
+2026-07-26 產出。這支不做機理分離（那需要暫態，見 co2_greybox_identifiability.py），
+而是回答一個務實、且是核心的問題：
+
+    「斜率平緩化」到底是生物（產甲烷稀釋 CO2）還是物理（溶解趨近飽和）造成的？
+
+判斷方式：看平緩化是否隨「菌群成熟度」變動。菌群成熟度用**進氣前 ORP**代理
+（系統逐循環自動記錄）。若控制了循環時間 n 之後，平緩化仍與進氣前 ORP 顯著相關，
+則平緩化帶生物成因；若只與物理因素（n、壓力區間）相關而與菌態無關，則屬物理。
+
+吃的是系統匯出的「每循環特徵」CSV（/experiment/export/cycles）。
+
+**統計上的誠實處理**：同一批次內的多個循環是偽重複（同一菌群狀態），不是獨立樣本。
+故所有回歸都用「以批次分群的叢集穩健標準誤」(cluster-robust SE)，把有效樣本數
+降到接近批次數而非循環數——否則 p 值會過度樂觀。另同時報「批次平均後」的回歸
+當交叉檢查。只用 numpy + scipy.stats（不碰 sklearn 那顆會被系統政策擋的 DLL）。
+"""
+
+import argparse
+import sys
+
+import numpy as np
+import pandas as pd
+from scipy import stats
+
+if sys.platform == "win32":
+    sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+
+# CSV 中文表頭 → 內部鍵（對應 experiment_report.CYCLE_COLUMNS）
+HEADER_MAP = {
+    "批次": "run_id", "循環時間(每時幾分)": "n_minutes", "週期序": "cycle",
+    "起始時間": "start", "時長(hr)": "duration_hr", "壓力起": "pressure_start",
+    "壓力末": "pressure_end", "下降速率(kg/cm²/hr)": "drop_rate",
+    "早段斜率": "slope_early", "晚段斜率": "slope_late",
+    "平緩化(早-晚·疑產甲烷)": "flattening", "進氣前ORP(菌群共變數)": "pre_injection_orp",
+    "ORP崩落": "orp_crash", "資料完整性": "quality",
+}
+
+
+def load_cycles(path: str) -> pd.DataFrame:
+    df = pd.read_csv(path)
+    df = df.rename(columns={c: HEADER_MAP.get(c.strip(), c.strip()) for c in df.columns})
+    if "n_minutes" in df:      # "1 分" → 1
+        df["n_minutes"] = (df["n_minutes"].astype(str)
+                           .str.extract(r"([\d.]+)").astype(float))
+    for c in ("drop_rate", "flattening", "pre_injection_orp",
+              "slope_early", "slope_late", "orp_crash"):
+        if c in df:
+            df[c] = pd.to_numeric(df[c], errors="coerce")
+    # 只保留完整循環（跨斷點的循環平緩化不可信）
+    if "quality" in df:
+        df = df[df["quality"].astype(str).str.contains("完整", na=False)]
+    return df.reset_index(drop=True)
+
+
+# ── 叢集穩健 OLS（以批次分群）─────────────────────────
+def ols_cluster(y, X, groups, names):
+    """最小平方 + 以 groups 分群的叢集穩健標準誤（CR1 修正）。
+    回傳每個係數的 (估計, 穩健SE, t, 雙尾p)。有效自由度取「群數−參數數」，
+    這正是把偽重複折算成獨立樣本的關鍵。"""
+    X = np.asarray(X, float); y = np.asarray(y, float)
+    n, k = X.shape
+    XtX_inv = np.linalg.pinv(X.T @ X)
+    beta = XtX_inv @ X.T @ y
+    resid = y - X @ beta
+
+    uniq = np.unique(groups)
+    G = len(uniq)
+    if G < 2:                       # 叢集穩健需至少 2 群，否則無法估群間變異
+        return [(nm, beta[i], np.nan, np.nan, np.nan) for i, nm in enumerate(names)], G, 0
+    meat = np.zeros((k, k))
+    for g in uniq:
+        m = groups == g
+        Xg = X[m]; ug = resid[m]
+        s = Xg.T @ ug
+        meat += np.outer(s, s)
+    dfc = (G / (G - 1)) * ((n - 1) / (n - k))          # CR1 小樣本修正
+    cov = dfc * XtX_inv @ meat @ XtX_inv
+    se = np.sqrt(np.clip(np.diag(cov), 0, None))
+    dof = max(G - k, 1)                                 # 以群數定自由度
+    out = []
+    for i, nm in enumerate(names):
+        t = beta[i] / se[i] if se[i] > 0 else np.nan
+        p = 2 * stats.t.sf(abs(t), dof) if np.isfinite(t) else np.nan
+        out.append((nm, beta[i], se[i], t, p))
+    return out, G, dof
+
+
+def _design(df, cols):
+    X = np.column_stack([np.ones(len(df))] + [df[c].values for c in cols])
+    return X, ["截距"] + cols
+
+
+def partial_corr(df, x, y, control):
+    """x 與 y 在控制 control 後的偏相關（各自對 control 迴歸取殘差再相關）。"""
+    d = df[[x, y, control]].dropna()
+    if len(d) < 5:
+        return np.nan, np.nan, len(d)
+    def resid(t):
+        A = np.column_stack([np.ones(len(d)), d[control].values])
+        b = np.linalg.lstsq(A, d[t].values, rcond=None)[0]
+        return d[t].values - A @ b
+    rx, ry = resid(x), resid(y)
+    if np.std(rx) < 1e-12 or np.std(ry) < 1e-12:
+        return np.nan, np.nan, len(d)
+    r, p = stats.pearsonr(rx, ry)
+    return r, p, len(d)
+
+
+def _fmt_p(p):
+    return "n/a" if not np.isfinite(p) else (f"{p:.4f}" + (" *" if p < 0.05 else ""))
+
+
+def analyze(df: pd.DataFrame):
+    need = {"drop_rate", "flattening", "pre_injection_orp", "n_minutes", "run_id"}
+    if not need.issubset(df.columns):
+        print(f"[錯誤] CSV 缺欄位：{need - set(df.columns)}")
+        return
+    d = df.dropna(subset=["drop_rate", "pre_injection_orp", "n_minutes"]).copy()
+    G = d["run_id"].nunique()
+    print(f"\n樣本：{len(d)} 個完整循環，來自 {G} 個批次"
+          f"（每批 {len(d)/max(G,1):.1f} 循環）")
+    if G < 3 or len(d) < 6:
+        print("⚠ 批次數 <3 或循環 <6，叢集穩健回歸無法成立，暫不分析。")
+        print("  （需 ≥3 批次、且 n 與進氣前 ORP 均有變異；正式實驗 9 批次可滿足。）")
+        return
+
+    grp = d["run_id"].values
+
+    # ① 下降速率 ~ n + 進氣前ORP（分離循環時間效應與菌群成熟效應）
+    print("\n── ① 下降速率 ~ 循環時間 n + 進氣前ORP（叢集穩健，以批次分群）──")
+    X, names = _design(d, ["n_minutes", "pre_injection_orp"])
+    res, G, dof = ols_cluster(d["drop_rate"].values, X, grp, names)
+    for nm, b, se, t, p in res:
+        print(f"   {nm:<18} 係數={b:+.6g}  穩健SE={se:.3g}  t={t:+.2f}  p={_fmt_p(p)}")
+    print(f"   （有效自由度 {dof}，非循環數 {len(d)}——已折算偽重複）")
+
+    # ② 斜率平緩化 ~ n + 進氣前ORP —— 核心：平緩化是生物還是物理？
+    dd = d.dropna(subset=["flattening"])
+    if len(dd) >= 6 and dd["run_id"].nunique() >= 3:
+        print("\n── ② 斜率平緩化 ~ 循環時間 n + 進氣前ORP（核心判斷）──")
+        X2, names2 = _design(dd, ["n_minutes", "pre_injection_orp"])
+        res2, G2, dof2 = ols_cluster(dd["flattening"].values, X2, dd["run_id"].values, names2)
+        p_orp = np.nan
+        for nm, b, se, t, p in res2:
+            print(f"   {nm:<18} 係數={b:+.6g}  穩健SE={se:.3g}  t={t:+.2f}  p={_fmt_p(p)}")
+            if nm == "pre_injection_orp":
+                p_orp = p
+        r_pc, p_pc, n_pc = partial_corr(dd, "pre_injection_orp", "flattening", "n_minutes")
+        print(f"   偏相關 平緩化 vs 進氣前ORP | 控制 n：r={r_pc:+.3f}  p={_fmt_p(p_pc)}  (n={n_pc})")
+        print("\n   ▶ 判讀：")
+        if np.isfinite(p_orp) and p_orp < 0.05:
+            print("     控制 n 後平緩化仍顯著隨進氣前ORP變動 → 平緩化帶**生物成因**")
+            print("     （支持洪博假說：產甲烷稀釋 CO2、使溶解變慢）")
+        else:
+            print("     控制 n 後平緩化與進氣前ORP無顯著關聯 → 傾向**物理成因**")
+            print("     （溶解趨近飽和即可解釋，不需生物機制）")
+        print("     ※ 此判讀強度受批次數限制；批次少時把「無顯著」讀成「證據不足」而非「無關」。")
+    else:
+        print("\n── ② 斜率平緩化：完整且有平緩化的循環不足，暫略 ──")
+
+    # ③ 批次平均後的交叉檢查（每批一點，完全避開偽重複）
+    print("\n── ③ 交叉檢查：批次平均後（每批一個獨立點）──")
+    agg = d.groupby("run_id").agg(n=("n_minutes", "mean"),
+                                  rate=("drop_rate", "mean"),
+                                  orp=("pre_injection_orp", "mean")).reset_index()
+    if len(agg) >= 3:
+        for x in ("n", "orp"):
+            if agg[x].std() > 1e-9:
+                r, p = stats.pearsonr(agg[x], agg["rate"])
+                lab = "循環時間 n" if x == "n" else "進氣前ORP"
+                print(f"   批次層 下降速率 vs {lab}：r={r:+.3f}  p={_fmt_p(p)}  (批次數={len(agg)})")
+    else:
+        print("   批次數 <3，無法做批次層相關。")
+
+
+def make_demo(bio: bool = True) -> pd.DataFrame:
+    """合成每循環資料驗證管線。bio=True：平緩化真的隨菌群成熟(ORP)上升（生物）；
+    bio=False：平緩化只隨物理（壓力區間）變、與 ORP 無關。"""
+    rng = np.random.default_rng(0)
+    rows = []
+    for level, n in enumerate([1, 5, 10]):
+        for rep in range(3):
+            run = f"{level+1}.{rep+1}"
+            orp0 = 540 + level * 8 + rep * 2          # 菌齡隨天數(≈level)上升
+            for cyc in range(3):
+                orp = orp0 + cyc * 3 + rng.normal(0, 1.5)
+                rate = 0.013 + 0.0003 * n + 0.00004 * (orp - 540) + rng.normal(0, 0.0005)
+                flat = (0.002 + (0.00012 * (orp - 540) if bio else 0.0)
+                        + 0.00005 * n + rng.normal(0, 0.0008))
+                rows.append(dict(run_id=run, n_minutes=n, cycle=cyc + 1,
+                                 drop_rate=round(rate, 5), flattening=round(flat, 5),
+                                 pre_injection_orp=round(orp, 1), quality="完整"))
+    return pd.DataFrame(rows)
+
+
+def main():
+    ap = argparse.ArgumentParser(description="每循環共變數關聯分析")
+    ap.add_argument("csv", nargs="?", help="每循環特徵 CSV（/experiment/export/cycles）")
+    ap.add_argument("--demo", choices=["bio", "phys"],
+                    help="用合成資料驗證管線：bio=平緩化含生物成因；phys=純物理")
+    args = ap.parse_args()
+
+    print("=" * 62)
+    print(" 每循環共變數關聯分析 —— 平緩化是生物還是物理？")
+    print("=" * 62)
+    if args.demo:
+        print(f" [示範模式：{args.demo}] 合成資料，真值已知，用來驗證判讀正確")
+        analyze(make_demo(bio=(args.demo == "bio")))
+    elif args.csv:
+        analyze(load_cycles(args.csv))
+    else:
+        print(" 用法：python co2_covariate_association.py cycles.csv")
+        print("   或：python co2_covariate_association.py --demo bio   （驗證管線）")
+
+
+if __name__ == "__main__":
+    main()
