@@ -89,6 +89,7 @@ async function loadCh4() {
     ch4.value = data
   } catch { ch4.value = null }
 }
+const isXgb = computed(() => ch4.value?.feature_selection?.method === 'xgboost_shap')
 
 async function loadRuns() {
   try {
@@ -336,40 +337,39 @@ onUnmounted(() => clearInterval(pollTimer))
         </div>
       </div>
 
-      <!-- GA 特徵選擇 + Ridge 特徵重要度（即時計算）-->
+      <!-- 特徵重要度（即時計算）。方法二選一：XGBoost+TreeSHAP 或 GA+Ridge -->
       <div v-if="ch4.feature_selection && !ch4.feature_selection.error" class="fi-block">
         <div class="fi-head">
           <span class="fi-title">特徵重要度</span>
+          <span class="fi-badge">{{ isXgb ? 'XGBoost + TreeSHAP' : 'GA + Ridge' }}</span>
           <span class="fi-meta">
-            GA 自 {{ ch4.feature_selection.n_total }} 個特徵選出
-            <b>{{ ch4.feature_selection.n_selected }}</b> 個 ·
-            LOO-CV RMSE <b>{{ ch4.feature_selection.rmse_selected }}</b>
-            <span class="fi-base">（全特徵 {{ ch4.feature_selection.rmse_all }}）</span>
+            <template v-if="isXgb">{{ ch4.feature_selection.n_total }} 個特徵中 <b>{{ ch4.feature_selection.n_selected }}</b> 個有貢獻</template>
+            <template v-else>GA 自 {{ ch4.feature_selection.n_total }} 個選出 <b>{{ ch4.feature_selection.n_selected }}</b> 個</template>
+            · LOO-CV RMSE <b>{{ ch4.feature_selection.rmse_selected }}</b>
+            <span v-if="!isXgb" class="fi-base">（全特徵 {{ ch4.feature_selection.rmse_all }}）</span>
           </span>
           <!-- ≥2 序列必須有圖例；顏色不單獨承載意義，數值另以正負號標示 -->
           <span class="fi-legend">
-            <i class="sw sw-pos"></i>正向
-            <i class="sw sw-neg"></i>負向
+            <i class="sw sw-pos"></i>推高
+            <i class="sw sw-neg"></i>壓低
           </span>
         </div>
 
         <div class="fi-rows">
           <div v-for="f in ch4.feature_selection.importances" :key="f.feature" class="fi-row"
-               :title="`${FEATURE_LABEL[f.feature] || f.feature}：權重 ${(f.weight*100).toFixed(1)}%，標準化係數 ${f.coef}`">
+               :title="`${FEATURE_LABEL[f.feature] || f.feature}：權重 ${(f.weight*100).toFixed(1)}%`">
             <span class="fi-label">{{ FEATURE_LABEL[f.feature] || f.feature }}</span>
             <span class="fi-track">
               <span class="fi-bar" :class="f.coef >= 0 ? 'bar-pos' : 'bar-neg'"
                     :style="{ width: Math.max(f.weight * 100, 1.5) + '%' }"></span>
             </span>
-            <span class="fi-val">
-              {{ (f.weight * 100).toFixed(1) }}%
-              <span class="fi-coef">{{ f.coef >= 0 ? '+' : '' }}{{ f.coef }}</span>
-            </span>
+            <span class="fi-val">{{ (f.weight * 100).toFixed(1) }}%</span>
           </div>
         </div>
         <div class="fi-note">
-          權重＝|標準化 Ridge 係數| 佔比；符號表示該特徵推高（+）或壓低（−）CH4 峰值。
-          <b>樣本 {{ ch4.n_train }} 週期下，特徵選擇本身即有選擇偏差，排序僅供探索。</b>
+          <template v-if="isXgb">權重＝平均 |SHAP值| 佔比（TreeSHAP，處理非線性）；顏色表示該特徵推高／壓低 CH4 峰值。</template>
+          <template v-else>權重＝|標準化 Ridge 係數| 佔比；顏色表示該特徵推高／壓低 CH4 峰值。</template>
+          <b>樣本 {{ ch4.n_train }} 週期下，歸因本身有偏差、樹模型易過擬合（故 RMSE 偏高屬正常），排序僅供探索。</b>
         </div>
       </div>
 
@@ -617,6 +617,8 @@ onUnmounted(() => clearInterval(pollTimer))
 .fi-block { margin-top: 12px; padding-top: 10px; border-top: 1px solid #241c30; }
 .fi-head { display: flex; align-items: baseline; gap: 10px; flex-wrap: wrap; margin-bottom: 8px; }
 .fi-title { font-size: 0.78rem; font-weight: 700; color: #b8a8d0; }
+.fi-badge { font-size: 0.62rem; padding: 1px 7px; border-radius: 8px; background: #241c34;
+  color: #9a86c8; border: 1px solid #3a2e52; white-space: nowrap; }
 .fi-meta { font-size: 0.68rem; color: #7a6f8c; }
 .fi-meta b { color: #c8b8e0; }
 .fi-base { color: #55495f; }

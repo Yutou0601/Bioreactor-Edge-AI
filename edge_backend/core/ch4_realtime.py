@@ -240,11 +240,89 @@ def _ga_select(X: np.ndarray, y: np.ndarray, seed: int = 42):
     return best, _loo_rmse(X[:, best], y), history
 
 
+# ── XGBoost + TreeSHAP 特徵歸因（有裝 xgboost 才走，否則自動退回 GA+Ridge）──
+# 部署現實：後端在 Jetson（ARM/資源受限），不強制安裝 xgboost。開發機/監控 PC
+# 裝了就用它做更好的特徵歸因（處理非線性、原生 TreeSHAP），Jetson 沒裝也照跑。
+def _xgb():
+    try:
+        import xgboost as xgb
+        return xgb
+    except Exception:
+        return None
+
+
+def _xgb_loo_rmse(xgb, X, y, params, rounds) -> float:
+    """留一交叉驗證 RMSE（XGBoost 版）。小樣本下唯一誠實的樣本外估計。"""
+    n = len(y)
+    errs = []
+    for i in range(n):
+        m = np.ones(n, dtype=bool); m[i] = False
+        if len(np.unique(y[m])) < 2:
+            continue
+        bst = xgb.train(params, xgb.DMatrix(X[m], label=y[m]), num_boost_round=rounds)
+        pred = float(bst.predict(xgb.DMatrix(X[i:i+1]))[0])
+        errs.append((pred - y[i]) ** 2)
+    return float(np.sqrt(np.mean(errs))) if errs else None
+
+
+def feature_analysis_xgb(xgb, X: np.ndarray, y: np.ndarray) -> dict:
+    """訓練（強正則化的）XGBoost，用內建 TreeSHAP 算每特徵平均|SHAP|當重要度。
+    小樣本（~27 循環）極易過擬合，故：淺樹 max_depth=2、少量 round、強 min_child_weight、
+    子抽樣，並以 LOO-CV RMSE 據實回報樣本外誤差、不看漂亮的訓練內配適。"""
+    params = {"max_depth": 2, "eta": 0.15, "min_child_weight": 3.0,
+              "subsample": 0.8, "colsample_bytree": 0.8, "lambda": 1.0,
+              "objective": "reg:squarederror", "seed": 42, "verbosity": 0}
+    rounds = 40
+    dall = xgb.DMatrix(X, label=y)
+    bst = xgb.train(params, dall, num_boost_round=rounds)
+
+    # 內建 TreeSHAP：每列每特徵的貢獻（最後一欄是基準值），平均|SHAP|＝重要度，
+    # 平均帶符號 SHAP 與特徵值的相關方向＝推高(+)/壓低(−)
+    contribs = bst.predict(dall, pred_contribs=True)[:, :len(FEATURE_NAMES)]
+    mean_abs = np.abs(contribs).mean(axis=0)
+    total = float(mean_abs.sum()) or 1.0
+    imp = []
+    for i, name in enumerate(FEATURE_NAMES):
+        if mean_abs[i] <= 1e-9:
+            continue
+        # 方向：SHAP 值與該特徵值的相關符號（正=特徵越大越推高 CH4）
+        col = X[:, i]
+        sign = 1.0
+        if np.std(col) > 1e-9 and np.std(contribs[:, i]) > 1e-9:
+            sign = float(np.sign(np.corrcoef(col, contribs[:, i])[0, 1]) or 1.0)
+        imp.append({"feature": name, "coef": round(sign * float(mean_abs[i]), 4),
+                    "weight": round(float(mean_abs[i]) / total, 4)})
+    imp.sort(key=lambda d: -d["weight"])
+
+    rmse = _xgb_loo_rmse(xgb, X, y, params, rounds)
+    selected = [d["feature"] for d in imp if d["weight"] >= 0.05]   # 佔比≥5% 視為有貢獻
+    return {
+        "method":        "xgboost_shap",
+        "selected":      selected or [imp[0]["feature"]] if imp else [],
+        "n_selected":    len(selected),
+        "n_total":       len(FEATURE_NAMES),
+        "rmse_selected": round(rmse, 3) if rmse is not None else None,
+        "rmse_all":      round(rmse, 3) if rmse is not None else None,
+        "importances":   imp,
+        "cached":        False,
+    }
+
+
 def feature_analysis(X: np.ndarray, y: np.ndarray, fingerprint: str) -> dict:
-    """GA 選特徵 + Ridge 係數重要度。結果依訓練集指紋快取——每 15 秒輪詢一次
-    不該每次重跑 GA，只有新的排氣週期進來時才需要重算。"""
+    """特徵歸因，依訓練集指紋快取（每 15 秒輪詢不重算，只有新排氣週期進來才算）。
+    有 xgboost → XGBoost+TreeSHAP；否則退回 GA 選特徵 + Ridge 係數重要度。"""
     if fingerprint in _ga_cache:
         return {**_ga_cache[fingerprint], "cached": True}
+
+    xgb = _xgb()
+    if xgb is not None:
+        try:
+            res = feature_analysis_xgb(xgb, X, y)
+            _ga_cache.clear()
+            _ga_cache[fingerprint] = res
+            return res
+        except Exception:
+            pass          # xgboost 失敗（罕見）→ 退回 GA+Ridge，不讓分析中斷
 
     mask, rmse_sel, hist = _ga_select(X, y)
     rmse_all = _loo_rmse(X, y)
@@ -260,6 +338,7 @@ def feature_analysis(X: np.ndarray, y: np.ndarray, fingerprint: str) -> dict:
         key=lambda d: -d["weight"])
 
     res = {
+        "method":        "ga_ridge",
         "selected":      [FEATURE_NAMES[i] for i in np.where(mask)[0]],
         "n_selected":    int(mask.sum()),
         "n_total":       len(FEATURE_NAMES),
