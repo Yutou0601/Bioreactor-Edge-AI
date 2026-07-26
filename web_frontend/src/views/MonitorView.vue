@@ -160,7 +160,8 @@ const fetchRecords = async () => {
   _fetchPending = true
   isLoadingRecords.value = true
   try {
-    const res = await apiClient.get('/records')
+    // 只抓選定時間範圍的資料：視窗越小，傳輸/記憶體/運算越省（LTTB 已處理渲染）
+    const res = await apiClient.get('/records', { params: { limit: timeRange.value } })
     isBackendOnline.value = true
     records.value = res.data
     updateChart()
@@ -274,6 +275,20 @@ const applySGFilter = (data) => {
 }
 
 // 四條線的顯示狀態
+// 圖表時間範圍（1 筆/分鐘 → 筆數＝分鐘數）。預設 1 天，減輕前端負載。
+const TIME_RANGES = [
+  { label: '12 小時', value: 720 },
+  { label: '1 天', value: 1440 },
+  { label: '2 天', value: 2880 },
+  { label: '3 天', value: 4320 },
+]
+const timeRange = ref(1440)
+const changeTimeRange = async (v) => {
+  if (v === timeRange.value) return
+  timeRange.value = v
+  await fetchRecords()          // 立即以新範圍重抓並重繪
+}
+
 const seriesVisible = ref({ raw: true, cleaned: true, sg: true, ema: true })
 const SERIES_NAMES  = { raw: '原始數據', cleaned: '去突波', sg: 'SG 濾波', ema: 'EMA' }
 
@@ -872,6 +887,11 @@ onUnmounted(() => {
             </div>
 
             <div class="chart-meta">
+              <div class="range-picker">
+                <button v-for="r in TIME_RANGES" :key="r.value"
+                  class="range-btn" :class="{ 'range-on': timeRange === r.value }"
+                  @click="changeTimeRange(r.value)">{{ r.label }}</button>
+              </div>
               <span class="record-count">{{ records.length }} 筆</span>
               <span class="click-hint">點擊曲線上的點查看局部分析</span>
               <button class="btn clear-btn"
@@ -1261,6 +1281,15 @@ onUnmounted(() => {
   display: flex; align-items: center; gap: 10px; margin-left: auto;
 }
 .record-count { font-size: 0.75rem; color: #2980b9; font-family: monospace; }
+
+/* 時間範圍選單 */
+.range-picker { display: inline-flex; gap: 2px; background: #10161c; border-radius: 6px; padding: 2px; }
+.range-btn {
+  font-family: inherit; font-size: 0.7rem; padding: 3px 9px; border: none; border-radius: 4px;
+  background: transparent; color: #6a7a88; cursor: pointer; white-space: nowrap;
+}
+.range-btn:hover { color: #9ab5c8; }
+.range-on { background: #1c3a52; color: #6cb6e8; font-weight: 700; }
 
 .clear-btn {
   border-color: #3d1616; color: #c0392b; padding: 3px 10px; font-size: 0.76rem;
