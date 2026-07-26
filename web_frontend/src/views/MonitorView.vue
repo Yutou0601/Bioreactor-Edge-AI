@@ -365,28 +365,32 @@ const initChart = () => {
     },
     series: [
       {
-        name: '原始數據', type: 'line', data: [],
+        name: '原始數據', type: 'line', data: [], sampling: 'lttb',
+
         symbol: 'circle', symbolSize: 3, showSymbol: false,
         lineStyle: { width: 1, color: 'rgba(231,76,60,0.45)' },
         itemStyle: { color: 'rgba(231,76,60,0.45)' },
         z: 1,
       },
       {
-        name: '去突波', type: 'line', data: [],
+        name: '去突波', type: 'line', data: [], sampling: 'lttb',
+
         symbol: 'circle', symbolSize: 3, showSymbol: false,
         lineStyle: { width: 1, color: '#27ae60', type: 'dashed' },
         itemStyle: { color: '#27ae60' },
         z: 2,
       },
       {
-        name: 'SG 濾波', type: 'line', data: [],
+        name: 'SG 濾波', type: 'line', data: [], sampling: 'lttb',
+
         symbol: 'circle', symbolSize: 4, showSymbol: false,
         lineStyle: { width: 2, color: '#f39c12' },
         itemStyle: { color: '#f39c12' },
         z: 3,
       },
       {
-        name: 'EMA', type: 'line', data: [],
+        name: 'EMA', type: 'line', data: [], sampling: 'lttb',
+
         symbol: 'circle', symbolSize: 4, showSymbol: false,
         lineStyle: { width: 2.5, color: '#3498db' },
         itemStyle: { color: '#3498db' },
@@ -476,7 +480,8 @@ const initGasChart = () => {
     },
     series: [
       {
-        name: 'CH4 %', type: 'line', data: [],
+        name: 'CH4 %', type: 'line', data: [], sampling: 'lttb',
+
         symbol: 'circle', symbolSize: 3, showSymbol: false,
         lineStyle: { width: 2, color: '#e67e22' },
         itemStyle: { color: '#e67e22' },
@@ -487,7 +492,8 @@ const initGasChart = () => {
         z: 2,
       },
       {
-        name: 'CO2 %', type: 'line', data: [],
+        name: 'CO2 %', type: 'line', data: [], sampling: 'lttb',
+
         symbol: 'circle', symbolSize: 3, showSymbol: false,
         lineStyle: { width: 1.5, color: '#9b59b6', type: 'dashed' },
         itemStyle: { color: '#9b59b6' },
@@ -603,6 +609,10 @@ onMounted(async () => {
   await fetchPhase()
   initChart()
   initGasChart()
+  // fetchRecords 先跑時 myChart 還是 null、updateChart 直接 return，圖會空白到下次
+  // 輪詢（60 秒）才畫。這裡在建圖後立刻補畫一次，避免載入後空白 60 秒。
+  updateChart()
+  updateGasChart()
   initMqtt()
   // USB 每分鐘一筆，60 秒輪詢一次即可
   pollTimer = setInterval(() => {
