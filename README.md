@@ -22,6 +22,8 @@
 - [計畫背景](#-計畫背景)
 - [系統架構](#-系統架構)
 - [核心演算法](#-核心演算法)
+- [CO2 溶解／生物消耗分離研究](#-co2-溶解生物消耗分離研究)
+- [實驗執行與運維](#-實驗執行與運維)
 - [技術規格](#-技術規格)
 - [安裝與部署](#-安裝與部署)
 - [使用說明](#-使用說明)
@@ -33,11 +35,26 @@
 
 ## 📖 專案簡介
 
-本系統建構於洪政源博士所開發的**微正壓循環生物甲烷化控制系統**之上，作為其智慧感測延伸層，針對氧化還原電位（ORP, Oxidation-Reduction Potential）訊號進行即時動態分析，實現以下三個核心功能：
+本系統建構於洪政源博士所開發的**微正壓循環生物甲烷化控制系統**之上，作為其智慧感測延伸層，針對氧化還原電位（ORP, Oxidation-Reduction Potential）訊號進行即時動態分析，並延伸為完整的**實驗執行、監看與研究分析平台**：
+
+**即時監控與預測（前端呈現）**
 
 1. **即時 ORP 訊號去雜訊**：在 Jetson 邊緣裝置上每分鐘完成突波排除與雙軌濾波
 2. **自適應生物三相位偵測**：自動識別底物利用期（Phase 1）、活躍產甲烷期（Phase 2）、底物耗盡期（Phase 3）
-3. **CH₄ 峰值預測**：結合 LSTM 即時監控與遺傳演算法（GA）+ Ridge Regression 的 per-cycle 峰值預測
+3. **CH₄ 峰值預測與特徵歸因**：per-cycle 峰值預測（Ridge + 外插防護），特徵歸因採
+   **XGBoost + TreeSHAP**（未安裝時自動退回 GA + Ridge）
+
+**實驗執行與資料完整性**
+
+4. **實驗批次管理 + 即時面板**：洗管線→進氣→循環→自動補氣→排氣的批次生命週期管理，
+   自動偵測補氣循環、逐循環計算下降速率與斜率平緩化，並附**記錄健康度告警**
+   （最後一筆資料距今多久、記錄中斷偵測——防止監控電腦靜默中斷）
+5. **桌面控制台**：啟動／更新／健康度監看，現場不需開終端機
+
+**研究分析（離線工具）**
+
+6. **CO2 溶解／生物消耗分離**：以灰箱機理模型 + 可辨識性分析，回答「壓力下降中多少是
+   物理溶解、多少是菌種消耗」，與「斜率平緩化是生物還是物理」
 
 生物甲烷化核心反應式：
 
@@ -215,9 +232,29 @@ Linear Layer（64 → 2）
 
 ---
 
-### 4. 預測層：GA + Ridge CH₄ 峰值預測
+### 4. 預測層：CH₄ 峰值即時預測 + 特徵歸因
 
-#### 特徵選擇：遺傳演算法（GA）
+即時對「進行中的循環」預測排氣時的 CH₄ 峰值，並歸因哪些訊號在解釋它。
+**設計上刻意誠實**——CH₄ 為參考級訊號（僅排氣瞬間有效，其餘 99.98% 為管路拖尾）、
+歷史完整循環樣本極少，故一律附帶 `n_train`／`LOO-CV RMSE`／可靠度，並在下列情況
+**不給預測值只說明原因**：
+
+- **外插防護**：部分特徵隨循環進行才增長，進行中的循環等同外插。實測循環進度 4% 時
+  預測值可達 703%（CH₄ 物理上不可能 >100%）；落在合理值域外一律不顯示。
+- **進度門檻**：循環進度 <85% 不給預測值。
+- **樣本門檻**：完整循環 <30 標為「參考級」。
+
+#### 特徵歸因：XGBoost + TreeSHAP（未安裝時退回 GA + Ridge）
+
+依前沿文獻（樹模型 + SHAP 為 anaerobic digestion 甲烷預測主流），特徵歸因採
+**XGBoost + 內建 TreeSHAP**（`pred_contribs`，不需另裝 shap 套件）。部署考量：後端在
+Jetson（ARM／資源受限），不強制安裝 xgboost——**裝了就用、沒裝自動退回 GA + Ridge**。
+
+> **誠實標示**：n≈9–27 循環的小樣本下，樹模型高變異、LOO-CV RMSE 會**比 Ridge 高**
+> （實測 5.3 vs 1.7）。XGBoost 的價值在**歸因更乾淨**（TreeSHAP 處理非線性），
+> 不是這種樣本量的預測精度。前端面板與說明均據實標明此限制。
+
+**退回路徑——特徵選擇：遺傳演算法（GA）**
 
 搜索空間 2¹¹ = 2048 種特徵子集，以 LOO-CV RMSE 作為適應度函數：
 
@@ -266,6 +303,69 @@ Linear Layer（64 → 2）
 
 ---
 
+## 🔬 CO2 溶解／生物消耗分離研究
+
+本專案的核心科學問題：反應槽壓力下降量到的是**兩個機制的總和**——
+
+- **物理溶解**：CO2 溶入液相（依亨利定律，趨近飽和即變慢）
+- **生物消耗**：嗜氫甲烷菌消耗溶解態 CO2
+
+歷史資料上 12 種分離方法均未通過決定性檢定。本專案不迴避這個結果，而是用機理模型
+**釐清「為什麼難」**，並提供兩條難度不同、皆可執行的分析線。
+
+### 關鍵結論：分離的困難是「結構性」的，與演算法無關
+
+以兩狀態機理模型（物理項 kLa·驅動力 + 生物項 Monod）＋合成資料＋profile likelihood
+做可辨識性測試（`co2_greybox_identifiability.py`）：
+
+- **穩態下兩通量相等**（溶解通量 ≡ 生物消耗通量，是同一個數），從壓力下降無從分辨。
+  物理速率 kLa 在穩態資料下信賴區間 **±160%**，含**暫態**的資料下收斂到 **±0%**。
+- 因此分離的槓桿是**暫態**（液相遠離飽和、兩通量暫時解耦），不是更複雜的模型——
+  **換 LSTM／PINN／更新的演算法都不會改變這個結構限制**。這是實驗設計問題。
+
+### 兩條分析線
+
+| | 關聯分析 | 機理分離 |
+|---|---|---|
+| 回答 | 平緩化**是不是**生物造成 | 溶解 vs 消耗**各多少** |
+| 程式 | `co2_covariate_association.py` | `co2_greybox_identifiability.py` |
+| 難度 | 中，**現有 9 批次即可** | 難，**需暫態段** |
+| 統計 | 批次分群叢集穩健標準誤（處理偽重複） | profile likelihood + 殘差法 |
+| 驗證 | 合成資料雙向驗證（生物/物理各判對） | 可辨識性已量化 |
+
+對應的實驗設計調整（詳見 `docs/實驗設計_暫態分離協定_2026-07-26.md`）：補入純物理對照段、
+換液後暫態窗口、打亂 n 順序 + 每日參考水準。
+
+---
+
+## 🧪 實驗執行與運維
+
+### 實驗批次管理 + 即時面板
+
+前端 `ExperimentView` 管理完整批次生命週期（已規劃→進行中→已完成），自動偵測補氣
+循環並逐循環計算下降速率、斜率平緩化、進氣前 ORP（菌群成熟度共變數）。**資料完整性
+是第一級指標**：
+
+- **記錄健康度告警**：最後一筆資料距今多久、逾時轉紅——直接針對 2026-07-22 監控電腦
+  自動更新導致資料靜默中斷 17.5 小時的事故設計。
+- **記錄中斷偵測**：跨斷點的循環自動標記、排除於建模之外，避免產生假的「產甲烷」訊號。
+- **兩層報表匯出**：批次彙整（含離散度 IQR）與每循環特徵（餵模型用）。
+- **共變數關聯分析（點按鈕即分析）**：對當前每循環資料即時跑「進氣前 ORP → 下降速率／
+  平緩化」回歸（批次分群叢集穩健標準誤處理偽重複），直接判讀**平緩化是生物還是物理**。
+
+### 桌面控制台（`control_panel.pyw`）
+
+純 Python 標準函式庫（tkinter），雙擊即開，現場不需開終端機：啟動／停止／重啟後端
+（本機或遠端 Jetson via SSH 金鑰）、檢查更新、資料新鮮度監看、開機自動啟動。
+後端死掉時網頁打不開，故這些功能刻意放在不依賴後端的桌面程式。
+
+### 開發測試伺服器（`dev_test_server.py`）
+
+在筆電上重現整套系統（真實後端 + 合成感測資料），不需 Jetson／MQTT／真實 CSV，
+可模擬記錄中斷、時鐘不同步、排氣峰值等情境驗證前後端。
+
+---
+
 ## ⚙️ 技術規格
 
 ### 硬體需求
@@ -284,14 +384,18 @@ Linear Layer（64 → 2）
 
 ```
 Python >= 3.8
-torch >= 1.10.0          # LSTM 模型推論
-numpy >= 1.21.0          # 數值運算
-pandas >= 1.3.0          # 資料處理
-scipy >= 1.7.0           # Savitzky-Golay 濾波器
-scikit-learn >= 0.24.0   # Ridge Regression
-paho-mqtt >= 1.6.0       # MQTT 通訊
-pyserial >= 3.5          # 感測器串列通訊
+fastapi / uvicorn        # API 服務
+torch                    # LSTM 壓力預測（Jetson 請用官方 CUDA 版）
+numpy / pandas / scipy   # 數值/資料/Savitzky-Golay 濾波、統計
+openpyxl                 # 報表匯出
+paho-mqtt                # MQTT 通訊
+pyserial                 # 感測器串列通訊
+xgboost                  # 選配：CH4 特徵歸因（TreeSHAP）；未裝自動退回 GA+Ridge
 ```
+
+> **可辨識性與關聯分析（`co2_*.py`）刻意只用 numpy + scipy**，不依賴 sklearn——
+> 實測 sklearn 的編譯 DLL 在部分機器會被系統 Application Control 政策擋住無法載入；
+> Ridge 以純 numpy 閉式解實作。
 
 #### 前端（Vue3）
 
@@ -479,69 +583,54 @@ MonitorView → 週期摘要面板 → 本週期預測 CH₄ 峰值：XX.X%
 ## 📁 專案結構
 
 ```
-biomethanation-edge-monitor/
+Bioreactor-Edge-AI/
 │
-├── backend/
-│   ├── main.py                      # 主程式入口
-│   ├── config.yaml                  # 系統設定檔
+├── control_panel.pyw                # 桌面控制台（啟動/更新/健康度監看，tkinter）
+├── 控制台.bat                        # 控制台啟動器（避開 .pyw 關聯失效）
+├── dev_test_server.py               # 開發測試伺服器（真實後端+合成資料，不需 Jetson）
+├── start_all.bat / sync_jetson.bat  # 舊版一鍵啟動/同步（保留為後備）
+│
+├── edge_backend/
+│   ├── main.py                      # FastAPI 入口
 │   ├── requirements.txt
 │   │
-│   ├── pipeline/
-│   │   ├── sensor_reader.py         # 感測器資料讀取
-│   │   ├── spike_remover.py         # 突波排除模組
-│   │   ├── ema_filter.py            # EMA 濾波器
-│   │   └── sg_filter.py             # Savitzky-Golay 濾波器
+│   ├── api/
+│   │   ├── routes.py                # 所有 API 端點（含 /ch4_prediction /phase
+│   │   │                            #   /covariate_analysis /experiment/* /health）
+│   │   └── schemas.py
 │   │
-│   ├── phase_detection/
-│   │   ├── adaptive_phase.py        # 自適應相位偵測
-│   │   └── macd_calculator.py       # MACD 計算
+│   ├── core/                        # 即時後端核心（部署到 Jetson）
+│   │   ├── data_store.py            # 共用記憶體感測資料倉儲
+│   │   ├── signal_processor.py      # 突波排除 + EMA/SG 濾波
+│   │   ├── feature_extractor.py     # 穩態/相位特徵萃取
+│   │   ├── inference.py / model.py  # LSTM 壓力預測
+│   │   ├── ch4_realtime.py          # CH4 峰值預測 + XGBoost/SHAP 歸因（退回 GA+Ridge）
+│   │   ├── experiment_store.py      # 實驗批次資料模型（循環偵測/斷點/共變數）
+│   │   ├── experiment_report.py     # 兩層報表匯出（批次彙整/每循環）
+│   │   └── mqtt_client.py
 │   │
-│   ├── prediction/
-│   │   ├── lstm_monitor.py          # LSTM 即時監控
-│   │   ├── ga_feature_selector.py   # GA 特徵選擇
-│   │   ├── ridge_predictor.py       # Ridge CH₄ 峰值預測
-│   │   └── loo_cv.py                # LOO-CV 驗證工具
-│   │
-│   ├── mqtt/
-│   │   └── publisher.py             # MQTT 發布模組
-│   │
-│   ├── models/
-│   │   ├── lstm_model.pt            # 預訓練 LSTM 模型
-│   │   ├── ridge_model.pkl          # 預訓練 Ridge 模型
-│   │   └── ga_selected_features.json # GA 選出之特徵子集
-│   │
-│   └── scripts/
-│       ├── train_lstm.py            # LSTM 訓練腳本
-│       ├── train_ridge_ga.py        # Ridge + GA 訓練腳本
-│       └── load_pretrained.py       # 載入預訓練模型
+│   ├── co2_greybox_identifiability.py  # 【離線】機理分離可辨識性決定性測試
+│   ├── co2_covariate_association.py    # 【離線+API】共變數關聯分析（平緩化成因）
+│   ├── co2_separation_analysis.py      # 【離線】分離分析工具集
+│   ├── co2_relaxation_analysis.py      # 【離線】弛豫振盪器分析（含證偽死路）
+│   ├── ch4_peak_analysis.py            # 【離線】CH4 峰值 cycle/minute-level 分析
+│   ├── batch_import_csv.py / csv_watcher.py / usb_receiver.py  # 資料匯入/監看/接收
+│   └── sensor_simulator.py / train.py / export_onnx.py
 │
-├── frontend/
-│   ├── package.json
-│   ├── vite.config.js
-│   └── src/
-│       ├── main.js
-│       ├── App.vue
-│       ├── views/
-│       │   ├── MonitorView.vue      # 即時監控視圖
-│       │   └── ReportView.vue       # 歷史分析視圖
-│       ├── components/
-│       │   ├── ORPChart.vue         # ORP 訊號圖表
-│       │   ├── PhaseIndicator.vue   # 相位指示器
-│       │   ├── LSTMDashboard.vue    # LSTM 預測儀表板
-│       │   ├── CorrelationHeatmap.vue # 特徵相關熱力圖
-│       │   └── SpikeStats.vue       # 每日突波統計
-│       └── utils/
-│           └── mqtt_client.js       # MQTT 訂閱工具
+├── web_frontend/                    # Vue3 + Vite（部署到監控電腦）
+│   └── src/views/
+│       ├── MonitorView.vue          # 即時監控（ORP/相位/LSTM）
+│       ├── ReportView.vue           # 歷史分析
+│       └── ExperimentView.vue       # 實驗批次管理 + 即時面板 + CH4 預測
+│                                    #   + 特徵歸因 + 共變數關聯分析（點按鈕即分析）
 │
-├── data/
-│   ├── historical_orp.csv           # 歷史 ORP 資料（範例）
-│   └── cycle_features.csv           # 週期特徵資料（範例）
-│
-├── docs/
-│   └── 簡報_李承育_115年邊緣智慧實務人才成果發表.pdf
+├── docs/                            # 日報、實驗設計、技術備忘、證據鏈、簡報
 │
 └── README.md
 ```
+
+> 標【離線】者為研究分析工具，吃實驗完整資料、輸出統計結論，不進即時前端；
+> `co2_covariate_association.py` 另經 `/covariate_analysis` 端點在前端提供「點一下即分析」。
 
 ---
 

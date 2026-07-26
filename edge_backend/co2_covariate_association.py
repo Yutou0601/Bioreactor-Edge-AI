@@ -118,62 +118,89 @@ def analyze(df: pd.DataFrame):
     if not need.issubset(df.columns):
         print(f"[錯誤] CSV 缺欄位：{need - set(df.columns)}")
         return
-    d = df.dropna(subset=["drop_rate", "pre_injection_orp", "n_minutes"]).copy()
-    G = d["run_id"].nunique()
-    print(f"\n樣本：{len(d)} 個完整循環，來自 {G} 個批次"
-          f"（每批 {len(d)/max(G,1):.1f} 循環）")
-    if G < 3 or len(d) < 6:
-        print("⚠ 批次數 <3 或循環 <6，叢集穩健回歸無法成立，暫不分析。")
-        print("  （需 ≥3 批次、且 n 與進氣前 ORP 均有變異；正式實驗 9 批次可滿足。）")
+    r = compute(df)
+    if r["status"] != "ok":
+        print(f"\n{r['message']}")
         return
 
-    grp = d["run_id"].values
-
-    # ① 下降速率 ~ n + 進氣前ORP（分離循環時間效應與菌群成熟效應）
+    print(f"\n樣本：{r['n_cycles']} 個完整循環，來自 {r['n_batches']} 個批次")
     print("\n── ① 下降速率 ~ 循環時間 n + 進氣前ORP（叢集穩健，以批次分群）──")
-    X, names = _design(d, ["n_minutes", "pre_injection_orp"])
-    res, G, dof = ols_cluster(d["drop_rate"].values, X, grp, names)
-    for nm, b, se, t, p in res:
-        print(f"   {nm:<18} 係數={b:+.6g}  穩健SE={se:.3g}  t={t:+.2f}  p={_fmt_p(p)}")
-    print(f"   （有效自由度 {dof}，非循環數 {len(d)}——已折算偽重複）")
+    for t in r["rate_model"]:
+        print(f"   {t['term']:<18} 係數={t['coef']:+.6g}  穩健SE={t['se']:.3g}  t={t['t']:+.2f}  p={_fmt_p(t['p'])}")
+    print(f"   （有效自由度 {r['dof']}，非循環數 {r['n_cycles']}——已折算偽重複）")
 
-    # ② 斜率平緩化 ~ n + 進氣前ORP —— 核心：平緩化是生物還是物理？
-    dd = d.dropna(subset=["flattening"])
-    if len(dd) >= 6 and dd["run_id"].nunique() >= 3:
+    if r["flat_model"]:
         print("\n── ② 斜率平緩化 ~ 循環時間 n + 進氣前ORP（核心判斷）──")
-        X2, names2 = _design(dd, ["n_minutes", "pre_injection_orp"])
-        res2, G2, dof2 = ols_cluster(dd["flattening"].values, X2, dd["run_id"].values, names2)
-        p_orp = np.nan
-        for nm, b, se, t, p in res2:
-            print(f"   {nm:<18} 係數={b:+.6g}  穩健SE={se:.3g}  t={t:+.2f}  p={_fmt_p(p)}")
-            if nm == "pre_injection_orp":
-                p_orp = p
-        r_pc, p_pc, n_pc = partial_corr(dd, "pre_injection_orp", "flattening", "n_minutes")
-        print(f"   偏相關 平緩化 vs 進氣前ORP | 控制 n：r={r_pc:+.3f}  p={_fmt_p(p_pc)}  (n={n_pc})")
-        print("\n   ▶ 判讀：")
-        if np.isfinite(p_orp) and p_orp < 0.05:
-            print("     控制 n 後平緩化仍顯著隨進氣前ORP變動 → 平緩化帶**生物成因**")
-            print("     （支持洪博假說：產甲烷稀釋 CO2、使溶解變慢）")
-        else:
-            print("     控制 n 後平緩化與進氣前ORP無顯著關聯 → 傾向**物理成因**")
-            print("     （溶解趨近飽和即可解釋，不需生物機制）")
+        for t in r["flat_model"]:
+            print(f"   {t['term']:<18} 係數={t['coef']:+.6g}  穩健SE={t['se']:.3g}  t={t['t']:+.2f}  p={_fmt_p(t['p'])}")
+        pc = r["partial_corr"]
+        print(f"   偏相關 平緩化 vs 進氣前ORP | 控制 n：r={pc['r']:+.3f}  p={_fmt_p(pc['p'])}  (n={pc['n']})")
+        print(f"\n   ▶ 判讀：{r['verdict_text']}")
         print("     ※ 此判讀強度受批次數限制；批次少時把「無顯著」讀成「證據不足」而非「無關」。")
     else:
         print("\n── ② 斜率平緩化：完整且有平緩化的循環不足，暫略 ──")
 
-    # ③ 批次平均後的交叉檢查（每批一點，完全避開偽重複）
     print("\n── ③ 交叉檢查：批次平均後（每批一個獨立點）──")
-    agg = d.groupby("run_id").agg(n=("n_minutes", "mean"),
-                                  rate=("drop_rate", "mean"),
+    for b in r["batch_level"]:
+        print(f"   批次層 下降速率 vs {b['label']}：r={b['r']:+.3f}  p={_fmt_p(b['p'])}  (批次數={b['n']})")
+
+
+def compute(df: pd.DataFrame) -> dict:
+    """核心分析，回傳結構化結果（供 CLI 與 API 共用）。不印任何東西。"""
+    need = {"drop_rate", "flattening", "pre_injection_orp", "n_minutes", "run_id"}
+    if not need.issubset(df.columns):
+        return {"status": "error", "message": f"缺欄位：{need - set(df.columns)}"}
+    d = df.dropna(subset=["drop_rate", "pre_injection_orp", "n_minutes"]).copy()
+    G = int(d["run_id"].nunique())
+    if G < 3 or len(d) < 6:
+        return {"status": "insufficient", "n_cycles": int(len(d)), "n_batches": G,
+                "message": "批次數 <3 或循環 <6，叢集穩健回歸無法成立，暫不分析"
+                           "（需 ≥3 批次、且 n 與進氣前 ORP 均有變異；正式實驗 9 批次可滿足）。"}
+
+    def sf(v, nd):     # 安全浮點：非有限值→None（避免 FastAPI JSON 序列化 NaN 失敗）
+        return None if v is None or not np.isfinite(v) else round(float(v), nd)
+
+    def terms(rows):
+        return [{"term": nm, "coef": sf(b, 8), "se": sf(se, 8),
+                 "t": sf(t, 3), "p": sf(p, 4)}
+                for nm, b, se, t, p in rows]
+
+    grp = d["run_id"].values
+    X, names = _design(d, ["n_minutes", "pre_injection_orp"])
+    rate_rows, _, dof = ols_cluster(d["drop_rate"].values, X, grp, names)
+
+    flat_model = partial = verdict = verdict_text = None
+    dd = d.dropna(subset=["flattening"])
+    if len(dd) >= 6 and dd["run_id"].nunique() >= 3:
+        X2, names2 = _design(dd, ["n_minutes", "pre_injection_orp"])
+        fr, _, _ = ols_cluster(dd["flattening"].values, X2, dd["run_id"].values, names2)
+        flat_model = terms(fr)
+        p_orp = next((t["p"] for t in flat_model if t["term"] == "pre_injection_orp"), None)
+        r_pc, p_pc, n_pc = partial_corr(dd, "pre_injection_orp", "flattening", "n_minutes")
+        partial = {"r": sf(r_pc, 3), "p": sf(p_pc, 4), "n": int(n_pc)}
+        if p_orp is not None and p_orp < 0.05:
+            verdict = "biological"
+            verdict_text = "控制 n 後平緩化仍顯著隨進氣前 ORP 變動 → 平緩化帶生物成因（支持產甲烷稀釋 CO2、使溶解變慢之假說）"
+        else:
+            verdict = "physical"
+            verdict_text = "控制 n 後平緩化與進氣前 ORP 無顯著關聯 → 傾向物理成因（溶解趨近飽和即可解釋）"
+
+    agg = d.groupby("run_id").agg(n=("n_minutes", "mean"), rate=("drop_rate", "mean"),
                                   orp=("pre_injection_orp", "mean")).reset_index()
-    if len(agg) >= 3:
-        for x in ("n", "orp"):
-            if agg[x].std() > 1e-9:
-                r, p = stats.pearsonr(agg[x], agg["rate"])
-                lab = "循環時間 n" if x == "n" else "進氣前ORP"
-                print(f"   批次層 下降速率 vs {lab}：r={r:+.3f}  p={_fmt_p(p)}  (批次數={len(agg)})")
-    else:
-        print("   批次數 <3，無法做批次層相關。")
+    batch_level = []
+    for x, lab in [("n", "循環時間 n"), ("orp", "進氣前 ORP")]:
+        if agg[x].std() > 1e-9 and agg["rate"].std() > 1e-9:
+            rr, pp = stats.pearsonr(agg[x], agg["rate"])
+            batch_level.append({"x": x, "label": lab, "r": sf(rr, 3),
+                                "p": sf(pp, 4), "n": int(len(agg))})
+
+    return {"status": "ok", "n_cycles": int(len(d)), "n_batches": G, "dof": int(dof),
+            "rate_model": terms(rate_rows), "flat_model": flat_model,
+            "partial_corr": partial, "verdict": verdict, "verdict_text": verdict_text,
+            "batch_level": batch_level,
+            "caveats": ["同批次多循環為偽重複，已用批次分群叢集穩健標準誤折算檢定力",
+                        "批次少時「無顯著」應讀為「證據不足」而非「無關」",
+                        "此為關聯分析，找到關聯 ≠ 分離了機制"]}
 
 
 def make_demo(bio: bool = True) -> pd.DataFrame:

@@ -367,6 +367,35 @@ def ch4_prediction():
                 "caveat": "CH4 為參考級訊號，預測僅供操作參考，不作為證據。"}
 
 
+# ==========================================
+# 通道 7：共變數關聯分析（點一下即分析當前每循環資料）
+# ==========================================
+@router.get("/covariate_analysis")
+def covariate_analysis():
+    """對目前所有批次的每循環特徵，即時跑「進氣前 ORP → 下降速率／平緩化」關聯分析，
+    回答「斜率平緩化是生物還是物理」。吃記憶體中的 all_cycles，不需匯出 CSV。
+
+    只用完整循環；同批次多循環為偽重複，以批次分群叢集穩健標準誤折算檢定力。
+    這是關聯分析（找關係），非機理分離（灰箱那支太慢、屬離線工具）。
+    """
+    try:
+        import pandas as pd
+        from co2_covariate_association import compute
+    except Exception as e:
+        return {"status": "error", "message": f"分析模組載入失敗：{type(e).__name__}: {e}"}
+
+    rows = exp.all_cycles()      # 每列一個循環（含 run_id/n_minutes/drop_rate/flattening/…）
+    # 只取完整循環（跨斷點的循環平緩化不可信）
+    rows = [r for r in rows if r.get("complete")]
+    if not rows:
+        return {"status": "insufficient", "n_cycles": 0, "n_batches": 0,
+                "message": "尚無完整循環可分析（需先有進行中/完成的批次並累積補氣循環）。"}
+    try:
+        return compute(pd.DataFrame(rows))
+    except Exception as e:
+        return {"status": "error", "message": f"分析失敗：{type(e).__name__}: {e}"}
+
+
 @router.get("/analysis")
 def get_analysis():
     """

@@ -91,6 +91,26 @@ async function loadCh4() {
 }
 const isXgb = computed(() => ch4.value?.feature_selection?.method === 'xgboost_shap')
 
+// 共變數關聯分析（點按鈕才跑）：平緩化是生物還是物理
+const cov = ref(null)
+const covLoading = ref(false)
+const VERDICT_META = {
+  biological: { label: '生物成因', color: '#4caf82' },
+  physical:   { label: '物理成因', color: '#d0a24a' },
+}
+async function runCov() {
+  covLoading.value = true
+  try {
+    const { data } = await apiClient.get('/covariate_analysis', { timeout: 20000 })
+    cov.value = data
+  } catch (e) {
+    cov.value = { status: 'error', message: '分析請求失敗：' + (e.message || '') }
+  } finally { covLoading.value = false }
+}
+function fmtP(p) { return p === null || p === undefined ? 'n/a' : (p < 0.001 ? '<0.001' : p.toFixed(3)) + (p < 0.05 ? ' *' : '') }
+function fmtCoef(v) { return v === null || v === undefined ? '—' : (v >= 0 ? '+' : '') + v.toPrecision(3) }
+const FEAT_TERM = { '截距': '截距', n_minutes: '循環時間 n', pre_injection_orp: '進氣前 ORP' }
+
 async function loadRuns() {
   try {
     const { data } = await apiClient.get('/experiment/runs')
@@ -384,6 +404,65 @@ onUnmounted(() => clearInterval(pollTimer))
       <div class="ch4-caveat">⚠ {{ ch4.caveat }}</div>
     </div>
 
+    <!-- 共變數關聯分析（點按鈕即分析當前每循環資料）-->
+    <div class="cov-panel">
+      <div class="cov-head">
+        <span class="cov-title">共變數關聯分析</span>
+        <span class="cov-sub">平緩化是生物還是物理？（進氣前 ORP → 下降速率／平緩化）</span>
+        <button class="btn btn-primary cov-btn" @click="runCov" :disabled="covLoading">
+          {{ covLoading ? '分析中…' : '執行分析' }}
+        </button>
+      </div>
+
+      <div v-if="cov && cov.status === 'ok'" class="cov-body">
+        <div class="cov-verdict-row">
+          <span v-if="cov.verdict" class="cov-verdict"
+                :style="{ color: VERDICT_META[cov.verdict]?.color, borderColor: VERDICT_META[cov.verdict]?.color }">
+            平緩化判讀：{{ VERDICT_META[cov.verdict]?.label }}
+          </span>
+          <span v-else class="cov-verdict cov-vd-none">平緩化：證據不足</span>
+          <span class="cov-n">{{ cov.n_cycles }} 個完整循環 · {{ cov.n_batches }} 批次
+            <b>（有效自由度 {{ cov.dof }}，已折算偽重複）</b></span>
+        </div>
+
+        <p v-if="cov.verdict_text" class="cov-vtext">{{ cov.verdict_text }}</p>
+
+        <!-- 核心數字：平緩化 vs 進氣前ORP（控制 n 後的偏相關）-->
+        <div v-if="cov.partial_corr && cov.partial_corr.r !== null" class="cov-key">
+          偏相關　平緩化 vs 進氣前 ORP ∣ 控制 n：
+          <b>r = {{ cov.partial_corr.r }}</b> · p = {{ fmtP(cov.partial_corr.p) }}
+          <span class="cov-dim">(n={{ cov.partial_corr.n }})</span>
+        </div>
+
+        <!-- 回歸表 -->
+        <div class="cov-models">
+          <div class="cov-model">
+            <div class="cm-title">下降速率 ~ n + 進氣前 ORP</div>
+            <div v-for="t in cov.rate_model" :key="t.term" class="cm-row">
+              <span class="cm-term">{{ FEAT_TERM[t.term] || t.term }}</span>
+              <span class="cm-coef mono">{{ fmtCoef(t.coef) }}</span>
+              <span class="cm-p mono" :class="{ sig: t.p !== null && t.p < 0.05 }">p={{ fmtP(t.p) }}</span>
+            </div>
+          </div>
+          <div class="cov-model" v-if="cov.flat_model">
+            <div class="cm-title">斜率平緩化 ~ n + 進氣前 ORP</div>
+            <div v-for="t in cov.flat_model" :key="t.term" class="cm-row">
+              <span class="cm-term">{{ FEAT_TERM[t.term] || t.term }}</span>
+              <span class="cm-coef mono">{{ fmtCoef(t.coef) }}</span>
+              <span class="cm-p mono" :class="{ sig: t.p !== null && t.p < 0.05 }">p={{ fmtP(t.p) }}</span>
+            </div>
+          </div>
+        </div>
+
+        <ul class="cov-caveats">
+          <li v-for="(c, i) in cov.caveats" :key="i">※ {{ c }}</li>
+        </ul>
+      </div>
+
+      <div v-else-if="cov && cov.status !== 'ok'" class="cov-msg">{{ cov.message }}</div>
+      <div v-else class="cov-hint">尚未執行。累積數個完整補氣循環後，按「執行分析」判斷平緩化成因。</div>
+    </div>
+
     <!-- 基準值 + 建立計畫 + 手動新增 -->
     <div class="toolbar">
       <div class="baseline-box">
@@ -645,6 +724,37 @@ onUnmounted(() => clearInterval(pollTimer))
   .fi-label { flex-basis: 96px; }
   .fi-val { flex-basis: 84px; }
 }
+
+/* 共變數關聯分析面板 */
+.cov-panel { background: #101a16; border: 1px solid #1e3a2e; border-radius: 8px;
+  padding: 1rem 1.25rem; margin-bottom: 1.25rem; }
+.cov-head { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+.cov-title { font-size: 0.95rem; font-weight: 700; color: #6cc89a; }
+.cov-sub { font-size: 0.72rem; color: #5a7a6a; }
+.cov-btn { margin-left: auto; }
+.cov-body { margin-top: 12px; }
+.cov-verdict-row { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; }
+.cov-verdict { font-size: 0.82rem; font-weight: 700; padding: 3px 12px; border: 1px solid; border-radius: 12px; }
+.cov-vd-none { color: #7a8a80; border-color: #3a4a42; }
+.cov-n { font-size: 0.7rem; color: #6a8072; }
+.cov-n b { color: #8aa595; font-weight: 400; }
+.cov-vtext { font-size: 0.78rem; color: #b0c8bc; line-height: 1.6; margin: 8px 0; }
+.cov-key { font-size: 0.78rem; color: #8aa595; margin: 8px 0; padding: 7px 11px;
+  background: #0c1611; border-radius: 6px; }
+.cov-key b { color: #6cc89a; }
+.cov-dim { color: #556; }
+.cov-models { display: flex; gap: 14px; flex-wrap: wrap; margin: 10px 0; }
+.cov-model { flex: 1; min-width: 240px; background: #0c1611; border-radius: 6px; padding: 8px 11px; }
+.cm-title { font-size: 0.7rem; color: #6a8072; margin-bottom: 5px; }
+.cm-row { display: flex; align-items: baseline; gap: 8px; font-size: 0.72rem; padding: 1px 0; }
+.cm-term { flex: 1; color: #9ab5a6; }
+.cm-coef { color: #c0d4c8; }
+.cm-p { color: #667; }
+.cm-p.sig { color: #6cc89a; font-weight: 700; }
+.cov-caveats { margin: 8px 0 0; padding-left: 0; list-style: none; }
+.cov-caveats li { font-size: 0.64rem; color: #5f7568; line-height: 1.6; }
+.cov-msg { margin-top: 10px; font-size: 0.76rem; color: #d0a24a; }
+.cov-hint { margin-top: 10px; font-size: 0.74rem; color: #55705f; }
 
 .toolbar { display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 12px; margin-bottom: 10px; }
 .baseline-box { display: flex; align-items: center; gap: 10px; background: #121212; border: 1px solid #222;
