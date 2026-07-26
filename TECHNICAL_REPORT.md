@@ -489,6 +489,12 @@ if len(sensor_buffer) < 35 and len(sensor_records) >= 35:
 | `GET` | `/predict_pressure` | 取最新 LSTM 推論結果 | HTTP fallback |
 | `GET` | `/analysis` | 穩態判定 + 漂移率分析 | — |
 | `GET` | `/report/stats` | 統計分析（直方圖、相關係數等） | 需 ≥ 10 筆 |
+| `GET` | `/health` | 存活 + 資料新鮮度（控制台輪詢） | 記錄中斷偵測 |
+| `GET` | `/phase` | 生物三相位偵測序列 | — |
+| `GET` | `/ch4_prediction` | CH4 峰值即時預測 + 特徵歸因 | XGBoost/SHAP，退回 GA+Ridge；含外插防護 |
+| `GET` | `/covariate_analysis` | 共變數關聯（平緩化生物 vs 物理） | 叢集穩健標準誤 |
+| `GET` | `/greybox_analysis` | 灰箱可分離度就緒指標 | 暫態時給分離比例 |
+| `*` | `/experiment/*` | 實驗批次管理（plan/runs/start/vent/cycles/live/export） | 見批次管理章 |
 
 ### `/api/predict_pressure` 回傳格式
 
@@ -608,6 +614,13 @@ $$\text{Gap} = \frac{|\mathcal{L}_{\text{test}} - \mathcal{L}_{\text{val}}^*|}{\
 
 ## 13. 已知限制與未來工作
 
+> **文件成稿後新增子系統（摘要）**：本報告原聚焦壓力 LSTM 與訊號處理；其後新增
+> (a) **實驗批次管理**（`core/experiment_store.py`：循環偵測、記錄中斷排除、進氣前 ORP
+> 共變數、斜率平緩化、兩層報表）；(b) **CH4 即時預測**升級 XGBoost+TreeSHAP（退回 GA+Ridge，
+> 含外插防護）；(c) **CO2 分離研究**（`co2_greybox_identifiability.py` 證明穩態結構性不可分離、
+> `co2_covariate_association.py` 判平緩化成因，皆有前端端點）；(d) **桌面控制台** `control_panel.pyw`。
+> 詳見 TECHNICAL_SPEC.md §13.5 與各 docs/。
+
 ### 13.1 目前限制
 
 | 項目 | 說明 | 影響程度 |
@@ -617,6 +630,9 @@ $$\text{Gap} = \frac{|\mathcal{L}_{\text{test}} - \mathcal{L}_{\text{val}}^*|}{\
 | 模型無熱重載 | 重新訓練後需重啟後端 | 低：訓練頻率不高 |
 | 輪詢間隔 | 前端目前 5 秒（開發用），正式部署應為 60 秒 | 低：已知設定 |
 | 推論歸一化空間 MSE | 模型評估在歸一化空間，原始單位的 RMSE 未計算 | 中：應換算為 kg/cm² 與 % 以便物理解釋 |
+| CH4/CO2 為參考級訊號 | 僅排氣瞬間有效，其餘 99.98% 為管路拖尾 | 高：不得作為分離證據 |
+| CO2 分離穩態不可辨識 | 穩態下溶解通量≡生物通量，結構性分不開（與演算法無關） | 高：需暫態實驗，見暫態分離協定 |
+| CH4 峰值樣本量 | 完整週期 <30，樹模型小樣本高變異 | 中：XGBoost 用於歸因非預測，已據實標明 |
 
 ### 13.2 建議後續工作
 

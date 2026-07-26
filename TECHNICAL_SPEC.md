@@ -284,6 +284,12 @@ $$\text{低閾值} = \mu - k\sigma, \quad \text{高閾值} = \mu + k\sigma, \qua
 
 ## 8. CH4 峰值預測模型（離線分析）
 
+> **與即時端點的關係**：本章描述**離線** `ch4_peak_analysis.py`（GA + Ridge，RMSE 3.13% 仍有效）。
+> **即時**路徑另見 `core/ch4_realtime.py` / `GET /api/ch4_prediction`：特徵歸因升級為
+> **XGBoost + 內建 TreeSHAP**（未安裝 xgboost 時自動退回本章的 GA + Ridge），並加入外插防護
+> （進度不足或超出物理值域即不給預測值）。小樣本下樹模型 LOO-CV RMSE 高於 Ridge，
+> 其價值在更乾淨的歸因而非預測精度，前端據實標明。
+
 ### 8.1 遺傳演算法特徵選擇（GA）
 
 **實作位置**：`ch4_peak_analysis.py` → `ga_feature_selection()`
@@ -497,15 +503,19 @@ Vue3 前端 (Web Browser)
 
 | 方法 | 路徑 | 功能 |
 |-----|------|-----|
+| GET | `/api/health` | 輕量存活 + 資料新鮮度檢查（控制台輪詢用） |
 | GET | `/api/predict_pressure` | 取得 LSTM 即時預測結果 |
 | POST | `/api/upload_sensor` | 上傳單筆感測資料並觸發推論 |
 | GET | `/api/records` | 取得所有感測記錄（時序排序） |
-| POST | `/api/records` | 新增單筆感測記錄 |
-| DELETE | `/api/records` | 清空所有記錄 |
-| DELETE | `/api/records/{id}` | 刪除指定記錄 |
-| GET | `/api/report/stats` | 取得統計分析資料（用於報表） |
-| GET | `/api/analysis` | 取得 ORP 穩態特徵分析 |
-| POST | `/api/import_csv` | 批次匯入 CSV 感測記錄 |
+| POST / DELETE | `/api/records`、`/api/records/{id}` | 新增／清空／刪除記錄 |
+| GET | `/api/report/stats` | 統計分析資料（報表用） |
+| GET | `/api/analysis` | ORP 穩態特徵分析 |
+| POST | `/api/import_csv` | 批次匯入 CSV |
+| GET | `/api/phase` | 生物三相位偵測序列 |
+| GET | `/api/ch4_prediction` | CH4 峰值即時預測 + 特徵歸因（XGBoost/SHAP，退回 GA+Ridge） |
+| GET | `/api/covariate_analysis` | 共變數關聯分析（平緩化是生物還是物理） |
+| GET | `/api/greybox_analysis` | 灰箱可分離度就緒指標（+ 暫態時給分離比例） |
+| GET/POST/PATCH/DELETE | `/api/experiment/*` | 實驗批次管理（plan/runs/start/vent/cycles/live/export…） |
 
 ### 11.2 `GET /api/predict_pressure` 回應格式
 
@@ -585,6 +595,19 @@ Vue3 前端 (Web Browser)
 | CH4 / CO2 日均值趨勢折線圖 | 氣體產出長期趨勢 |
 | pH-ORP 散點圖（最多 600 點） | 代謝狀態相關性 |
 
+### 12.3 ExperimentView（實驗執行與分析）
+
+**路徑**：`src/views/ExperimentView.vue`
+
+| 區塊 | 資料來源 | 說明 |
+|--------|---------|------|
+| 批次表 + 生命週期操作 | `/api/experiment/runs`、`/start`、`/vent`、`/cycles` | 建立/開始/排氣/每循環明細 |
+| 即時面板 | `/api/experiment/runs/{id}/live` | 目前壓力/ORP、距補氣、記錄健康度告警、本循環壓力曲線 |
+| CH4 峰值預測 + 特徵歸因 | `/api/ch4_prediction` | XGBoost+TreeSHAP / GA+Ridge |
+| 共變數關聯分析（點按鈕） | `/api/covariate_analysis` | 平緩化是生物還是物理 |
+| 灰箱機理分析（點按鈕） | `/api/greybox_analysis` | 可分離度就緒 + 分離比例 |
+| 兩層報表匯出 | `/api/experiment/export[/cycles]` | 批次彙整 / 每循環 |
+
 ---
 
 ## 13. 效能指標
@@ -620,6 +643,41 @@ Vue3 前端 (Web Browser)
 
 ---
 
+## 13.5 實驗批次管理與 CO2 分離研究（新增子系統）
+
+> 以下為原始文件成稿後新增的三大子系統，程式已落地並在前端呈現。
+
+### 13.5.1 實驗批次管理（`core/experiment_store.py`、`experiment_report.py`）
+
+在逐分鐘 `sensor_records` 之上加一層「批次（一個 n 水準的實驗）」概念，生命週期
+已規劃→進行中→已完成。核心：`compute_cycles()` 自壓力訊號偵測補氣事件（單步跳升），
+逐循環算下降速率、進氣前 ORP（菌群成熟度共變數）、斜率平緩化（早段−晚段）。
+
+**資料完整性（關鍵）**：記錄中斷（相鄰兩筆 >5 分）一併切段，跨斷點的循環標記為
+「記錄中斷」並排除於建模——否則會把斷點前後黏成一段、算出**假的斜率平緩化**（看似產甲烷）。
+`GET /api/health` 另回報資料新鮮度供控制台告警。兩層報表：批次彙整（含離散度 IQR）
+與每循環特徵。
+
+### 13.5.2 CO2 溶解／生物消耗分離
+
+- **可辨識性決定性測試**（`co2_greybox_identifiability.py`）：兩狀態機理模型
+  （kLa·驅動力 + Monod）+ profile likelihood 證明**穩態下結構性不可分離**
+  （kLa ±160%；含暫態才 ±0%）。前端 `GET /api/greybox_analysis` 為「可分離度就緒指標」：
+  穩態→尚不可分離；偵測到暫態循環（下降速率遠快於穩態）時，以殘差法給出物理/生物佔比。
+- **共變數關聯分析**（`co2_covariate_association.py`、`GET /api/covariate_analysis`）：
+  控制 n 後平緩化是否仍隨進氣前 ORP 變動 → 判平緩化為生物或物理成因；同批次循環為偽重複，
+  以批次分群叢集穩健標準誤折算檢定力。
+- **依賴策略**：`co2_*.py` 刻意只用 numpy + scipy（Ridge 純 numpy 閉式解），
+  因實測 sklearn 編譯 DLL 在部分機器被系統 Application Control 政策擋住。
+
+### 13.5.3 桌面控制台與測試伺服器
+
+- `control_panel.pyw`（tkinter，零額外依賴）：啟動/停止/重啟後端（本機或遠端 Jetson via
+  SSH 金鑰）、檢查更新、資料新鮮度監看、開機自動啟動。後端死掉時網頁打不開，故放桌面。
+- `dev_test_server.py`：真實後端 + 合成感測資料，單機重現整套系統，不需 Jetson/MQTT。
+
+---
+
 ## 14. 已知限制與建議
 
 ### 14.1 採樣頻率限制（關鍵）
@@ -639,6 +697,16 @@ Vue3 前端 (Web Browser)
 **影響**：模型泛化能力無法充分驗證，RMSE = 3.13% 反映方法論可行性，非實際部署精度。
 
 **建議**：累積 ≥ 30 個排氣週期後重新訓練，屆時可改用 k-fold CV 取代 LOO-CV。
+
+### 14.2b CO2 分離的結構性限制（關鍵）
+
+**問題**：穩態下「物理溶解通量 ≡ 生物消耗通量」為同一個數，從壓力下降**無從歸因**，
+與模型複雜度無關（換 LSTM/PINN 也一樣）。
+
+**影響**：以現行日常運轉（穩態）資料**無法**分離溶解與生物消耗；灰箱面板僅能回報「尚不可分離」。
+
+**建議**：依 `docs/實驗設計_暫態分離協定_2026-07-26.md` 補入純物理對照段與換液後暫態窗口，
+分離才可辨識；生物量以「總通量 − 已釘死物理通量」殘差取得。
 
 ### 14.3 系統運行假設
 
@@ -666,8 +734,14 @@ Vue3 前端 (Web Browser)
 | pyserial | ≥ 3.5 | USB 感測器接收 |
 | paho-mqtt | ≥ 2.0.0 | MQTT 客戶端 |
 | torch | ≥ 2.0.0 | LSTM 推論（Jetson 使用官方 CUDA 版本） |
-| scipy | — | CH4 峰值偵測（find_peaks） |
+| scipy | — | CH4 峰值偵測（find_peaks）、統計、可辨識性 profile |
+| openpyxl | — | 實驗批次報表匯出（xlsx） |
+| xgboost | ≥ 2.0.0 | **選配**：CH4 特徵歸因（內建 TreeSHAP）；未裝自動退回 GA+Ridge |
 | matplotlib | — | 離線報表圖表生成 |
+
+> **註**：CO2 分析（`co2_*.py`）與即時 CH4 歸因的退回路徑刻意**不依賴 sklearn**——
+> 實測 sklearn 編譯 DLL 在部分機器被系統政策擋住；Ridge 以純 numpy 閉式解實作。
+> scikit-learn 仍用於離線 `ch4_peak_analysis.py`（RF 比較）。
 
 ### 15.2 前端（`web_frontend/package.json`）
 
