@@ -6,8 +6,9 @@ const apiClient = axios.create({
   // 開發模式（npm run dev）走 .env.development → localhost
   // 正式建置（npm run build）走 .env.production → Jetson 固定 IP
   baseURL: import.meta.env.VITE_API_BASE_URL,
-  // timeout 要比 poll 間隔短，避免上一輪請求還掛著下一輪就觸發
-  timeout: 3000,
+  // 8 秒：/ch4_prediction 首次含 XGBoost+LOO-CV 可達數秒（隨排氣次數成長），
+  // 3 秒會頻繁誤判逾時、洗出「後端無回應」。個別慢端點另設更長 timeout。
+  timeout: 8000,
   headers: {
     'Content-Type': 'application/json'
   }

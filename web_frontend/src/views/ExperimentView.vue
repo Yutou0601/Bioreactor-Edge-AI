@@ -83,11 +83,16 @@ const FEATURE_LABEL = {
   pressure_mean:         '壓力均值',
   ph_mean:               'pH 均值',
 }
+// /ch4_prediction 較貴（XGBoost+LOO-CV），且只在新排氣週期才變，故獨立、較慢輪詢，
+// 並用旗標避免上一輪還沒回來就再打，造成後端請求堆積、前端卡頓。
+let _ch4Busy = false
 async function loadCh4() {
+  if (_ch4Busy) return
+  _ch4Busy = true
   try {
-    const { data } = await apiClient.get('/ch4_prediction')
+    const { data } = await apiClient.get('/ch4_prediction', { timeout: 20000 })
     ch4.value = data
-  } catch { ch4.value = null }
+  } catch { /* 保留上一次結果，不清空避免面板閃爍 */ } finally { _ch4Busy = false }
 }
 const isXgb = computed(() => ch4.value?.feature_selection?.method === 'xgboost_shap')
 
@@ -124,7 +129,10 @@ async function runGb() {
   } finally { gbLoading.value = false }
 }
 
+let _runsBusy = false
 async function loadRuns() {
+  if (_runsBusy) return          // 上一輪還沒回來就跳過，避免請求堆積
+  _runsBusy = true
   try {
     const { data } = await apiClient.get('/experiment/runs')
     runs.value = data
@@ -135,7 +143,7 @@ async function loadRuns() {
         liveMap.value = { ...liveMap.value, [r.run_id]: live }
       } catch { /* skip */ }
     }
-  } catch (e) { error.value = '無法連線後端：' + (e.code || e.message) }
+  } catch (e) { error.value = '無法連線後端：' + (e.code || e.message) } finally { _runsBusy = false }
 }
 
 async function createPlan() {
@@ -238,11 +246,13 @@ async function exportReport(f, level = 'runs') {
   } catch (e) { flash('匯出失敗：' + (e.message || '')) }
 }
 
+let ch4Timer = null
 onMounted(() => {
   loadRuns(); loadCh4()
-  pollTimer = setInterval(() => { loadRuns(); loadCh4() }, 15000)
+  pollTimer = setInterval(loadRuns, 15000)       // 批次狀態：輕、快，15 秒
+  ch4Timer = setInterval(loadCh4, 45000)         // CH4 預測：貴、少變，45 秒
 })
-onUnmounted(() => clearInterval(pollTimer))
+onUnmounted(() => { clearInterval(pollTimer); clearInterval(ch4Timer) })
 </script>
 
 <template>

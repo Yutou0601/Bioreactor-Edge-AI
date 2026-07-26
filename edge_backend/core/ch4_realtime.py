@@ -251,11 +251,15 @@ def _xgb():
         return None
 
 
-def _xgb_loo_rmse(xgb, X, y, params, rounds) -> float:
-    """留一交叉驗證 RMSE（XGBoost 版）。小樣本下唯一誠實的樣本外估計。"""
+def _xgb_loo_rmse(xgb, X, y, params, rounds, max_folds: int = 12) -> float:
+    """交叉驗證 RMSE（XGBoost 版）。小樣本用留一；樣本較多時只抽 max_folds 折，
+    避免 LOO 的 O(n) 次 XGBoost 訓練隨排氣次數線性成長、拖慢即時端點。"""
     n = len(y)
+    idx = np.arange(n)
+    if n > max_folds:                     # 均勻抽樣固定折數，成本封頂
+        idx = np.linspace(0, n - 1, max_folds).round().astype(int)
     errs = []
-    for i in range(n):
+    for i in idx:
         m = np.ones(n, dtype=bool); m[i] = False
         if len(np.unique(y[m])) < 2:
             continue
