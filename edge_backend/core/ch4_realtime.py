@@ -312,21 +312,19 @@ def feature_analysis_xgb(xgb, X: np.ndarray, y: np.ndarray) -> dict:
     }
 
 
-def feature_analysis(X: np.ndarray, y: np.ndarray, fingerprint: str) -> dict:
-    """特徵歸因，依訓練集指紋快取（每 15 秒輪詢不重算，只有新排氣週期進來才算）。
-    有 xgboost → XGBoost+TreeSHAP；否則退回 GA 選特徵 + Ridge 係數重要度。"""
-    if fingerprint in _ga_cache:
-        return {**_ga_cache[fingerprint], "cached": True}
+import threading
+_fa_lock = threading.Lock()
+_fa_pending: set = set()          # 正在背景計算的指紋
 
+
+def _feature_analysis_sync(X: np.ndarray, y: np.ndarray, fingerprint: str) -> dict:
+    """實際計算特徵歸因（XGBoost 或退回 GA+Ridge）。CPU 密集，故由背景執行緒呼叫。"""
     xgb = _xgb()
     if xgb is not None:
         try:
-            res = feature_analysis_xgb(xgb, X, y)
-            _ga_cache.clear()
-            _ga_cache[fingerprint] = res
-            return res
+            return feature_analysis_xgb(xgb, X, y)
         except Exception:
-            pass          # xgboost 失敗（罕見）→ 退回 GA+Ridge，不讓分析中斷
+            pass          # xgboost 失敗（罕見）→ 退回 GA+Ridge
 
     mask, rmse_sel, hist = _ga_select(X, y)
     rmse_all = _loo_rmse(X, y)
@@ -341,7 +339,7 @@ def feature_analysis(X: np.ndarray, y: np.ndarray, fingerprint: str) -> dict:
          for i, c in zip(np.where(mask)[0], coefs)],
         key=lambda d: -d["weight"])
 
-    res = {
+    return {
         "method":        "ga_ridge",
         "selected":      [FEATURE_NAMES[i] for i in np.where(mask)[0]],
         "n_selected":    int(mask.sum()),
@@ -352,9 +350,35 @@ def feature_analysis(X: np.ndarray, y: np.ndarray, fingerprint: str) -> dict:
         "importances":   imp,
         "cached":        False,
     }
-    _ga_cache.clear()          # 只留最新一份，避免長期執行累積
-    _ga_cache[fingerprint] = res
-    return res
+
+
+def feature_analysis(X: np.ndarray, y: np.ndarray, fingerprint: str):
+    """非阻塞特徵歸因：CPU 密集的 XGBoost/GA 一律在**背景執行緒**算，請求路徑
+    絕不等它。回傳規則——
+      已算好 → 回快取結果（帶 computing=False）
+      尚未算 → 觸發背景計算並回 None（前端顯示「計算中」，下次輪詢就有）
+    如此即使新排氣觸發重算，即時面板與批次輪詢都不會被那 ~1 秒 XGBoost 卡住。"""
+    with _fa_lock:
+        if fingerprint in _ga_cache:
+            return {**_ga_cache[fingerprint], "cached": True}
+        if fingerprint in _fa_pending:
+            return None                    # 背景計算中
+        _fa_pending.add(fingerprint)
+
+    def worker(Xw, yw, fp):
+        try:
+            res = _feature_analysis_sync(Xw, yw, fp)
+            with _fa_lock:
+                _ga_cache.clear()          # 只留最新一份
+                _ga_cache[fp] = res
+        except Exception:
+            pass
+        finally:
+            with _fa_lock:
+                _fa_pending.discard(fp)
+
+    threading.Thread(target=worker, args=(X.copy(), y.copy(), fingerprint), daemon=True).start()
+    return None
 
 
 def predict(recs: list) -> dict:
@@ -398,11 +422,11 @@ def predict(recs: list) -> dict:
         out["reliability"] = "目前週期資料過短，尚無法預測"
         return out
 
-    # GA 選特徵 + Ridge 重要度（即時計算，依訓練集指紋快取）
+    # 特徵歸因：背景執行緒計算，請求不等它（None＝計算中，下次輪詢就有）
     fp = f"{len(y)}|{meta[-1]['vent_time'] if meta else ''}"
     try:
         fa = feature_analysis(X, y, fp)
-        out["feature_selection"] = fa
+        out["feature_selection"] = fa if fa is not None else {"computing": True}
     except Exception as e:
         out["feature_selection"] = {"error": f"{type(e).__name__}: {e}"}
         fa = None

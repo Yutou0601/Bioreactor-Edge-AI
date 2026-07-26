@@ -380,8 +380,13 @@ onUnmounted(() => { clearInterval(pollTimer); clearInterval(ch4Timer) })
         </div>
       </div>
 
+      <!-- 特徵歸因計算中（背景執行緒，不阻塞請求）-->
+      <div v-if="ch4.feature_selection && ch4.feature_selection.computing" class="fi-block fi-computing">
+        特徵歸因計算中…（背景執行緒，下次更新即顯示）
+      </div>
+
       <!-- 特徵重要度（即時計算）。方法二選一：XGBoost+TreeSHAP 或 GA+Ridge -->
-      <div v-if="ch4.feature_selection && !ch4.feature_selection.error" class="fi-block">
+      <div v-else-if="ch4.feature_selection && !ch4.feature_selection.error" class="fi-block">
         <div class="fi-head">
           <span class="fi-title">特徵重要度</span>
           <span class="fi-badge">{{ isXgb ? 'XGBoost + TreeSHAP' : 'GA + Ridge' }}</span>
@@ -758,6 +763,7 @@ onUnmounted(() => { clearInterval(pollTimer); clearInterval(ch4Timer) })
 /* 特徵重要度：發散配色（正/負），已用 dataviz validator 對本面板底色 #16121c
    驗過 CVD ΔE 23.6 / normal 31.9 / 對比 ≥3:1，全數通過 */
 .fi-block { margin-top: 12px; padding-top: 10px; border-top: 1px solid #241c30; }
+.fi-computing { font-size: 0.72rem; color: #7a6f8c; }
 .fi-head { display: flex; align-items: baseline; gap: 10px; flex-wrap: wrap; margin-bottom: 8px; }
 .fi-title { font-size: 0.78rem; font-weight: 700; color: #b8a8d0; }
 .fi-badge { font-size: 0.62rem; padding: 1px 7px; border-radius: 8px; background: #241c34;
