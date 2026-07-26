@@ -1,4 +1,4 @@
-# 基於邊緣運算之 ORP 動態分析為基礎的生物甲烷化即時監控與峰值預測系統
+# 基於邊緣運算之 ORP 動態分析為基礎的生物甲烷化即時監控、預測與分離研究平台
 
 <div align="center">
 
@@ -27,7 +27,7 @@
 - [技術規格](#-技術規格)
 - [安裝與部署](#-安裝與部署)
 - [使用說明](#-使用說明)
-- [實驗成果](#-實驗成果)
+- [實驗成果與限制](#-實驗成果與限制)
 - [專案結構](#-專案結構)
 - [致謝](#-致謝)
 
@@ -35,25 +35,27 @@
 
 ## 📖 專案簡介
 
-本系統建構於洪政源博士所開發的**微正壓循環生物甲烷化控制系統**之上，作為其智慧感測延伸層，針對氧化還原電位（ORP, Oxidation-Reduction Potential）訊號進行即時動態分析，並延伸為完整的**實驗執行、監看與研究分析平台**：
+本系統建構於洪政源博士所開發的**微正壓循環生物甲烷化控制系統**之上，作為其智慧感測延伸層，
+針對氧化還原電位（ORP, Oxidation-Reduction Potential）訊號進行即時動態分析，並延伸為完整的
+**實驗執行、監看與研究分析平台**。
 
 **即時監控與預測（前端呈現）**
 
 1. **即時 ORP 訊號去雜訊**：在 Jetson 邊緣裝置上每分鐘完成突波排除與雙軌濾波
 2. **自適應生物三相位偵測**：自動識別底物利用期（Phase 1）、活躍產甲烷期（Phase 2）、底物耗盡期（Phase 3）
-3. **CH₄ 峰值預測與特徵歸因**：per-cycle 峰值預測（Ridge + 外插防護），特徵歸因採
+3. **LSTM 即時監控**：以過去 30 分鐘訊號預測未來壓力走勢
+4. **CH₄ 峰值預測與特徵歸因**：per-cycle 峰值預測（Ridge + 外插防護），特徵歸因採
    **XGBoost + TreeSHAP**（未安裝時自動退回 GA + Ridge）
 
 **實驗執行與資料完整性**
 
-4. **實驗批次管理 + 即時面板**：洗管線→進氣→循環→自動補氣→排氣的批次生命週期管理，
+5. **實驗批次管理 + 即時面板**：洗管線→進氣→循環→自動補氣→排氣的批次生命週期管理，
    自動偵測補氣循環、逐循環計算下降速率與斜率平緩化，並附**記錄健康度告警**
-   （最後一筆資料距今多久、記錄中斷偵測——防止監控電腦靜默中斷）
-5. **桌面控制台**：啟動／更新／健康度監看，現場不需開終端機
+6. **桌面控制台**：啟動／更新／健康度監看，現場不需開終端機
 
-**研究分析（離線工具）**
+**研究分析（前端可觸發 + 離線工具）**
 
-6. **CO2 溶解／生物消耗分離**：以灰箱機理模型 + 可辨識性分析，回答「壓力下降中多少是
+7. **CO2 溶解／生物消耗分離**：以灰箱機理模型 + 可辨識性分析，回答「壓力下降中多少是
    物理溶解、多少是菌種消耗」，與「斜率平緩化是生物還是物理」
 
 生物甲烷化核心反應式：
@@ -62,7 +64,9 @@
 CO₂ + 4H₂ → CH₄ + 2H₂O
 ```
 
-實驗驗證可於 7 天內達到 **70% CH₄** 濃度。
+> **誠實聲明**：本平台對「不可信訊號」與「小樣本」不做美化。CH₄／CO₂ 感測器僅在排氣瞬間短暫
+> 有效（其餘為取樣管路拖尾），系統一律標為參考級；分離研究則以機理模型釐清「在穩態下結構性
+> 不可分離」，並提供對應的實驗設計補救。詳見各章的限制說明。
 
 ---
 
@@ -76,59 +80,46 @@ CO₂ + 4H₂ → CH₄ + 2H₂O
 | **指導單位** | 財團法人金屬工業研究發展中心 |
 | **指導老師** | 洪政源 博士 |
 | **執行學校** | 國立高雄科技大學 |
-| **執行學生** | 李承育（三年級） |
+| **執行學生** | 李承育 |
 | **計畫年度** | 經濟部產發署 115 年度 |
 
 ---
 
 ## 🏗️ 系統架構
 
-系統分為四個層次，形成完整的端到端 Pipeline：
+三台機器分工，經 git 同步、MQTT 傳輸：
 
 ```
-┌─────────────────────────────────────────────────────────┐
-│                     感測器端 Sensor                      │
-│   ORP 感測器 → Raw Data (1 min/筆) → USB/Type-C 傳輸    │
-└───────────────────────┬─────────────────────────────────┘
-                        │
-┌───────────────────────▼─────────────────────────────────┐
-│             邊緣運算端 Jetson Orin Nano                   │
-│                                                          │
-│  ┌──────────────────────────────────────────────────┐   │
-│  │              第一階段：資料前處理                  │   │
-│  │  通訊協議解析 → 突波排除 → 雙軌濾波平滑化         │   │
-│  │         ┌──────────┐    ┌──────────────┐         │   │
-│  │         │  EMA     │    │Savitzky-Golay│         │   │
-│  │         │ (即時)   │    │  (歷史報表)  │         │   │
-│  │         └────┬─────┘    └──────┬───────┘         │   │
-│  └──────────────┼─────────────────┼─────────────────┘   │
-│                 │                 │                      │
-│  ┌──────────────▼─────────────────▼─────────────────┐   │
-│  │             第二階段：特徵分析與預測               │   │
-│  │                                                   │   │
-│  │  自適應生物相位偵測 (Phase 1 / 2 / 3)             │   │
-│  │              │                                   │   │
-│  │  週期特徵工程 (11 個候選特徵)                     │   │
-│  │              │                                   │   │
-│  │  GA 特徵選取 (選出 5/11)                         │   │
-│  │              │                                   │   │
-│  │  ┌───────────┴───────────┐                       │   │
-│  │  │  Ridge CH₄ 峰值預測  │  LSTM 即時監控 (+5min) │   │
-│  │  │  LOO-CV RMSE = 3.13% │  壓力 / CH₄ 預測      │   │
-│  │  └───────────────────────┘                       │   │
-│  └──────────────────────┬────────────────────────────┘   │
-│                         │ MQTT Broker                    │
-└─────────────────────────┼───────────────────────────────┘
-                          │
-┌─────────────────────────▼───────────────────────────────┐
-│                   前端呈現層 Vue3                         │
-│  ┌─────────────────────┐  ┌──────────────────────────┐  │
-│  │    MonitorView      │  │      ReportView           │  │
-│  │  即時監控           │  │  歷史分析                 │  │
-│  │  LSTM 壓力/CH₄ 預測 │  │  ORP 訊號 / 統計報表     │  │
-│  └─────────────────────┘  └──────────────────────────┘  │
-└─────────────────────────────────────────────────────────┘
+┌──────────────────────────────────────────────────────────────┐
+│  感測器端  ORP / 壓力 / pH / 溫度 / CH₄ / CO₂  (1 筆/分鐘)     │
+│            → CSV 記錄  或  USB/Type-C 即時串流                  │
+└──────────────────────────────┬───────────────────────────────┘
+                               │  MQTT
+┌──────────────────────────────▼───────────────────────────────┐
+│  Jetson Orin Nano — 即時後端 (FastAPI, edge_backend/)         │
+│                                                               │
+│   第一階段 資料前處理：突波排除 → EMA(即時) / S-G(報表)       │
+│   第二階段 狀態與預測：                                        │
+│     ├ 自適應生物相位偵測 (Phase 1/2/3)                         │
+│     ├ LSTM 壓力即時監控                                        │
+│     ├ CH₄ 峰值預測 (Ridge + 外插防護)                          │
+│     │    └ 特徵歸因：XGBoost + TreeSHAP（退回 GA + Ridge）     │
+│     └ 實驗批次：循環偵測 / 斷點標記 / 共變數 / 報表            │
+│   API：/phase /ch4_prediction /experiment/* /health           │
+│        /covariate_analysis /greybox_analysis …                │
+└──────────────────────────────┬───────────────────────────────┘
+                               │  HTTP (前端正式版打 Jetson)
+┌──────────────────────────────▼───────────────────────────────┐
+│  監控電腦 — 前端 (Vue3) + CSV 監看 + 桌面控制台               │
+│   ├ MonitorView    即時監控（ORP / 相位 / LSTM）              │
+│   ├ ReportView     歷史分析（訊號 / 統計）                     │
+│   ├ ExperimentView 實驗批次 + 即時面板 + CH₄ 預測             │
+│   │                 + 特徵歸因 + 共變數關聯 + 灰箱機理分析     │
+│   └ control_panel.pyw  啟動 / 更新 / 健康度監看（不依賴後端） │
+└──────────────────────────────────────────────────────────────┘
 ```
+
+> 開發筆電另有 `dev_test_server.py`：以真實後端 + 合成感測資料在單機重現整套系統，不需 Jetson／MQTT。
 
 ---
 
@@ -136,101 +127,34 @@ CO₂ + 4H₂ → CH₄ + 2H₂O
 
 ### 1. 訊號處理層：EMA 與 Savitzky-Golay
 
-#### 指數移動平均（EMA）— 用於即時監控
-
-ORP 感測器受液體攪動與氣泡通過影響，原始訊號含有瞬間突波。EMA 為因果濾波器，記憶體開銷 O(1)，適合邊緣裝置即時運算。
+**指數移動平均（EMA）— 即時監控**：因果濾波器，O(1) 記憶體，適合邊緣即時運算。
 
 ```
-ema[t] = α · x[t] + (1 - α) · ema[t-1]
-α = 2 / (N + 1)，N = 10
+ema[t] = α · x[t] + (1 - α) · ema[t-1],   α = 2 / (N + 1),  N = 10
 ```
 
-突波偵測機制：若 `|x[t] - ema[t-1]| > θ`，以線性插值取代，防止突波污染 EMA。
+突波偵測：若 `|x[t] - ema[t-1]| > θ`，以線性插值取代，防止突波污染 EMA。
+同步計算 `slope`（一階微分）與 `MACD = EMA(10) − EMA(30)`。
 
-同步計算衍生特徵：
-- `slope[t]`：ORP 一階微分，反映變化速率
-- `MACD[t]`：EMA(10) − EMA(60)，捕捉短期相對長期的動能變化
-
-#### Savitzky-Golay 濾波器（W=11, d=2）— 用於歷史報表
-
-最小平方目標函數：
-
-```
-min Σ[τ=-5 to 5] [x[t+τ] - (a₀ + a₁τ + a₂τ²)]²
-```
-
-視窗中心點平滑輸出：`p(0) = a₀`，無相位滯後，保留峰值形狀。
-
----
+**Savitzky-Golay（W=11, d=2）— 歷史報表**：視窗內二次多項式最小平方擬合，中心點無相位滯後、保留峰形。
 
 ### 2. 狀態層：自適應生物三相位偵測
 
-以當前週期斜率統計量 μ、σ 作為動態閾值，取代固定常數，適應不同批次實驗條件（初始壓力 0.896～1.5 kg/cm²）。
+以「當前區段斜率的統計量 μ、σ」作動態閾值（非固定常數），適應不同批次條件。
 
 | 相位 | 觸發條件 | 生物意義 |
 |------|----------|----------|
-| Phase 1 | slope < μ − k·σ | 嗜氫甲烷菌消耗 H₂/CO₂，建立還原環境，ORP 急降 |
-| Phase 2 | μ − k·σ ≤ slope ≤ μ + k·σ | 產甲烷活躍期，CH₄ 濃度持續上升 |
-| Phase 3 | slope > μ + k·σ | 底物耗盡，ORP 回升，接近最佳排氣時機 |
+| Phase 1 底物利用期 | slope < μ − k·σ | 消耗 H₂/CO₂、建立還原環境，ORP 急降 |
+| Phase 2 產甲烷活躍期 | μ − k·σ ≤ slope ≤ μ + k·σ | 產甲烷活躍，CH₄ 上升 |
+| Phase 3 底物耗盡期 | slope > μ + k·σ | 底物耗盡、ORP 回升，接近排氣時機 |
 
-演算流程：
-
-```
-原始 ORP 序列
-    │
-    ▼
-Step 1: EMA(10) 計算 slope[t]
-    │
-    ▼
-Step 2: 60 min 滾動平均（宏觀平滑）
-    │
-    ▼
-Step 3: 計算自適應閾值 μ ± k·σ（k = 1.5）
-    │
-    ▼
-Step 4: 初始相位標記 Phase 1 / 2 / 3
-    │
-    ▼
-Step 5: 30 min Debounce（防假切換）
-    │
-    ▼
-輸出相位標籤序列
-```
-
----
+流程：EMA slope → 60 min 滾動平滑 → 自適應閾值 μ±k·σ（k=0.5）→ 初始標記 → 最短持續時間去抖動。
+即時端點 `/api/phase`。
 
 ### 3. 預測層：LSTM 即時監控
 
-雙層 LSTM 架構，預測未來 +5 分鐘的壓力與 CH₄ 濃度：
-
-```
-輸入張量 (batch, 30, 6)
-特徵：EMA, Slope, MACD, pH, 溫度, 壓力
-    │
-    ▼
-LSTM Layer 1（Hidden Size: 64）
-輸出全部 30 步隱藏狀態
-    │
-    ▼
-LSTM Layer 2（Hidden Size: 64）
-只取最後步 h[29]（Many-to-One）
-    │
-    ▼
-Linear Layer（64 → 2）
-    │
-    ▼
-輸出：[壓力(t+5), CH₄%(t+5)]
-```
-
-| 參數 | 數值 |
-|------|------|
-| 總參數量 | 51,330 |
-| Val Loss | ~0.0041 |
-| Test Loss | ~0.0041 |
-| 泛化差距 | 0.1%（無 overfitting） |
-| 推論耗時 | 75.8 ms |
-
----
+雙層 LSTM（Hidden 64），輸入過去 30 分鐘的 `[EMA, slope, MACD, pH, 溫度, 壓力]`，
+Many-to-One 輸出未來壓力走勢；於 Jetson 上以 ONNX/torch 推論，供即時面板顯示。
 
 ### 4. 預測層：CH₄ 峰值即時預測 + 特徵歸因
 
@@ -244,7 +168,7 @@ Linear Layer（64 → 2）
 - **進度門檻**：循環進度 <85% 不給預測值。
 - **樣本門檻**：完整循環 <30 標為「參考級」。
 
-#### 特徵歸因：XGBoost + TreeSHAP（未安裝時退回 GA + Ridge）
+**特徵歸因：XGBoost + TreeSHAP（未安裝時退回 GA + Ridge）**
 
 依前沿文獻（樹模型 + SHAP 為 anaerobic digestion 甲烷預測主流），特徵歸因採
 **XGBoost + 內建 TreeSHAP**（`pred_contribs`，不需另裝 shap 套件）。部署考量：後端在
@@ -254,52 +178,7 @@ Jetson（ARM／資源受限），不強制安裝 xgboost——**裝了就用、�
 > （實測 5.3 vs 1.7）。XGBoost 的價值在**歸因更乾淨**（TreeSHAP 處理非線性），
 > 不是這種樣本量的預測精度。前端面板與說明均據實標明此限制。
 
-**退回路徑——特徵選擇：遺傳演算法（GA）**
-
-搜索空間 2¹¹ = 2048 種特徵子集，以 LOO-CV RMSE 作為適應度函數：
-
-```
-初始族群（20 個 11-bit 染色體）
-    │
-    ▼
-適應度評估（Ridge LOO-CV RMSE）
-    │
-    ▼
-終止條件（40 代）─── 是 ──→ 輸出最佳特徵子集
-    │ 否
-    ▼
-遺傳演化操作
-  - 錦標賽選擇
-  - 單點交配
-  - 位元翻轉突變
-  - 精英保留
-    │
-    └──→ 回到適應度評估
-```
-
-實際收斂於第 **5 代**，選出 5/11 特徵：
-
-| 特徵名稱 | 生物意義 |
-|----------|----------|
-| `cycle_length_min` | 排氣週期總長（分鐘），反映菌群整體消耗速率 |
-| `phase2_duration_min` | Phase 2 持續時長，產甲烷活躍期長度 |
-| `phase2_fraction` | Phase 2 佔週期比例，越高代表產氣越穩定 |
-| `phase3_onset_fraction` | Phase 3 起始相對時間，越晚代表菌群越活躍 |
-| `pressure_mean` | 週期內平均壓力，越高代表累積氣體越多 |
-
-#### 迴歸模型：Ridge Regression + LOO-CV
-
-在 n=6 小樣本下，LOO-CV 是統計上最可靠的驗證策略：
-
-| 輪次 | 測試週期 | 實際 CH₄ | 預測 CH₄ | 誤差 |
-|------|----------|----------|----------|------|
-| 第 1 輪 | C1 | 66.2% | 65.81% | −0.41% |
-| 第 2 輪 | C2 | 65.2% | 59.45% | −5.71% |
-| 第 3 輪 | C3 | 52.8% | 52.60% | −0.17% |
-| 第 4 輪 | C4 | 51.9% | 53.42% | +1.51% |
-| 第 5 輪 | C5 | 33.9% | 37.58% | +3.71% |
-| 第 6 輪 | C6 | 48.1% | 51.28% | +3.13% |
-| **平均** | — | — | — | **RMSE ≈ 3.13%** |
+即時端點 `/api/ch4_prediction`。
 
 ---
 
@@ -311,7 +190,7 @@ Jetson（ARM／資源受限），不強制安裝 xgboost——**裝了就用、�
 - **生物消耗**：嗜氫甲烷菌消耗溶解態 CO2
 
 歷史資料上 12 種分離方法均未通過決定性檢定。本專案不迴避這個結果，而是用機理模型
-**釐清「為什麼難」**，並提供兩條難度不同、皆可執行的分析線。
+**釐清「為什麼難」**，並提供可執行的分析與實驗補救。
 
 ### 關鍵結論：分離的困難是「結構性」的，與演算法無關
 
@@ -323,39 +202,37 @@ Jetson（ARM／資源受限），不強制安裝 xgboost——**裝了就用、�
 - 因此分離的槓桿是**暫態**（液相遠離飽和、兩通量暫時解耦），不是更複雜的模型——
   **換 LSTM／PINN／更新的演算法都不會改變這個結構限制**。這是實驗設計問題。
 
-### 兩條分析線
+### 兩條分析線（皆可在前端點按鈕觸發）
 
-| | 關聯分析 | 機理分離 |
+| | 關聯分析 | 灰箱機理分析 |
 |---|---|---|
-| 回答 | 平緩化**是不是**生物造成 | 溶解 vs 消耗**各多少** |
+| 回答 | 平緩化**是不是**生物造成 | 溶解 vs 消耗可分離了嗎、各多少 |
 | 程式 | `co2_covariate_association.py` | `co2_greybox_identifiability.py` |
-| 難度 | 中，**現有 9 批次即可** | 難，**需暫態段** |
-| 統計 | 批次分群叢集穩健標準誤（處理偽重複） | profile likelihood + 殘差法 |
-| 驗證 | 合成資料雙向驗證（生物/物理各判對） | 可辨識性已量化 |
+| 端點 | `/covariate_analysis` | `/greybox_analysis` |
+| 統計 | 批次分群叢集穩健標準誤（處理偽重複） | 暫態偵測 + 殘差法 |
+| 現況 | 合成資料雙向驗證（生物/物理各判對） | 穩態→尚不可分離；暫態→給分離比例 |
 
-對應的實驗設計調整（詳見 `docs/實驗設計_暫態分離協定_2026-07-26.md`）：補入純物理對照段、
+- **關聯分析**：控制循環時間 n 後，平緩化是否仍隨進氣前 ORP（菌群成熟度代理）顯著變動。
+- **灰箱機理**（「可分離度就緒指標」）：穩態資料回報「尚不可分離（需暫態）」；偵測到暫態
+  循環（下降速率遠快於穩態）時，以殘差法給出物理溶解／生物消耗佔比 = 1 − 穩態速率/暫態速率。
+
+對應實驗設計（詳見 `docs/實驗設計_暫態分離協定_2026-07-26.md`）：補入純物理對照段、
 換液後暫態窗口、打亂 n 順序 + 每日參考水準。
-
-兩條分析線皆在前端提供「點按鈕即分析」：**共變數關聯**判讀平緩化成因；**灰箱機理**
-給「可分離度就緒指標」——穩態資料回報「尚不可分離（需暫態）」，偵測到暫態循環
-（下降速率遠快於穩態）時，以殘差法給出物理溶解／生物消耗佔比。
 
 ---
 
 ## 🧪 實驗執行與運維
 
-### 實驗批次管理 + 即時面板
+### 實驗批次管理 + 即時面板（ExperimentView）
 
-前端 `ExperimentView` 管理完整批次生命週期（已規劃→進行中→已完成），自動偵測補氣
-循環並逐循環計算下降速率、斜率平緩化、進氣前 ORP（菌群成熟度共變數）。**資料完整性
-是第一級指標**：
+管理完整批次生命週期（已規劃→進行中→已完成），自動偵測補氣循環並逐循環計算下降速率、
+斜率平緩化、進氣前 ORP（菌群成熟度共變數）。**資料完整性是第一級指標**：
 
-- **記錄健康度告警**：最後一筆資料距今多久、逾時轉紅——直接針對 2026-07-22 監控電腦
-  自動更新導致資料靜默中斷 17.5 小時的事故設計。
+- **記錄健康度告警**：最後一筆資料距今多久、逾時轉紅——直接針對監控電腦自動更新導致
+  資料靜默中斷數小時的事故設計。
 - **記錄中斷偵測**：跨斷點的循環自動標記、排除於建模之外，避免產生假的「產甲烷」訊號。
 - **兩層報表匯出**：批次彙整（含離散度 IQR）與每循環特徵（餵模型用）。
-- **共變數關聯分析（點按鈕即分析）**：對當前每循環資料即時跑「進氣前 ORP → 下降速率／
-  平緩化」回歸（批次分群叢集穩健標準誤處理偽重複），直接判讀**平緩化是生物還是物理**。
+- **共變數關聯 / 灰箱機理分析**：點按鈕即對當前資料分析（見上一章）。
 
 ### 桌面控制台（`control_panel.pyw`）
 
@@ -372,215 +249,130 @@ Jetson（ARM／資源受限），不強制安裝 xgboost——**裝了就用、�
 
 ## ⚙️ 技術規格
 
-### 硬體需求
+### 硬體
 
 | 元件 | 規格 |
 |------|------|
 | 邊緣運算平台 | NVIDIA Jetson Orin Nano |
-| ORP 感測器 | 電化學 ORP 感測器，採樣頻率 1 min/筆 |
-| 氣體感測器 | CH₄ / CO₂ 濃度感測器 |
-| 壓力感測器 | 反應器壓力感測器 |
-| 傳輸介面 | USB / Type-C |
+| 感測器 | ORP（電化學）/ 反應槽壓力 / 氣體混合槽壓力 / pH / 溫度 / CH₄ / CO₂，1 筆/分鐘 |
+| 傳輸 | USB / Type-C（即時串流）或 CSV 每日備份 |
 
 ### 軟體依賴
 
-#### 後端（Jetson 端）
+**後端（edge_backend/requirements.txt）**
 
 ```
-Python >= 3.8
 fastapi / uvicorn        # API 服務
-torch                    # LSTM 壓力預測（Jetson 請用官方 CUDA 版）
-numpy / pandas / scipy   # 數值/資料/Savitzky-Golay 濾波、統計
+torch                    # LSTM 壓力預測（Jetson 用官方 CUDA 版）
+numpy / pandas / scipy   # 數值/資料/Savitzky-Golay、統計
 openpyxl                 # 報表匯出
 paho-mqtt                # MQTT 通訊
 pyserial                 # 感測器串列通訊
-xgboost                  # 選配：CH4 特徵歸因（TreeSHAP）；未裝自動退回 GA+Ridge
+xgboost                  # 選配：CH₄ 特徵歸因（TreeSHAP）；未裝自動退回 GA + Ridge
 ```
 
 > **可辨識性與關聯分析（`co2_*.py`）刻意只用 numpy + scipy**，不依賴 sklearn——
 > 實測 sklearn 的編譯 DLL 在部分機器會被系統 Application Control 政策擋住無法載入；
 > Ridge 以純 numpy 閉式解實作。
 
-#### 前端（Vue3）
-
-```
-vue >= 3.0.0
-vite >= 4.0.0
-mqtt.js >= 4.3.0         # MQTT 訂閱
-echarts >= 5.0.0         # 圖表渲染
-axios >= 1.0.0           # HTTP 請求
-```
+**前端（web_frontend/）**：Vue 3 + Vite + axios。正式版 `.env.production` 指向 Jetson（`192.168.55.1:8000`），
+開發版 `.env.development` 指向 `localhost:8000`。
 
 ---
 
 ## 🚀 安裝與部署
 
-### Step 1：Clone 專案
+### 取得專案
 
 ```bash
-git clone https://github.com/your-repo/biomethanation-edge-monitor.git
-cd biomethanation-edge-monitor
+git clone https://github.com/Yutou0601/Bioreactor-Edge-AI.git
+cd Bioreactor-Edge-AI
 ```
 
-### Step 2：安裝後端依賴
+### 後端（Jetson 或本機）
 
 ```bash
-cd backend
-pip install -r requirements.txt
+cd edge_backend
+python -m venv venv
+venv\Scripts\activate            # Windows；Linux/Jetson 用 source venv/bin/activate
+pip install -r requirements.txt   # Jetson 的 torch 請改用 NVIDIA 官方 CUDA wheel
+python main.py                    # 於 0.0.0.0:8000 起 FastAPI
 ```
 
-### Step 3：安裝並啟動 MQTT Broker
+### 前端（監控電腦）
 
 ```bash
-# 以 Mosquitto 為例
-sudo apt-get install mosquitto mosquitto-clients
-sudo systemctl start mosquitto
-sudo systemctl enable mosquitto
-```
-
-### Step 4：設定感測器串列埠
-
-編輯 `backend/config.yaml`：
-
-```yaml
-sensor:
-  port: /dev/ttyUSB0       # 依實際串列埠調整
-  baudrate: 9600
-  sampling_interval: 60    # 秒
-
-mqtt:
-  broker: localhost
-  port: 1883
-  topics:
-    orp: sensor/orp
-    ch4: sensor/ch4
-    pressure: sensor/pressure
-    prediction: model/prediction
-    phase: model/phase
-
-ema:
-  N: 10                    # EMA 視窗大小
-
-phase_detection:
-  k: 1.5                   # 自適應閾值靈敏度係數
-  debounce_min: 30         # 防抖動視窗（分鐘）
-
-savitzky_golay:
-  window_length: 11
-  polyorder: 2
-
-lstm:
-  model_path: models/lstm_model.pt
-  lookback: 30             # 過去 30 分鐘
-  predict_ahead: 5         # 預測未來 5 分鐘
-
-ridge:
-  model_path: models/ridge_model.pkl
-  ga_features: models/ga_selected_features.json
-```
-
-### Step 5：啟動後端 Pipeline
-
-```bash
-cd backend
-python main.py
-```
-
-### Step 6：安裝並啟動前端
-
-```bash
-cd frontend
+cd web_frontend
 npm install
-npm run dev
+npm run dev        # 開發模式 :5173（API 打 localhost）
+# 或
+npm run build && npm run preview   # 正式建置 :4173（API 打 Jetson）
 ```
 
-前端預設開啟於 `http://localhost:5173`
+### 建議：用桌面控制台（免記指令）
 
-### Step 7：（選用）載入預訓練模型
+雙擊 `控制台.bat`（或 `control_panel.pyw`）：一鍵啟動後端／CSV 監看／前端、檢查更新、
+監看資料新鮮度、設定 Jetson 免密碼登入（SSH 金鑰）與開機自動啟動。詳見 `控制台使用說明.md`。
 
-如需使用已訓練好的 LSTM 與 Ridge 模型：
+### 開發者：單機測試
 
 ```bash
-cd backend
-python scripts/load_pretrained.py --lstm models/lstm_model.pt --ridge models/ridge_model.pkl
+python dev_test_server.py --flattening --vent-every 1440    # 真後端 + 合成資料
 ```
 
-如需重新訓練：
-
-```bash
-# 訓練 LSTM
-python scripts/train_lstm.py --data data/historical_orp.csv
-
-# 執行 GA 特徵選擇並訓練 Ridge
-python scripts/train_ridge_ga.py --data data/cycle_features.csv
-```
+> 舊版 `start_all.bat` / `sync_jetson.bat` 保留為後備。系統以 `.env` 與命令列參數設定，
+> 無需 `config.yaml`。
 
 ---
 
 ## 📊 使用說明
 
-### MonitorView（即時監控）
+**MonitorView（即時監控）**：即時 ORP 四軌曲線（原始/去突波/EMA/S-G）、生物相位色塊、
+LSTM 壓力預測、反應狀態摘要與基準漂移率。
 
-開啟前端後，預設進入 MonitorView，提供以下資訊：
+**ReportView（歷史分析）**：任意時間範圍的 ORP 曲線（S-G 無滯後）、分佈統計、壓力事件、
+特徵相關、每日突波統計。
 
-- **即時 ORP 曲線**：原始訊號、去突波資料、EMA、S-G 四條曲線疊加顯示
-- **生物相位標記**：Phase 1（紅）/ Phase 2（綠）/ Phase 3（橘）即時色塊
-- **LSTM 預測儀表板**：即時壓力、預測 +5min 壓力、預測 +5min CH₄%、推論耗時
-- **反應狀態摘要**：自動生成文字描述（穩態 / 急降 / 回升），並顯示基準漂移率
+**ExperimentView（實驗執行與分析）**：
+- 建立/管理批次、即時面板（目前壓力/ORP、距下次補氣、記錄健康度告警、本循環壓力曲線）
+- CH₄ 峰值預測 + 特徵歸因（XGBoost+TreeSHAP / GA+Ridge）
+- **共變數關聯分析**（點按鈕）：判讀平緩化是生物還是物理
+- **灰箱機理分析**（點按鈕）：可分離度就緒指標 + 分離比例
+- 兩層報表匯出
 
-### ReportView（歷史分析）
-
-點擊上方 Tab 切換至 ReportView，提供以下功能：
-
-- **ORP 歷史曲線**：可選擇任意時間範圍，支援 S-G 無滯後平滑顯示
-- **ORP 分佈直方圖**：EMA 平滑後的訊號分佈統計
-- **反應器壓力分佈**：標記超過安全閾值的高壓事件
-- **特徵相關係數熱力圖**：ORP、pH、溫度、壓力、CH₄、CO₂ 的 Pearson 相關矩陣
-- **每日突波統計**：正常筆數 vs. 突波筆數的每日對比
-
-### CH₄ 峰值預測
-
-每個排氣週期結束後，系統自動執行 GA 特徵提取與 Ridge 預測，結果顯示於：
-
-```
-MonitorView → 週期摘要面板 → 本週期預測 CH₄ 峰值：XX.X%
+**離線分析**（研究用，吃匯出的每循環 CSV 或跑決定性測試）：
+```bash
+python co2_covariate_association.py --demo bio      # 關聯分析（合成驗證）
+python co2_greybox_identifiability.py               # 可辨識性決定性測試
+python ch4_peak_analysis.py --granularity both      # CH₄ cycle/minute-level 分析
 ```
 
 ---
 
-## 📈 實驗成果
+## 📈 實驗成果與限制
 
-### 訊號處理效果
+### 可靠的工程結果
 
-| 指標 | 結果 |
+| 項目 | 結果 |
 |------|------|
-| 突波排除率 | 接近 100%（一階差分閾值法） |
-| EMA 推論耗時 | < 1 ms/筆（O(1) 遞迴計算） |
-| S-G 批次處理速度 | 8,862 筆資料 < 1 秒 |
+| 突波排除 | 一階差分閾值法，即時線上處理 |
+| EMA 推論 | O(1) 遞迴，< 1 ms/筆 |
+| S-G 批次平滑 | 數千筆秒級完成 |
+| 相位偵測 | 自適應閾值 + 去抖動，適用不同批次初始壓力 |
+| LSTM 壓力監控 | Jetson Orin Nano 上即時推論 |
+| 資料完整性 | 記錄中斷自動偵測、跨斷點循環排除、健康度告警 |
 
-### 相位偵測效果
+### 誠實標示的限制
 
-| 指標 | 結果 |
-|------|------|
-| 適用壓力範圍 | 0.896 ～ 1.5 kg/cm² |
-| Debounce 窗口 | 30 min（防假切換） |
-| Phase 1 平均偵測延遲 | < 5 min |
+- **CH₄ 峰值預測**：目標訊號為參考級、完整循環樣本極少（<30）。系統一律附
+  LOO-CV RMSE 與可靠度，並在外插／進度不足時**拒絕給值**。XGBoost+TreeSHAP 提供更乾淨的
+  **特徵歸因**，但小樣本下預測精度未必優於 Ridge（樹模型高變異，已據實標明）。
+- **CO2 分離**：機理模型證明**穩態下結構性不可分離**（kLa ±160%）。前端灰箱面板作為
+  「可分離度就緒指標」，需依暫態分離協定補入純物理對照與換液暫態，才能給出可信的分離比例。
+- **共變數關聯**：同批次循環為偽重複，已用批次分群叢集穩健標準誤折算檢定力；批次少時
+  「無顯著」讀為「證據不足」而非「無關」。**找到關聯 ≠ 分離了機制**。
 
-### CH₄ 峰值預測效果
-
-| 模型 | LOO-CV RMSE | 備註 |
-|------|-------------|------|
-| **Ridge + GA（本研究）** | **3.13%** | 5/11 特徵，5 代收斂 |
-| Random Forest | 10.17% | n=6 小樣本 overfitting |
-
-### LSTM 即時監控效果
-
-| 指標 | 數值 |
-|------|------|
-| Val Loss | ~0.0041 |
-| Test Loss | ~0.0041 |
-| 泛化差距 | 0.1% |
-| 推論耗時（Jetson Orin Nano） | 75.8 ms |
+> 上述限制均反映在前端面板與程式輸出中，非事後補述。相關方法學與實驗設計文件見 `docs/`。
 
 ---
 
@@ -595,12 +387,12 @@ Bioreactor-Edge-AI/
 ├── start_all.bat / sync_jetson.bat  # 舊版一鍵啟動/同步（保留為後備）
 │
 ├── edge_backend/
-│   ├── main.py                      # FastAPI 入口
+│   ├── main.py                      # FastAPI 入口（:8000）
 │   ├── requirements.txt
 │   │
 │   ├── api/
-│   │   ├── routes.py                # 所有 API 端點（含 /ch4_prediction /phase
-│   │   │                            #   /covariate_analysis /experiment/* /health）
+│   │   ├── routes.py                # 所有 API 端點（/ch4_prediction /phase /health
+│   │   │                            #   /covariate_analysis /greybox_analysis /experiment/*）
 │   │   └── schemas.py
 │   │
 │   ├── core/                        # 即時後端核心（部署到 Jetson）
@@ -609,15 +401,15 @@ Bioreactor-Edge-AI/
 │   │   ├── feature_extractor.py     # 穩態/相位特徵萃取
 │   │   ├── inference.py / model.py  # LSTM 壓力預測
 │   │   ├── ch4_realtime.py          # CH4 峰值預測 + XGBoost/SHAP 歸因（退回 GA+Ridge）
-│   │   ├── experiment_store.py      # 實驗批次資料模型（循環偵測/斷點/共變數）
+│   │   ├── experiment_store.py      # 實驗批次資料模型（循環偵測/斷點/共變數/軌跡）
 │   │   ├── experiment_report.py     # 兩層報表匯出（批次彙整/每循環）
 │   │   └── mqtt_client.py
 │   │
 │   ├── co2_greybox_identifiability.py  # 機理分離：決定性測試(離線) + 前端可分離度指標
-│   ├── co2_covariate_association.py    # 【離線+API】共變數關聯分析（平緩化成因）
-│   ├── co2_separation_analysis.py      # 【離線】分離分析工具集
-│   ├── co2_relaxation_analysis.py      # 【離線】弛豫振盪器分析（含證偽死路）
-│   ├── ch4_peak_analysis.py            # 【離線】CH4 峰值 cycle/minute-level 分析
+│   ├── co2_covariate_association.py    # 共變數關聯分析（平緩化成因；離線+API）
+│   ├── co2_separation_analysis.py      # 分離分析工具集（離線）
+│   ├── co2_relaxation_analysis.py      # 弛豫振盪器分析（含證偽死路；離線）
+│   ├── ch4_peak_analysis.py            # CH4 峰值 cycle/minute-level 分析（離線）
 │   ├── batch_import_csv.py / csv_watcher.py / usb_receiver.py  # 資料匯入/監看/接收
 │   └── sensor_simulator.py / train.py / export_onnx.py
 │
@@ -625,17 +417,14 @@ Bioreactor-Edge-AI/
 │   └── src/views/
 │       ├── MonitorView.vue          # 即時監控（ORP/相位/LSTM）
 │       ├── ReportView.vue           # 歷史分析
-│       └── ExperimentView.vue       # 實驗批次管理 + 即時面板 + CH4 預測
-│                                    #   + 特徵歸因 + 共變數關聯分析（點按鈕即分析）
+│       └── ExperimentView.vue       # 實驗批次 + 即時面板 + CH4 預測 + 特徵歸因
+│                                    #   + 共變數關聯 + 灰箱機理分析（點按鈕即分析）
 │
 ├── docs/                            # 日報、實驗設計、技術備忘、證據鏈、簡報
 │
+├── 控制台使用說明.md
 └── README.md
 ```
-
-> 標【離線】者為研究分析工具，吃實驗完整資料、輸出統計結論。其中兩支另在前端
-> 提供「點一下即分析」：`co2_covariate_association.py`（`/covariate_analysis`，平緩化
-> 成因）與 `co2_greybox_identifiability.py`（`/greybox_analysis`，可分離度就緒指標）。
 
 ---
 
@@ -657,7 +446,7 @@ Bioreactor-Edge-AI/
 學術引用請註明：
 
 ```
-李承育（2026）。基於邊緣運算之ORP動態分析為基礎的生物甲烷化即時監控與峰值預測系統。
+李承育（2026）。基於邊緣運算之ORP動態分析為基礎的生物甲烷化即時監控、預測與分離研究平台。
 經濟部產發署115年度半導體創新技術與產業應用驅動智匯菁英計畫實務專題成果。
 財團法人金屬工業研究發展中心 / 國立高雄科技大學。
 ```
