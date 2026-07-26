@@ -351,6 +351,38 @@ def all_cycles() -> list:
     return rows
 
 
+def complete_cycle_trajectories() -> list:
+    """取出所有『完整循環』的壓力軌跡（給灰箱機理分析擬合用）。
+    每個循環回傳其補氣後高點到下次補氣前的逐分鐘壓力序列 + 中繼資訊。
+    只取完整循環——殘段/記錄中斷的軌跡形狀不可信，不能拿去擬合機理模型。"""
+    out = []
+    for run in experiment_runs:
+        recs = _records_between(run["start_time"], run.get("end_time"))
+        if len(recs) < 10:
+            continue
+        p, orp, ts, refills, gaps, starts = _segment(recs)
+        base_p = float(run.get("baseline_pressure") or 0.0)
+        head_complete = base_p > 0 and abs(p[0] - base_p) <= REFILL_JUMP
+        for k, a in enumerate(starts):
+            b = starts[k + 1] if k + 1 < len(starts) else len(recs)
+            if b - a < 6:
+                continue
+            started = (a in refills and a not in gaps) if a > 0 else head_complete
+            ended = b < len(recs) and b in refills and b not in gaps
+            if not (started and ended):        # 只要完整循環
+                continue
+            dt_min = (ts[a + 1] - ts[a]).total_seconds() / 60.0 or 1.0
+            out.append({
+                "run_id":     run["run_id"],
+                "n_minutes":  run["n_minutes"],
+                "start":      recs[a]["timestamp"][:16],
+                "pressure":   [round(v, 4) for v in p[a:b]],
+                "dt_min":     round(dt_min, 2),
+                "baseline_p": round(base_p, 4) if base_p else round(p[a], 4),
+            })
+    return out
+
+
 def get_live_status(run_id: str) -> dict:
     """進行中批次的即時狀態：目前壓力、距下次自動補氣（下限）、本實驗已跑/剩餘時間。"""
     run = _find(run_id)

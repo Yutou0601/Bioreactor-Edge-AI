@@ -396,6 +396,35 @@ def covariate_analysis():
         return {"status": "error", "message": f"分析失敗：{type(e).__name__}: {e}"}
 
 
+# ==========================================
+# 通道 8：灰箱機理分析（可分離度就緒指標）
+# ==========================================
+@router.get("/greybox_analysis")
+def greybox_analysis():
+    """對真實完整循環軌跡跑灰箱兩狀態模型，回報「可分離度就緒」：
+    穩態資料下物理速率 kLa 不可辨識 → 尚不可分離（需暫態/對照）；
+    含暫態時 kLa 可辨識 → 可進行溶解/生物分離。
+
+    比關聯分析慢（profile likelihood），但已限制只擬合最像暫態的少數循環，數秒內完成。
+    這回答的是「你收集到的資料夠不夠分離」，是機理路線的就緒指標。
+    """
+    try:
+        from co2_greybox_identifiability import analyze_real
+    except Exception as e:
+        return {"status": "error", "message": f"分析模組載入失敗：{type(e).__name__}: {e}"}
+    try:
+        cycles = exp.complete_cycle_trajectories()
+    except Exception as e:
+        return {"status": "error", "message": f"取軌跡失敗：{type(e).__name__}: {e}"}
+    if not cycles:
+        return {"status": "insufficient", "n_cycles": 0,
+                "message": "尚無完整循環可分析（需先累積補氣循環）。"}
+    try:
+        return analyze_real(cycles)
+    except Exception as e:
+        return {"status": "error", "message": f"分析失敗：{type(e).__name__}: {e}"}
+
+
 @router.get("/analysis")
 def get_analysis():
     """

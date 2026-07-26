@@ -228,6 +228,74 @@ def _report(title, data, fixed):
                   f"相對±{ci['rel']:.0f}% → {tag}")
 
 
+# ══════════════════════════════════════════════════════════════════
+#  真實資料版：可分離度就緒指標（供前端 /greybox_analysis）
+# ══════════════════════════════════════════════════════════════════
+# 用發現2 的殘差法，不做脆弱的 ODE profile（實測 profile 在真實穩態資料上會因
+# C0 假設製造假的可辨識性、給出錯誤的「可分離」）。原理（見本檔頂部結論 2）：
+#   穩態速率 r_ss = 生物限制通量（溶解通量≡生物通量時的下降速率）
+#   暫態時（換液後液相遠離飽和）下降更快，超出穩態的部分＝純物理填充液相
+#   物理溶解佔比 = (r_transient − r_ss)/r_transient = 1 − r_ss/r_transient
+# 穩態資料所有循環速率相近（r_max≈r_ss）→ 無暫態 → 尚不可分離。
+TRANSIENT_RATIO = 1.30      # 某循環平均速率 > 穩態速率 ×此值 → 認定含暫態
+
+def _cycle_rate(P, dt_min):
+    """循環平均下降速率 kg/cm²/hr。"""
+    P = np.asarray(P, float)
+    hours = (len(P) - 1) * dt_min / 60.0
+    return (P[0] - P[-1]) / hours if hours > 0 else 0.0
+
+
+def analyze_real(cycles: list) -> dict:
+    """對真實完整循環軌跡輸出「可分離度就緒」判斷 + 若有暫態則給分離比例（殘差法）。
+
+    cycles: [{pressure:[...], dt_min, baseline_p, run_id, n_minutes, start}, ...]
+    """
+    usable = [c for c in cycles if len(c.get("pressure", [])) >= 6]
+    if len(usable) < 2:
+        return {"status": "insufficient", "n_cycles": len(cycles),
+                "message": "完整循環不足（需 ≥2 個以估穩態速率）。"}
+
+    rates = [(_cycle_rate(c["pressure"], c["dt_min"]), c) for c in usable]
+    rates = [(r, c) for r, c in rates if r > 0]
+    if len(rates) < 2:
+        return {"status": "insufficient", "n_cycles": len(cycles),
+                "message": "有效循環不足。"}
+
+    vals = sorted(r for r, _ in rates)
+    # 穩態速率 = 較慢那半的中位數（暫態是偏快的離群，不能污染基準）
+    slow = vals[:max(1, len(vals) // 2)]
+    r_ss = float(np.median(slow))
+    r_max, cmax = max(rates, key=lambda x: x[0])
+    ratio = r_max / r_ss if r_ss > 0 else 1.0
+    has_transient = ratio >= TRANSIENT_RATIO
+
+    out = {
+        "status":       "ok",
+        "n_cycles":     len(usable),
+        "steady_rate":  round(r_ss, 5),
+        "max_rate":     round(r_max, 5),
+        "ratio":        round(ratio, 2),
+        "separable":    bool(has_transient),
+        "best_cycle":   {"run_id": cmax["run_id"], "start": cmax.get("start")},
+        "caveat":       "穩態速率≈生物限制通量；分離只在暫態成立。物理佔比由單一暫態估得、需重複驗證。",
+    }
+    if has_transient:
+        # 殘差法：該暫態循環中，超出穩態速率的部分為純物理填充
+        phys_frac = max(0.0, min(1.0, 1.0 - r_ss / r_max))
+        out["dissolution_fraction"] = round(phys_frac * 100, 1)
+        out["consumption_fraction"] = round((1 - phys_frac) * 100, 1)
+        out["verdict"] = "separable"
+        out["verdict_text"] = (f"偵測到暫態循環（速率 {r_max:.4f} 為穩態 {r_ss:.4f} 的 "
+                               f"{ratio:.1f} 倍）→ 可分離。該暫態物理溶解佔 {phys_frac*100:.0f}%、"
+                               f"生物消耗佔 {(1-phys_frac)*100:.0f}%（殘差法，需更多暫態重複驗證）。")
+    else:
+        out["verdict"] = "not_ready"
+        out["verdict_text"] = (f"所有循環速率相近（最快僅穩態的 {ratio:.1f} 倍）→ 目前資料為穩態，"
+                               f"**尚不可分離**。需補入暫態段（換液後首循環）或純物理對照，見暫態分離協定。")
+    return out
+
+
 def main():
     print("=" * 66)
     print(" CO2 溶解/生物消耗分離 —— 灰箱可辨識性決定性測試（合成資料）")

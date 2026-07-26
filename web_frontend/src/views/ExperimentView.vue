@@ -111,6 +111,19 @@ function fmtP(p) { return p === null || p === undefined ? 'n/a' : (p < 0.001 ? '
 function fmtCoef(v) { return v === null || v === undefined ? '—' : (v >= 0 ? '+' : '') + v.toPrecision(3) }
 const FEAT_TERM = { '截距': '截距', n_minutes: '循環時間 n', pre_injection_orp: '進氣前 ORP' }
 
+// 灰箱機理分析（點按鈕才跑）：可分離度就緒 + 若有暫態給分離比例
+const gb = ref(null)
+const gbLoading = ref(false)
+async function runGb() {
+  gbLoading.value = true
+  try {
+    const { data } = await apiClient.get('/greybox_analysis', { timeout: 30000 })
+    gb.value = data
+  } catch (e) {
+    gb.value = { status: 'error', message: '分析請求失敗：' + (e.message || '') }
+  } finally { gbLoading.value = false }
+}
+
 async function loadRuns() {
   try {
     const { data } = await apiClient.get('/experiment/runs')
@@ -463,6 +476,47 @@ onUnmounted(() => clearInterval(pollTimer))
       <div v-else class="cov-hint">尚未執行。累積數個完整補氣循環後，按「執行分析」判斷平緩化成因。</div>
     </div>
 
+    <!-- 灰箱機理分析（可分離度就緒指標）-->
+    <div class="gb-panel">
+      <div class="cov-head">
+        <span class="gb-title">灰箱機理分析</span>
+        <span class="cov-sub">溶解 vs 消耗可分離了嗎？（暫態殘差法）</span>
+        <button class="btn btn-primary cov-btn" @click="runGb" :disabled="gbLoading">
+          {{ gbLoading ? '分析中…' : '執行分析' }}
+        </button>
+      </div>
+
+      <div v-if="gb && gb.status === 'ok'" class="cov-body">
+        <div class="cov-verdict-row">
+          <span class="cov-verdict" :class="gb.separable ? 'gb-ok' : 'gb-no'">
+            {{ gb.separable ? '可分離' : '尚不可分離' }}
+          </span>
+          <span class="cov-n">{{ gb.n_cycles }} 個完整循環 · 最快/穩態速率 = <b>{{ gb.ratio }}×</b></span>
+        </div>
+
+        <!-- 可分離時：顯示物理/生物佔比長條 -->
+        <div v-if="gb.separable" class="gb-split">
+          <div class="gb-bar">
+            <span class="gb-seg gb-phys" :style="{ width: gb.dissolution_fraction + '%' }">
+              物理溶解 {{ gb.dissolution_fraction }}%
+            </span>
+            <span class="gb-seg gb-bio" :style="{ width: gb.consumption_fraction + '%' }">
+              生物消耗 {{ gb.consumption_fraction }}%
+            </span>
+          </div>
+          <div class="gb-src">依暫態循環 {{ gb.best_cycle?.run_id }}（{{ gb.best_cycle?.start?.slice(5) }}）</div>
+        </div>
+
+        <p class="cov-vtext">{{ gb.verdict_text }}</p>
+        <ul class="cov-caveats"><li>※ {{ gb.caveat }}</li>
+          <li v-if="!gb.separable">※ 依「暫態分離協定」補入純物理對照與換液暫態後，此面板即會給出分離比例。</li>
+        </ul>
+      </div>
+
+      <div v-else-if="gb && gb.status !== 'ok'" class="cov-msg">{{ gb.message }}</div>
+      <div v-else class="cov-hint">尚未執行。點「執行分析」判斷目前資料是否足以分離溶解與生物消耗。</div>
+    </div>
+
     <!-- 基準值 + 建立計畫 + 手動新增 -->
     <div class="toolbar">
       <div class="baseline-box">
@@ -755,6 +809,21 @@ onUnmounted(() => clearInterval(pollTimer))
 .cov-caveats li { font-size: 0.64rem; color: #5f7568; line-height: 1.6; }
 .cov-msg { margin-top: 10px; font-size: 0.76rem; color: #d0a24a; }
 .cov-hint { margin-top: 10px; font-size: 0.74rem; color: #55705f; }
+
+/* 灰箱機理分析面板（可分離度就緒）*/
+.gb-panel { background: #0f1820; border: 1px solid #1e3242; border-radius: 8px;
+  padding: 1rem 1.25rem; margin-bottom: 1.25rem; }
+.gb-title { font-size: 0.95rem; font-weight: 700; color: #5aa8d0; }
+.gb-ok { color: #4caf82; border-color: #4caf82; }
+.gb-no { color: #8a9aa5; border-color: #3a4a55; }
+/* 分離比例：物理(藍)/生物(橙) 兩段長條，已對面板底色驗證 CVD ΔE 26.8；含直標與 2px 間隙 */
+.gb-split { margin: 12px 0; }
+.gb-bar { display: flex; gap: 2px; height: 26px; border-radius: 4px; overflow: hidden; }
+.gb-seg { display: flex; align-items: center; justify-content: center; font-size: 0.66rem;
+  font-weight: 700; color: #fff; white-space: nowrap; min-width: 0; overflow: hidden; }
+.gb-phys { background: #3987e5; border-radius: 4px 0 0 4px; }
+.gb-bio { background: #d95926; border-radius: 0 4px 4px 0; }
+.gb-src { font-size: 0.64rem; color: #55707f; margin-top: 5px; }
 
 .toolbar { display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 12px; margin-bottom: 10px; }
 .baseline-box { display: flex; align-items: center; gap: 10px; background: #121212; border: 1px solid #222;

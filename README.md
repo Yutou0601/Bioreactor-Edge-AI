@@ -336,6 +336,10 @@ Jetson（ARM／資源受限），不強制安裝 xgboost——**裝了就用、�
 對應的實驗設計調整（詳見 `docs/實驗設計_暫態分離協定_2026-07-26.md`）：補入純物理對照段、
 換液後暫態窗口、打亂 n 順序 + 每日參考水準。
 
+兩條分析線皆在前端提供「點按鈕即分析」：**共變數關聯**判讀平緩化成因；**灰箱機理**
+給「可分離度就緒指標」——穩態資料回報「尚不可分離（需暫態）」，偵測到暫態循環
+（下降速率遠快於穩態）時，以殘差法給出物理溶解／生物消耗佔比。
+
 ---
 
 ## 🧪 實驗執行與運維
@@ -609,7 +613,7 @@ Bioreactor-Edge-AI/
 │   │   ├── experiment_report.py     # 兩層報表匯出（批次彙整/每循環）
 │   │   └── mqtt_client.py
 │   │
-│   ├── co2_greybox_identifiability.py  # 【離線】機理分離可辨識性決定性測試
+│   ├── co2_greybox_identifiability.py  # 機理分離：決定性測試(離線) + 前端可分離度指標
 │   ├── co2_covariate_association.py    # 【離線+API】共變數關聯分析（平緩化成因）
 │   ├── co2_separation_analysis.py      # 【離線】分離分析工具集
 │   ├── co2_relaxation_analysis.py      # 【離線】弛豫振盪器分析（含證偽死路）
@@ -629,8 +633,9 @@ Bioreactor-Edge-AI/
 └── README.md
 ```
 
-> 標【離線】者為研究分析工具，吃實驗完整資料、輸出統計結論，不進即時前端；
-> `co2_covariate_association.py` 另經 `/covariate_analysis` 端點在前端提供「點一下即分析」。
+> 標【離線】者為研究分析工具，吃實驗完整資料、輸出統計結論。其中兩支另在前端
+> 提供「點一下即分析」：`co2_covariate_association.py`（`/covariate_analysis`，平緩化
+> 成因）與 `co2_greybox_identifiability.py`（`/greybox_analysis`，可分離度就緒指標）。
 
 ---
 
