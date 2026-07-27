@@ -772,8 +772,10 @@ class ControlPanel:
             encoding="utf-8")
         self.log("開啟命令視窗安裝公鑰——請在該視窗輸入 Jetson 密碼（只需這一次）…", "warn")
         try:
-            # 用 start 開新的可見主控台跑 .bat（pythonw 無主控台，密碼提示需要 tty）。
-            p = subprocess.Popen(["cmd", "/c", "start", "安裝公鑰", "/wait", str(bat)])
+            # 用 start 開可見主控台跑 .bat（pythonw 無主控台，密碼提示需 tty）。
+            # 關鍵：start 的標題必須「真的用引號括住」，否則會把第一個字當成要執行的程式
+            # → ERROR_INVALID_NAME。故用 shell 字串把 "" 空標題與 bat 路徑的引號寫死。
+            p = subprocess.Popen(f'start "" /wait "{bat}"', shell=True)
             p.wait(timeout=600)
         except Exception:
             pass          # 使用者可能沒關視窗；成功與否一律以 _ssh_check 為準
