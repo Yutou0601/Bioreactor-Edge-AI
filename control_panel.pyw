@@ -160,7 +160,10 @@ class ControlPanel:
         return f"http://localhost:{self.fe_port}"
 
     def _ssh(self, remote_cmd: str) -> list:
-        return ["ssh", *SSH_OPTS, self.ssh_target, remote_cmd]
+        # 金鑰存在時，強制只用「我們這把」金鑰（-i + IdentitiesOnly），避免 ssh 去試
+        # agent 或其他預設金鑰造成時好時壞。金鑰不存在時不加 -i（會正確地失敗＝尚未設定）。
+        key_opts = ["-i", str(SSH_KEY), "-o", "IdentitiesOnly=yes"] if SSH_KEY.exists() else []
+        return ["ssh", *key_opts, *SSH_OPTS, self.ssh_target, remote_cmd]
 
     def _ssh_check(self) -> bool:
         """測試免密碼登入是否可用。BatchMode 下若需密碼會直接失敗，不會卡住。"""
@@ -746,29 +749,29 @@ class ControlPanel:
             self.log(f"已有金鑰，沿用：{SSH_KEY}", "info")
 
         pub = Path(str(SSH_KEY) + ".pub")
-        try:
-            pubkey = pub.read_text(encoding="utf-8").strip()
-        except Exception as e:
-            self.log(f"讀不到公鑰 {pub}：{e}", "bad")
+        if not pub.exists():
+            self.log(f"找不到公鑰 {pub}", "bad")
             return
 
-        # 安裝公鑰需要輸入一次密碼 → 必須用「看得見的視窗」，不能隱藏也不能接管輸出，
-        # 否則密碼提示會無聲卡死（這正是不能把密碼寫死自動登入的原因）。
-        remote = (f"mkdir -p ~/.ssh && chmod 700 ~/.ssh && "
-                  f"touch ~/.ssh/authorized_keys && chmod 600 ~/.ssh/authorized_keys && "
-                  f"grep -qxF '{pubkey}' ~/.ssh/authorized_keys || echo '{pubkey}' >> ~/.ssh/authorized_keys")
+        # 安裝公鑰採 ssh-copy-id 的標準做法：把公鑰用**管線 pipe** 進遠端 cat，
+        # 命令字串完全不含公鑰內容 → 徹底避開巢狀引號問題（先前 bug 根因）。
+        # 遠端指令簡單、只有一層雙引號；umask 077 確保權限；sort -u 去重（可重複執行不累積）。
+        # 需輸入一次密碼，故用「看得見的視窗」（隱藏視窗會讓密碼提示無聲卡死）。
+        remote = ("umask 077 && mkdir -p ~/.ssh && cat >> ~/.ssh/authorized_keys && "
+                  "sort -u ~/.ssh/authorized_keys -o ~/.ssh/authorized_keys")
+        line = (f'type "{pub}" | '
+                f'ssh -o StrictHostKeyChecking=accept-new {self.ssh_target} "{remote}"')
         self.log("開啟命令視窗安裝公鑰——請在該視窗輸入 Jetson 密碼（只需這一次）…", "warn")
         try:
+            # start "" /wait：空標題避免 start 誤判；/c ... & pause：跑完等按鍵再關，
+            # 讓使用者看得到結果。真正的成功判定靠下方 _ssh_check，不依賴視窗回顯。
             p = subprocess.Popen(
-                ["cmd", "/c", "start", "/wait", "cmd", "/c",
-                 f'echo 請輸入 Jetson ({self.ssh_target}) 的密碼： && '
-                 f'ssh -o StrictHostKeyChecking=accept-new {self.ssh_target} "{remote}" && '
-                 f'echo. && echo 公鑰安裝完成，本視窗即將關閉。 && timeout /t 3'],
+                ["cmd", "/c", "start", "", "/wait", "cmd", "/c",
+                 f'{line} & echo. & echo ==== 完成後請按任意鍵關閉本視窗 ==== & pause'],
                 cwd=str(ROOT))
-            p.wait(timeout=300)
-        except Exception as e:
-            self.log(f"安裝公鑰失敗：{e}", "bad")
-            return
+            p.wait(timeout=600)
+        except Exception:
+            pass          # 使用者可能沒關視窗；成功與否一律以 _ssh_check 為準
 
         if self._ssh_check():
             self.ssh_ok = True
