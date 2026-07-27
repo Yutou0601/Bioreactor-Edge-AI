@@ -205,8 +205,16 @@ def compute_results(run: dict) -> dict:
         "vent_ph":             None,
         "vent_orp":            None,
         "vent_ch4_peak_ref":   None,
+        "vent_co2":            None,
+        "peaks_manual":        [],     # 哪些峰值是手動輸入的（現場觀測，較準）
     }
+    mp = run.get("manual_peaks") or {}
     if len(recs) < 2:
+        # 即使還沒資料，手動峰值也要能顯示（例如先建批次、事後補填）
+        for k, key in (("orp", "vent_orp"), ("ph", "vent_ph"),
+                       ("ch4", "vent_ch4_peak_ref"), ("co2", "vent_co2")):
+            if k in mp:
+                out[key] = mp[k]; out["peaks_manual"].append(k)
         return out
 
     first, last = recs[0], recs[-1]
@@ -242,12 +250,23 @@ def compute_results(run: dict) -> dict:
         if len(pre_orps) >= 2:
             out["culture_drift"] = round(pre_orps[-1] - pre_orps[0], 1)
 
+    # 自動抓的排氣值（末筆 ORP/pH、末段 CH4/CO2 峰值）
     out["vent_ph"] = round(float(last.get("ph") or 0.0), 2)
     out["vent_orp"] = round(float(last.get("orp") or 0.0), 1)
     tail = recs[-VENT_PEAK_WINDOW_MIN:] if len(recs) >= VENT_PEAK_WINDOW_MIN else recs
     ch4_vals = [float(r.get("ch4_pct") or 0.0) for r in tail]
+    co2_vals = [float(r.get("co2_pct") or 0.0) for r in tail]
     if ch4_vals:
         out["vent_ch4_peak_ref"] = round(max(ch4_vals), 2)
+    if co2_vals:
+        out["vent_co2"] = round(max(co2_vals), 2)
+
+    # 手動峰值覆蓋：有填就用現場觀測值（較準），並記在 peaks_manual 供報表標示
+    for k, key in (("orp", "vent_orp"), ("ph", "vent_ph"),
+                   ("ch4", "vent_ch4_peak_ref"), ("co2", "vent_co2")):
+        if k in mp:
+            out[key] = mp[k]
+            out["peaks_manual"].append(k)
     return out
 
 
@@ -282,6 +301,9 @@ def add_run(run_id: str, n_minutes: float, gas_ratio: str = "4:1",
         "end_time":          None,
         "status":            "planned",
         "note":              note,
+        # 手動峰值：排氣時操作員在現場 HMI 觀測到的真實峰值。感測器 1 筆/分鐘常錯過
+        # 排氣瞬間的峰（尤其 CH4），手動輸入比自動抓的更準。空＝用自動抓的值。
+        "manual_peaks":      {},   # {"orp":.., "ph":.., "co2":.., "ch4":..}
     }
     experiment_runs.append(run)
     _save()
@@ -299,15 +321,35 @@ def start_run(run_id: str, at: Optional[str] = None) -> dict:
     return _with_results(run)
 
 
-def vent_run(run_id: str, at: Optional[str] = None) -> dict:
-    """標記實驗結束排氣（設定 end_time、status=done）。"""
+def vent_run(run_id: str, at: Optional[str] = None, peaks: Optional[dict] = None) -> dict:
+    """標記實驗結束排氣（設定 end_time、status=done）。
+    peaks 可帶現場觀測的手動峰值 {"orp","ph","co2","ch4"}，只更新有填的欄位。"""
     run = _find(run_id)
     if not run.get("start_time"):
         raise ValueError(f"批次 {run_id} 尚未開始，無法排氣")
     run["end_time"] = _normalize_ts(at) or _now()
     run["status"] = "done"
+    _set_manual_peaks(run, peaks)
     _save()
     return _with_results(run)
+
+
+def _set_manual_peaks(run: dict, peaks: Optional[dict]) -> None:
+    """把有填的手動峰值寫入 run['manual_peaks']；None/空字串代表清除該欄。"""
+    if not peaks:
+        return
+    mp = dict(run.get("manual_peaks") or {})
+    for k in ("orp", "ph", "co2", "ch4"):
+        if k in peaks:
+            v = peaks[k]
+            if v is None or v == "":
+                mp.pop(k, None)              # 清除
+            else:
+                try:
+                    mp[k] = float(v)
+                except (TypeError, ValueError):
+                    pass                      # 非數字忽略
+    run["manual_peaks"] = mp
 
 
 def update_run(run_id: str, fields: dict) -> dict:
@@ -319,6 +361,8 @@ def update_run(run_id: str, fields: dict) -> dict:
     for k, v in fields.items():
         if k in allowed and v is not None:
             run[k] = _normalize_ts(v) if k in time_fields else v
+    if "manual_peaks" in fields:            # 手動峰值可事後編輯
+        _set_manual_peaks(run, fields["manual_peaks"])
     _save()
     return _with_results(run)
 

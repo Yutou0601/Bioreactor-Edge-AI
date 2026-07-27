@@ -637,9 +637,14 @@ def experiment_run_cycles(run_id: str):
 @router.post("/experiment/runs/{run_id}/vent")
 def vent_experiment_run(run_id: str, payload: ExperimentStartPayload = None):
     """標記批次排氣（設定結束時間，量測結果隨即由時間窗計算）。
-    可帶 at 指定排氣時刻（人工輸入／往後幾分鐘抓 CH4 峰值）；未填則用當下。"""
+    可帶 at 指定排氣時刻（人工輸入／往後幾分鐘抓 CH4 峰值）；未填則用當下。
+    可帶 peak_orp/peak_ph/peak_co2/peak_ch4 現場觀測峰值（較準，覆蓋自動抓的值）。"""
     try:
-        return exp.vent_run(run_id, at=(payload.at if payload else None))
+        peaks = None
+        if payload:
+            peaks = {"orp": payload.peak_orp, "ph": payload.peak_ph,
+                     "co2": payload.peak_co2, "ch4": payload.peak_ch4}
+        return exp.vent_run(run_id, at=(payload.at if payload else None), peaks=peaks)
     except KeyError as e:
         raise HTTPException(status_code=404, detail=str(e))
     except ValueError as e:

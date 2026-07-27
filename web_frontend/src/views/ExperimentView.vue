@@ -181,9 +181,13 @@ async function startRun(r) {
 }
 
 // 排氣：開啟時間編輯列（預設當下，可人工改成實際排氣時刻或往後抓峰值）
+function peaksOf(r) {   // 把已存的手動峰值帶回表單，方便檢視/續填
+  const m = r.manual_peaks || {}
+  return { p_orp: m.orp ?? '', p_ph: m.ph ?? '', p_co2: m.co2 ?? '', p_ch4: m.ch4 ?? '' }
+}
 function openVent(r) {
   editRow.value = r.run_id
-  editForm.value = { start_time: toLocal(r.start_time), end_time: nowLocal(), _vent: true }
+  editForm.value = { start_time: toLocal(r.start_time), end_time: nowLocal(), _vent: true, ...peaksOf(r) }
 }
 async function confirmVent(r) {
   try {
@@ -191,23 +195,32 @@ async function confirmVent(r) {
     if (editForm.value.start_time && editForm.value.start_time !== toLocal(r.start_time)) {
       await apiClient.patch(`/experiment/runs/${r.run_id}`, { start_time: editForm.value.start_time })
     }
-    await apiClient.post(`/experiment/runs/${r.run_id}/vent`, { at: editForm.value.end_time || null })
+    const f = editForm.value
+    const num = v => (v === '' || v === null || v === undefined) ? null : Number(v)
+    await apiClient.post(`/experiment/runs/${r.run_id}/vent`, {
+      at: f.end_time || null,
+      peak_orp: num(f.p_orp), peak_ph: num(f.p_ph),
+      peak_co2: num(f.p_co2), peak_ch4: num(f.p_ch4),
+    })
     editRow.value = null
-    flash(`批次 ${r.run_id} 已排氣（結束時間 ${editForm.value.end_time.replace('T',' ')}），量測結果已計算`)
+    flash(`批次 ${r.run_id} 已排氣，量測結果已計算`)
     await loadRuns()
   } catch (e) { flash(e.response?.data?.detail || '排氣失敗') }
 }
 
-// 編輯起訖時間（事後修正，可對齊 CSV 時間）
+// 編輯起訖時間 + 手動峰值（事後修正，可對齊 CSV 時間）
 function openEdit(r) {
   editRow.value = r.run_id
-  editForm.value = { start_time: toLocal(r.start_time), end_time: toLocal(r.end_time), _vent: false }
+  editForm.value = { start_time: toLocal(r.start_time), end_time: toLocal(r.end_time), _vent: false, ...peaksOf(r) }
 }
 async function saveEdit(r) {
   try {
+    const f = editForm.value
+    const num = v => (v === '' || v === null || v === undefined) ? null : Number(v)
     await apiClient.patch(`/experiment/runs/${r.run_id}`, {
-      start_time: editForm.value.start_time || null,
-      end_time: editForm.value.end_time || null,
+      start_time: f.start_time || null,
+      end_time: f.end_time || null,
+      manual_peaks: { orp: num(f.p_orp), ph: num(f.p_ph), co2: num(f.p_co2), ch4: num(f.p_ch4) },
     })
     editRow.value = null
     flash(`批次 ${r.run_id} 時間已更新，量測結果已重算`)
@@ -569,8 +582,7 @@ onUnmounted(() => { clearInterval(pollTimer); clearInterval(ch4Timer) })
             <th class="grp">下降速率中位<br><small>kg/cm²/hr</small></th>
             <th class="grp">離散度<br><small>IQR·範圍</small></th>
             <th class="grp cov">進氣前ORP漂移<br><small>菌群共變數</small></th>
-            <th class="grp">排氣pH</th>
-            <th class="grp">排氣ORP</th>
+            <th class="grp">排氣峰值<br><small>ORP/pH/CO2/CH4 · <span class="pkm">橘=手動</span></small></th>
             <th>操作</th>
           </tr>
         </thead>
@@ -607,8 +619,12 @@ onUnmounted(() => { clearInterval(pollTimer); clearInterval(ch4Timer) })
                 <template v-else>—</template>
               </td>
               <td class="mono cov">{{ fmt(r.results.culture_drift, 1) }}</td>
-              <td class="mono">{{ fmt(r.results.vent_ph, 2) }}</td>
-              <td class="mono">{{ fmt(r.results.vent_orp, 0) }}</td>
+              <td class="mono sm vent-peaks">
+                <span :class="{ pkm: r.results.peaks_manual?.includes('orp') }">{{ fmt(r.results.vent_orp, 0) }}</span> /
+                <span :class="{ pkm: r.results.peaks_manual?.includes('ph') }">{{ fmt(r.results.vent_ph, 2) }}</span><br>
+                <span :class="{ pkm: r.results.peaks_manual?.includes('co2') }">{{ fmt(r.results.vent_co2, 1) }}</span> /
+                <span :class="{ pkm: r.results.peaks_manual?.includes('ch4') }">{{ fmt(r.results.vent_ch4_peak_ref, 1) }}</span>
+              </td>
               <td class="ops">
                 <button v-if="r.status === 'planned'" class="op op-start" @click="startRun(r)">開始</button>
                 <button v-if="r.status === 'running'" class="op op-vent" @click="openVent(r)">排氣</button>
@@ -618,20 +634,28 @@ onUnmounted(() => { clearInterval(pollTimer); clearInterval(ch4Timer) })
             </tr>
             <!-- 排氣 / 編輯時間列（人工輸入，可修改） -->
             <tr v-if="editRow === r.run_id" class="detail-row">
-              <td colspan="14">
+              <td colspan="13">
                 <div class="time-edit">
-                  <span class="te-title">{{ editForm._vent ? '排氣時間（可改成實際排氣時刻，往後幾分鐘可抓 CH4 峰值）' : '編輯起訖時間（可對齊 CSV）' }}</span>
+                  <span class="te-title">{{ editForm._vent ? '排氣時間 + 現場峰值（可留空用感測器自動抓）' : '編輯起訖時間 + 手動峰值（可對齊 CSV）' }}</span>
                   <label>開始 <input v-model="editForm.start_time" type="datetime-local" class="inp" /></label>
                   <label>結束 <input v-model="editForm.end_time" type="datetime-local" class="inp" /></label>
                   <button v-if="editForm._vent" class="btn-sm ok" @click="confirmVent(r)">確定排氣</button>
                   <button v-else class="btn-sm ok" @click="saveEdit(r)">儲存</button>
                   <button class="btn-sm cancel" @click="cancelEdit">取消</button>
                 </div>
+                <!-- 現場觀測峰值：感測器 1 筆/分鐘常錯過排氣瞬間的真實峰，手動輸入較準；留空則用自動 -->
+                <div class="peak-edit">
+                  <span class="pk-hint">現場觀測峰值（留空＝自動抓）：</span>
+                  <label>ORP <input v-model="editForm.p_orp" type="number" step="1" placeholder="mV" class="inp inp-pk" /></label>
+                  <label>pH <input v-model="editForm.p_ph" type="number" step="0.01" class="inp inp-pk" /></label>
+                  <label>CO2 <input v-model="editForm.p_co2" type="number" step="0.1" placeholder="%" class="inp inp-pk" /></label>
+                  <label>CH4 <input v-model="editForm.p_ch4" type="number" step="0.1" placeholder="%" class="inp inp-pk" /></label>
+                </div>
               </td>
             </tr>
             <!-- 每循環明細 -->
             <tr v-if="expanded === r.run_id" class="detail-row">
-              <td colspan="14">
+              <td colspan="13">
                 <div class="cycle-detail">
                   <div class="cd-title">每循環特徵（{{ r.run_id }}）— 進氣前 ORP 為菌群成熟度共變數</div>
                   <table v-if="cyclesMap[r.run_id]?.length" class="cycle-table">
@@ -657,7 +681,7 @@ onUnmounted(() => { clearInterval(pollTimer); clearInterval(ch4Timer) })
               </td>
             </tr>
           </template>
-          <tr v-if="!runs.length"><td colspan="14" class="empty">尚無批次。點「建立標準計畫」開始。</td></tr>
+          <tr v-if="!runs.length"><td colspan="13" class="empty">尚無批次。點「建立標準計畫」開始。</td></tr>
         </tbody>
       </table>
     </div>
@@ -881,6 +905,15 @@ onUnmounted(() => { clearInterval(pollTimer); clearInterval(ch4Timer) })
 .cycle-table th { background: #12160f; color: #778; padding: 5px 14px; border: 1px solid #1a1a1a; }
 .cycle-table td { padding: 5px 14px; border: 1px solid #161616; text-align: center; }
 .cd-empty { font-size: 0.76rem; color: #556; padding: 8px 0; }
+
+/* 手動峰值：現場觀測值（較準）以橘色標示，與感測器自動抓的區分 */
+.peak-edit { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; margin-top: 8px;
+  padding-top: 8px; border-top: 1px dashed #2a2a2a; }
+.pk-hint { font-size: 0.72rem; color: #778; }
+.peak-edit label { font-size: 0.72rem; color: #99a; display: flex; align-items: center; gap: 4px; }
+.inp-pk { width: 62px; }
+.vent-peaks { line-height: 1.35; white-space: nowrap; }
+.pkm { color: #e0a860; font-weight: 700; }
 
 /* 資料完整性：非完整週期不進入統計與建模，需一眼看得出來 */
 .gap-warn { font-size: 0.62rem; color: #e08c4a; margin-top: 3px; white-space: nowrap; cursor: help; }

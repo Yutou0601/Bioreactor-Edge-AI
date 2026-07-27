@@ -25,9 +25,11 @@ COLUMNS = [
     ("drop_rate_median",  "下降速率中位數(kg/cm²/hr)"),
     ("drop_rate_spread",  "下降速率離散(IQR·範圍)"),
     ("culture_drift",     "進氣前ORP漂移(末-首)"),
-    ("vent_ph",           "排氣pH"),
-    ("vent_orp",          "排氣ORP(mV)"),
-    ("vent_ch4_peak_ref", "CH4%(排氣峰值·參考)"),
+    ("vent_orp",          "排氣ORP峰值(mV)"),
+    ("vent_ph",           "排氣pH峰值"),
+    ("vent_co2",          "排氣CO2%峰值"),
+    ("vent_ch4_peak_ref", "排氣CH4%峰值"),
+    ("peaks_manual_note", "峰值來源"),
     ("status",            "狀態"),
 ]
 SETTING_COLS = 6   # 前幾欄為設定條件（灰底），其餘為量測結果（綠底）
@@ -54,6 +56,11 @@ def _flatten(run: dict) -> dict:
         flat["drop_rate_spread"] = f"n=1 ({lo})"
     else:
         flat["drop_rate_spread"] = ""
+    # 峰值來源：標明哪些是現場手動輸入（較準）、其餘為感測器自動抓（1/min 可能錯過峰）
+    manual = flat.get("peaks_manual") or []
+    LBL = {"orp": "ORP", "ph": "pH", "co2": "CO2", "ch4": "CH4"}
+    flat["peaks_manual_note"] = ("手動:" + "/".join(LBL[k] for k in manual if k in LBL)) \
+        if manual else "全自動"
     return flat
 
 
@@ -206,7 +213,7 @@ def to_xlsx_bytes(runs: list) -> bytes:
             c.alignment = CEN
             c.border = BORDER
 
-    widths = [10, 13, 13, 16, 18, 11, 12, 16, 14, 18, 20, 16, 9, 11, 15, 9]
+    widths = [10, 13, 13, 16, 18, 11, 12, 16, 14, 18, 20, 16, 12, 10, 11, 12, 14, 9]
     for j, w in enumerate(widths, 1):
         ws.column_dimensions[get_column_letter(j)].width = w
     ws.row_dimensions[hr].height = 40

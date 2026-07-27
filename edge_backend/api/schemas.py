@@ -61,7 +61,13 @@ class ExperimentRunUpdate(BaseModel):
     end_time:          Optional[str]   = None
     status:            Optional[str]   = None
     note:              Optional[str]   = None
+    manual_peaks:      Optional[dict]  = None    # 事後編輯手動峰值 {"orp","ph","co2","ch4"}
 
 
 class ExperimentStartPayload(BaseModel):
     at: Optional[str] = None                    # 指定開始時間；未填用排程或當下
+    # 排氣時可帶現場觀測的手動峰值（1 筆/分鐘常錯過真實峰，手動較準）
+    peak_orp: Optional[float] = None
+    peak_ph:  Optional[float] = None
+    peak_co2: Optional[float] = None
+    peak_ch4: Optional[float] = None
