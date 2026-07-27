@@ -753,25 +753,35 @@ class ControlPanel:
             self.log(f"找不到公鑰 {pub}", "bad")
             return
 
-        # 安裝公鑰採 ssh-copy-id 的標準做法：把公鑰用**管線 pipe** 進遠端 cat，
-        # 命令字串完全不含公鑰內容 → 徹底避開巢狀引號問題（先前 bug 根因）。
-        # 遠端指令簡單、只有一層雙引號；umask 077 確保權限；sort -u 去重（可重複執行不累積）。
-        # 需輸入一次密碼，故用「看得見的視窗」（隱藏視窗會讓密碼提示無聲卡死）。
+        # 安裝公鑰採 ssh-copy-id 的標準做法：公鑰用管線 pipe 進遠端 cat，命令不含公鑰內容。
+        # **寫成暫存 .bat 再執行**——先前用 cmd /c "含多層雙引號與管線的長字串" 會經 Python
+        # 轉義 + cmd 解析兩層引號處理，導致路徑被打亂（ERROR_INVALID_NAME）。.bat 純文字、
+        # cmd 直接逐行讀，徹底避開。umask 077 保權限、sort -u 去重（可重複執行不累積）。
         remote = ("umask 077 && mkdir -p ~/.ssh && cat >> ~/.ssh/authorized_keys && "
                   "sort -u ~/.ssh/authorized_keys -o ~/.ssh/authorized_keys")
-        line = (f'type "{pub}" | '
-                f'ssh -o StrictHostKeyChecking=accept-new {self.ssh_target} "{remote}"')
+        bat = ROOT / "_install_pubkey.bat"
+        bat.write_text(
+            "@echo off\r\n"
+            "chcp 65001 >nul\r\n"
+            "echo 安裝公鑰到 Jetson，請於提示時輸入密碼（只需這一次）...\r\n"
+            "echo.\r\n"
+            f'type "{pub}" | ssh -o StrictHostKeyChecking=accept-new {self.ssh_target} "{remote}"\r\n'
+            "echo.\r\n"
+            "echo ==== 完成後請按任意鍵關閉本視窗 ====\r\n"
+            "pause >nul\r\n",
+            encoding="utf-8")
         self.log("開啟命令視窗安裝公鑰——請在該視窗輸入 Jetson 密碼（只需這一次）…", "warn")
         try:
-            # start "" /wait：空標題避免 start 誤判；/c ... & pause：跑完等按鍵再關，
-            # 讓使用者看得到結果。真正的成功判定靠下方 _ssh_check，不依賴視窗回顯。
-            p = subprocess.Popen(
-                ["cmd", "/c", "start", "", "/wait", "cmd", "/c",
-                 f'{line} & echo. & echo ==== 完成後請按任意鍵關閉本視窗 ==== & pause'],
-                cwd=str(ROOT))
+            # 用 start 開新的可見主控台跑 .bat（pythonw 無主控台，密碼提示需要 tty）。
+            p = subprocess.Popen(["cmd", "/c", "start", "安裝公鑰", "/wait", str(bat)])
             p.wait(timeout=600)
         except Exception:
             pass          # 使用者可能沒關視窗；成功與否一律以 _ssh_check 為準
+        finally:
+            try:
+                bat.unlink()
+            except Exception:
+                pass
 
         if self._ssh_check():
             self.ssh_ok = True

@@ -44,3 +44,6 @@ control_panel.json
 
 # 開發測試伺服器（筆電本機測試用，不進版控）
 dev_test_server.py
+
+# 控制台安裝公鑰的暫存批次檔（用完即刪，防意外殘留被誤 commit）
+_install_pubkey.bat
