@@ -753,29 +753,30 @@ class ControlPanel:
             self.log(f"找不到公鑰 {pub}", "bad")
             return
 
-        # 安裝公鑰採 ssh-copy-id 的標準做法：公鑰用管線 pipe 進遠端 cat，命令不含公鑰內容。
-        # **寫成暫存 .bat 再執行**——先前用 cmd /c "含多層雙引號與管線的長字串" 會經 Python
-        # 轉義 + cmd 解析兩層引號處理，導致路徑被打亂（ERROR_INVALID_NAME）。.bat 純文字、
-        # cmd 直接逐行讀，徹底避開。umask 077 保權限、sort -u 去重（可重複執行不累積）。
+        # 安裝公鑰採 ssh-copy-id 標準做法：公鑰用管線 pipe 進遠端 cat，命令不含公鑰內容。
+        # bat 內容一律**純 ASCII**（先前中文在 .bat 出過事），並用 CREATE_NEW_CONSOLE 直接
+        # 開新主控台跑 cmd /k（不經 start，避免 start 標題引號那類坑）；/k 讓視窗**永遠留著**，
+        # 不管哪一步失敗都看得到錯誤訊息（這正是使用者要的）。
         remote = ("umask 077 && mkdir -p ~/.ssh && cat >> ~/.ssh/authorized_keys && "
                   "sort -u ~/.ssh/authorized_keys -o ~/.ssh/authorized_keys")
         bat = ROOT / "_install_pubkey.bat"
         bat.write_text(
             "@echo off\r\n"
-            "chcp 65001 >nul\r\n"
-            "echo 安裝公鑰到 Jetson，請於提示時輸入密碼（只需這一次）...\r\n"
+            "echo Installing public key to Jetson. Enter the password when prompted.\r\n"
+            "echo Target: " + self.ssh_target + "\r\n"
             "echo.\r\n"
             f'type "{pub}" | ssh -o StrictHostKeyChecking=accept-new {self.ssh_target} "{remote}"\r\n'
             "echo.\r\n"
-            "echo ==== 完成後請按任意鍵關閉本視窗 ====\r\n"
+            "if %ERRORLEVEL%==0 (echo [OK] key installed.) else (echo [FAIL] errorlevel %ERRORLEVEL%)\r\n"
+            "echo ==== Press any key to close this window ====\r\n"
             "pause >nul\r\n",
-            encoding="utf-8")
-        self.log("開啟命令視窗安裝公鑰——請在該視窗輸入 Jetson 密碼（只需這一次）…", "warn")
+            encoding="ascii")
+        self.log("已開新視窗安裝公鑰——請在該視窗輸入 Jetson 密碼（只需這一次），"
+                 "完成或失敗都會停在視窗顯示訊息。", "warn")
+        CREATE_NEW_CONSOLE = 0x00000010
         try:
-            # 用 start 開可見主控台跑 .bat（pythonw 無主控台，密碼提示需 tty）。
-            # 關鍵：start 的標題必須「真的用引號括住」，否則會把第一個字當成要執行的程式
-            # → ERROR_INVALID_NAME。故用 shell 字串把 "" 空標題與 bat 路徑的引號寫死。
-            p = subprocess.Popen(f'start "" /wait "{bat}"', shell=True)
+            # 乾淨的 argv list（Python 自動處理 bat 路徑引號）；新主控台 + /k 保證視窗留著。
+            p = subprocess.Popen(["cmd", "/k", str(bat)], creationflags=CREATE_NEW_CONSOLE)
             p.wait(timeout=600)
         except Exception:
             pass          # 使用者可能沒關視窗；成功與否一律以 _ssh_check 為準
