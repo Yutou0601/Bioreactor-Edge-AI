@@ -52,6 +52,11 @@ DEFAULT_BACKEND_HOST = "192.168.55.1"
 DEFAULT_SSH_USER = "lee"
 DEFAULT_JETSON_DIR = "~/edge_ai_project"
 
+# 感測器記錄程式（把 serial 資料寫成 CSV）。這支若沒在跑＝沒有新 CSV＝資料靜默中斷
+# （2026-07-22 事故）。控制台可直接啟動並監看它。路徑與資料夾可於 control_panel.json 覆寫。
+DEFAULT_RECORDER = r"C:\Users\BTP\Desktop\data\BTP.SerialHarbor1.1.exe"
+DEFAULT_CSV_DIR = r"C:\Users\BTP\Desktop\data"
+
 # ssh 一律加 BatchMode：金鑰沒設好時「立刻失敗」而不是卡在看不見的密碼提示。
 # 控制台是隱藏視窗＋接管輸出，互動式提示會無聲卡死，比報錯更難查。
 SSH_OPTS = ["-o", "BatchMode=yes", "-o", "ConnectTimeout=6",
@@ -115,7 +120,7 @@ class ControlPanel:
         self.ssh_ok = None          # None=未知 / True=免密碼可用 / False=需設定
 
         root.title("生物甲烷化系統 — 控制台")
-        root.geometry("760x620")
+        root.geometry("760x680")
         root.configure(bg=C_BG)
         root.protocol("WM_DELETE_WINDOW", self.on_close)
 
@@ -159,6 +164,37 @@ class ControlPanel:
     def fe_url(self) -> str:
         return f"http://localhost:{self.fe_port}"
 
+    # ── 感測器記錄程式（SerialHarbor）與 CSV 資料夾 ──
+    @property
+    def recorder_path(self) -> str:
+        return self.cfg.get("recorder_path", DEFAULT_RECORDER)
+
+    @property
+    def csv_dir(self) -> str:
+        return self.cfg.get("csv_dir") or DEFAULT_CSV_DIR
+
+    def _recorder_running(self) -> bool:
+        """用 tasklist 判斷記錄程式（exe）是否在執行——不管是誰啟動的都測得到。"""
+        name = os.path.basename(self.recorder_path)
+        out = self._run_out(["tasklist", "/FI", f"IMAGENAME eq {name}", "/NH"])
+        return name.lower() in out.lower()
+
+    def _start_recorder(self) -> None:
+        """啟動感測器記錄程式（若未在執行）。找不到 exe 時明確報錯、不中斷其他啟動。"""
+        if self._recorder_running():
+            self.log("記錄程式已在執行中，略過", "info")
+            return
+        exe = self.recorder_path
+        if not os.path.exists(exe):
+            self.log(f"找不到記錄程式：{exe}（可於 control_panel.json 設 recorder_path）", "bad")
+            return
+        try:
+            # 於其所在資料夾啟動（多數記錄程式以工作目錄決定 CSV 輸出位置）
+            subprocess.Popen([exe], cwd=os.path.dirname(exe) or None)
+            self.log(f"已啟動記錄程式：{os.path.basename(exe)}", "ok")
+        except Exception as e:
+            self.log(f"啟動記錄程式失敗：{e}", "bad")
+
     def _ssh(self, remote_cmd: str) -> list:
         # 金鑰存在時，強制只用「我們這把」金鑰（-i + IdentitiesOnly），避免 ssh 去試
         # agent 或其他預設金鑰造成時好時壞。金鑰不存在時不加 -i（會正確地失敗＝尚未設定）。
@@ -186,8 +222,8 @@ class ControlPanel:
         box.pack(fill="x", padx=16)
         self.rows = {}
         for key, label in [("backend", "後端 API"), ("data", "資料記錄"),
-                           ("ssh", "Jetson 連線"), ("watcher", "CSV 監看"),
-                           ("frontend", "網頁前端")]:
+                           ("recorder", "記錄程式"), ("ssh", "Jetson 連線"),
+                           ("watcher", "CSV 監看"), ("frontend", "網頁前端")]:
             r = tk.Frame(box, bg=C_PANEL)
             r.pack(fill="x", padx=14, pady=(9 if key == "backend" else 3, 3))
             dot = tk.Label(r, text="●", bg=C_PANEL, fg=C_IDLE, font=("Segoe UI", 11))
@@ -211,6 +247,7 @@ class ControlPanel:
                  ("stop", "停止全部", self.stop_all, "#6b2d2d"),
                  ("restart", "重啟後端", self.restart_backend, "#2a4a6b"),
                  ("update", "檢查更新", self.check_update, "#4a3a6b"),
+                 ("watch", "啟動記錄+監看", self.start_watch, "#1d5b6b"),
                  ("web", "開啟網頁", self.open_web, "#2a2a2a"),
                  ("csv", "匯入 CSV", self.import_csv, "#2a2a2a"),
                  ("sshkey", "設定 Jetson 免密登入", self.setup_ssh_key, "#5a4a2a"),
@@ -294,13 +331,14 @@ class ControlPanel:
             health = {}                        # 連得上但回應不對
         fe = port_open(self.fe_port)
         watcher = self._proc_alive("watcher")
+        recorder = self._recorder_running()
 
         self.poll_count += 1
         if self.poll_count % GIT_POLL_EVERY == 1:
             self._refresh_git()
-        self.root.after(0, lambda: self._render(health, fe, watcher))
+        self.root.after(0, lambda: self._render(health, fe, watcher, recorder))
 
-    def _render(self, health, fe_up, watcher_up):
+    def _render(self, health, fe_up, watcher_up, recorder_up=False):
         where = f"Jetson {self.backend_host}" if self.is_remote else "本機"
         # 後端
         if health is None:
@@ -328,6 +366,15 @@ class ControlPanel:
             self._row("data", C_OK,
                       f"正常 · 最後一筆 {health['staleness_min']} 分前"
                       + (f" · 進行中批次 {run}" if run else ""))
+
+        # 記錄程式（SerialHarbor）：寫 CSV 的源頭，沒跑＝資料會靜默中斷
+        name = os.path.basename(self.recorder_path)
+        if recorder_up:
+            self._row("recorder", C_OK, f"執行中 · {name}")
+        elif os.path.exists(self.recorder_path):
+            self._row("recorder", C_BAD, f"⛔ 未執行（按「啟動記錄+監看」）· {name}")
+        else:
+            self._row("recorder", C_IDLE, f"—（本機找不到 {name}）")
 
         # Jetson 連線：免密碼登入是否已設定（決定能不能遠端啟動後端）
         if not self.is_remote:
@@ -525,19 +572,28 @@ class ControlPanel:
         else:
             self.log("Jetson 後端啟動失敗，詳見上方輸出。", "bad")
 
+    def _start_watcher(self) -> None:
+        """啟動 CSV 監看（把新 CSV 列轉發到 broker）。資料夾預設 DEFAULT_CSV_DIR。"""
+        if self._proc_alive("watcher"):
+            self.log("CSV 監看已在執行中，略過", "info")
+            return
+        if not self._check_venv():
+            return
+        self.log(f"啟動 CSV 監看：{self.csv_dir} → broker {self.backend_host}", "cmd")
+        self._spawn("watcher", [str(VENV_PY), "csv_watcher.py", "--dir", self.csv_dir,
+                                "--broker", self.backend_host], BACKEND_DIR, "CSV監看")
+
+    def start_watch(self):
+        """按鈕：啟動感測器記錄程式 + CSV 監看（資料鏈：記錄程式寫 CSV → 監看轉發 broker）。"""
+        if not self._guard():
+            return
+        self._task(lambda: (self._start_recorder(), self._start_watcher(),
+                            self.log("記錄+監看啟動程序完成。", "ok")))
+
     def _start_all_worker(self):
         self._start_backend()
-
-        data_dir = self.cfg.get("csv_dir")
-        if not data_dir:
-            self.log("尚未設定 CSV 監看資料夾，略過 CSV 監看（可按「匯入 CSV」選定後記住）", "warn")
-        elif self._proc_alive("watcher"):
-            self.log("CSV 監看已在執行中，略過", "info")
-        else:
-            self.log(f"啟動 CSV 監看：{data_dir} → broker {self.backend_host}", "cmd")
-            self._spawn("watcher", [str(VENV_PY), "csv_watcher.py", "--dir", data_dir,
-                                    "--broker", self.backend_host],
-                        BACKEND_DIR, "CSV監看")
+        self._start_recorder()
+        self._start_watcher()
 
         if port_open(self.fe_port):
             self.log("網頁前端已在執行中，略過", "info")
