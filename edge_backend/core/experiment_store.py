@@ -76,17 +76,47 @@ def _records_between(start: Optional[str], end: Optional[str]) -> list:
 
 
 # ── 每循環（補氣週期）分析 ──────────────────────────────
+_RISE_TOL = 0.003        # 上升段容忍的微小回跌（雜訊），超過才算上升段結束
+
+
+def _detect_refills(p: list) -> set:
+    """偵測補氣事件（壓力回升），回傳每次補氣後「高點」的索引。
+    **抓持續上升段**而非只看單步——反應器補氣可能一分鐘跳完，也可能分幾分鐘慢慢充；
+    只要一段上升的累積漲幅 > REFILL_JUMP 就算一次補氣，標記其頂點（＝新循環的高壓起點）。
+    這修正了「補氣分多步、單步 <門檻 而完全抓不到」的問題。"""
+    n = len(p)
+    refills = set()
+    i = 1
+    while i < n:
+        if p[i] - p[i - 1] > _RISE_TOL:                 # 進入上升段
+            start_low = p[i - 1]
+            peak, peak_idx = p[i], i
+            j = i + 1
+            while j < n:
+                if p[j] > peak:                          # 續創新高＝仍在補氣
+                    peak, peak_idx = p[j], j
+                elif peak - p[j] > _RISE_TOL:            # 明確跌離頂點＝上升段結束
+                    break
+                j += 1
+            if peak - start_low > REFILL_JUMP:          # 整段累積漲幅夠大＝一次補氣
+                refills.add(peak_idx)                    # 頂點＝補氣後高點
+            i = peak_idx + 1                             # 從頂點之後繼續找下一次
+        else:
+            i += 1
+    return refills
+
+
 def _segment(recs: list):
     """把記錄序列切成「相鄰兩次補氣／記錄中斷之間」的段落起點。
-    回傳 (p, orp, ts, refills, gaps, starts)，供 compute_cycles 與即時面板共用，
-    確保切段邏輯只有一份。切段點有兩種：
-      - 補氣：反應槽壓力單步跳升（refills）
+    回傳 (p, orp, ts, refills, gaps, starts)，供 compute_cycles 與即時面板共用。
+    切段點有兩種：
+      - 補氣：壓力持續回升（_detect_refills，容多步慢充）
       - 記錄中斷：相鄰兩筆時間間隔過大（gaps）——反應器仍在跑但沒記到，不可跨越
     切開後每一段都是「連續記錄、中間沒有補氣」的純下降段，速率才有意義。"""
     p = [float(r.get("pressure") or 0.0) for r in recs]
     orp = [float(r.get("orp") or 0.0) for r in recs]
     ts = [_parse(r["timestamp"]) for r in recs]
-    refills = {i for i in range(1, len(recs)) if p[i] - p[i - 1] > REFILL_JUMP}
+    refills = _detect_refills(p)
     gaps = {i for i in range(1, len(recs))
             if (ts[i] - ts[i - 1]).total_seconds() > GAP_MINUTES * 60}
     starts = sorted({0} | refills | gaps)

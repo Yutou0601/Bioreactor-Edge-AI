@@ -152,10 +152,15 @@ def compute(df: pd.DataFrame) -> dict:
         return {"status": "error", "message": f"缺欄位：{need - set(df.columns)}"}
     d = df.dropna(subset=["drop_rate", "pre_injection_orp", "n_minutes"]).copy()
     G = int(d["run_id"].nunique())
-    if G < 3 or len(d) < 6:
+    # 洪博要的是「每次補氣的 slope → 進氣前 ORP」關係，單一批次幾個循環就能看，
+    # 不必等 9 批次。故門檻放寬到「≥3 個完整循環」；n 有變異才納入 n 項、
+    # 批次 ≥2 才用叢集穩健標準誤，否則退回一般 OLS。多批次時仍是嚴謹版。
+    n_orp = d["pre_injection_orp"].nunique()
+    if len(d) < 3 or n_orp < 3:
         return {"status": "insufficient", "n_cycles": int(len(d)), "n_batches": G,
-                "message": "批次數 <3 或循環 <6，叢集穩健回歸無法成立，暫不分析"
-                           "（需 ≥3 批次、且 n 與進氣前 ORP 均有變異；正式實驗 9 批次可滿足）。"}
+                "message": f"目前可用完整循環 {len(d)} 個（進氣前 ORP 有 {n_orp} 種變異值），"
+                           f"至少需 3 個且 ORP 要有變化才能看 slope→ORP 關係。"
+                           f"（每次自動補氣才產生一個完整循環；剛開始跑時循環數會慢慢累積。）"}
 
     def sf(v, nd):     # 安全浮點：非有限值→None（避免 FastAPI JSON 序列化 NaN 失敗）
         return None if v is None or not np.isfinite(v) else round(float(v), nd)
@@ -165,25 +170,35 @@ def compute(df: pd.DataFrame) -> dict:
                  "t": sf(t, 3), "p": sf(p, 4)}
                 for nm, b, se, t, p in rows]
 
+    has_n = d["n_minutes"].nunique() >= 2      # 單一批次時 n 無變異，不納入回歸
+    cols = (["n_minutes", "pre_injection_orp"] if has_n else ["pre_injection_orp"])
     grp = d["run_id"].values
-    X, names = _design(d, ["n_minutes", "pre_injection_orp"])
+    X, names = _design(d, cols)
     rate_rows, _, dof = ols_cluster(d["drop_rate"].values, X, grp, names)
 
     flat_model = partial = verdict = verdict_text = None
     dd = d.dropna(subset=["flattening"])
-    if len(dd) >= 6 and dd["run_id"].nunique() >= 3:
-        X2, names2 = _design(dd, ["n_minutes", "pre_injection_orp"])
+    if len(dd) >= 3:
+        X2, names2 = _design(dd, cols)
         fr, _, _ = ols_cluster(dd["flattening"].values, X2, dd["run_id"].values, names2)
         flat_model = terms(fr)
         p_orp = next((t["p"] for t in flat_model if t["term"] == "pre_injection_orp"), None)
-        r_pc, p_pc, n_pc = partial_corr(dd, "pre_injection_orp", "flattening", "n_minutes")
+        if has_n:      # 有 n 變異才控制 n；單批次直接看平緩化 vs ORP
+            r_pc, p_pc, n_pc = partial_corr(dd, "pre_injection_orp", "flattening", "n_minutes")
+        else:
+            dpc = dd[["pre_injection_orp", "flattening"]].dropna()
+            if len(dpc) >= 3 and dpc["pre_injection_orp"].std() > 1e-9 and dpc["flattening"].std() > 1e-9:
+                r_pc, p_pc = stats.pearsonr(dpc["pre_injection_orp"], dpc["flattening"]); n_pc = len(dpc)
+            else:
+                r_pc = p_pc = float("nan"); n_pc = len(dpc)
         partial = {"r": sf(r_pc, 3), "p": sf(p_pc, 4), "n": int(n_pc)}
+        ctrl = "控制 n 後" if has_n else ""
         if p_orp is not None and p_orp < 0.05:
             verdict = "biological"
-            verdict_text = "控制 n 後平緩化仍顯著隨進氣前 ORP 變動 → 平緩化帶生物成因（支持產甲烷稀釋 CO2、使溶解變慢之假說）"
+            verdict_text = f"{ctrl}平緩化仍顯著隨進氣前 ORP 變動 → 平緩化帶生物成因（支持產甲烷稀釋 CO2、使溶解變慢之假說）"
         else:
             verdict = "physical"
-            verdict_text = "控制 n 後平緩化與進氣前 ORP 無顯著關聯 → 傾向物理成因（溶解趨近飽和即可解釋）"
+            verdict_text = f"{ctrl}平緩化與進氣前 ORP 無顯著關聯 → 傾向物理成因（溶解趨近飽和即可解釋）"
 
     agg = d.groupby("run_id").agg(n=("n_minutes", "mean"), rate=("drop_rate", "mean"),
                                   orp=("pre_injection_orp", "mean")).reset_index()
@@ -194,13 +209,20 @@ def compute(df: pd.DataFrame) -> dict:
             batch_level.append({"x": x, "label": lab, "r": sf(rr, 3),
                                 "p": sf(pp, 4), "n": int(len(agg))})
 
+    caveats = ["此為關聯分析，找到關聯 ≠ 分離了機制",
+               "循環少時「無顯著」應讀為「證據不足」而非「無關」"]
+    if G >= 2:
+        caveats.insert(0, "同批次多循環為偽重複，已用批次分群叢集穩健標準誤折算檢定力")
+    else:
+        caveats.insert(0, "⚠ 目前只有 1 個批次：同批循環為偽重複、標準誤偏樂觀，僅供探索；"
+                          "累積多批次後才是嚴謹結果")
+    if not has_n:
+        caveats.append("目前 n（循環時間）無變異，未納入回歸；多個 n 水準後才看得到 n 效應")
     return {"status": "ok", "n_cycles": int(len(d)), "n_batches": G, "dof": int(dof),
+            "single_batch": G < 2, "has_n": bool(has_n),
             "rate_model": terms(rate_rows), "flat_model": flat_model,
             "partial_corr": partial, "verdict": verdict, "verdict_text": verdict_text,
-            "batch_level": batch_level,
-            "caveats": ["同批次多循環為偽重複，已用批次分群叢集穩健標準誤折算檢定力",
-                        "批次少時「無顯著」應讀為「證據不足」而非「無關」",
-                        "此為關聯分析，找到關聯 ≠ 分離了機制"]}
+            "batch_level": batch_level, "caveats": caveats}
 
 
 def make_demo(bio: bool = True) -> pd.DataFrame:
