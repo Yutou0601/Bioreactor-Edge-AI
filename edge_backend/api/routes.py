@@ -480,6 +480,70 @@ def delete_record(record_id: int):
 # ==========================================
 # 通道 4：CSV 批次匯入（含訊號前處理）
 # ==========================================
+def _parse_btp_csv(text: str) -> list:
+    """舊的 14 欄逗號格式解析。反應槽壓力取 parts[11]（parts[8]/parts[11] 對調，
+    2026-07-14 現場比對 HMI 面板確認）。"""
+    rows = []
+    for line in text.splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        parts = line.split(',')
+        if len(parts) < 14:
+            continue
+        try:
+            ts = (f"{int(parts[0]):04d}-{int(parts[1]):02d}-{int(parts[2]):02d}"
+                  f" {int(parts[3]):02d}:{int(parts[4]):02d}:{int(parts[5]):02d}")
+            rows.append({
+                'timestamp': ts, 'orp_raw': float(parts[7]),
+                'pressure': float(parts[11]), 'ph': float(parts[9]),
+                'temp': float(parts[10]), 'mixer_pressure': float(parts[8]),
+                'co2_pct': float(parts[12]), 'ch4_pct': float(parts[13]),
+            })
+        except (ValueError, IndexError):
+            continue
+    return rows
+
+
+def _parse_btp_labeled(text: str) -> list:
+    """解析 BTP.SerialHarbor 記錄程式的「標籤文字」格式：
+      [2026-07-22-13:59:53] ORP=534mV | 反應器壓力=2.81kg/cm² | 酸鹼值=pH 7.00 |
+      溫度=30.0°C | 混合槽壓力=0.72kg/cm² | CO2濃度=0.0% | CH4濃度=0.36%
+
+    **欄位對調**（與逗號格式一致，2026-07-27 以實測資料 + 參數表交叉驗證）：
+    檔案標「反應器壓力」的高值(~3.5)其實是混合槽；標「混合槽壓力」的低值(~1.1)才是
+    反應槽——後者對得上參數表「進氣後反應槽 1.179」。故 pressure 取「混合槽壓力」欄。
+    """
+    import re
+    rows = []
+    for line in text.splitlines():
+        line = line.strip()
+        m_ts = re.search(r"\[(\d{4})-(\d{2})-(\d{2})-(\d{2}:\d{2}:\d{2})\]", line)
+        if not m_ts or "ORP=" not in line:
+            continue
+
+        def g(pat, cast=float):
+            m = re.search(pat, line)
+            return cast(m.group(1)) if m else None
+        try:
+            reactor = g(r"混合槽壓力=([\d.]+)")     # ← 標籤對調：這才是反應槽
+            mixer = g(r"反應器壓力=([\d.]+)")        # ← 這其實是混合槽
+            orp = g(r"ORP=(-?[\d.]+)mV")
+            ph = g(r"pH\s*([\d.]+)")
+            if orp is None or reactor is None:
+                continue
+            rows.append({
+                "timestamp": f"{m_ts.group(1)}-{m_ts.group(2)}-{m_ts.group(3)} {m_ts.group(4)}",
+                "orp_raw": orp, "pressure": reactor, "ph": ph if ph is not None else 7.0,
+                "temp": g(r"溫度=([\d.]+)") or 30.0, "mixer_pressure": mixer or 0.0,
+                "co2_pct": g(r"CO2濃度=([\d.]+)") or 0.0,
+                "ch4_pct": g(r"CH4濃度=([\d.]+)") or 0.0,
+            })
+        except (ValueError, AttributeError):
+            continue
+    return rows
+
+
 def _import_csv_btp_daily(text: str, detected_date: str) -> dict:
     """處理 usb_receiver.py 產生的 BTP_Sensor_log 格式：資料已完成訊號前處理，
     直接沿用 orp/orp_raw/orp_cleaned/is_anomaly 等既有結果寫入 sensor_records，
@@ -734,34 +798,13 @@ async def import_csv(file: UploadFile = File(...)):
     # 每次匯入建立獨立的處理器實例（不共用 USB 那個）
     processor = ORPSignalProcessor(ema_window=10, spike_threshold=-20.0, spike_max_minutes=15)
 
-    # ── 解析 CSV ──────────────────────────────────
-    parsed_rows: list[dict] = []
-    for line in text.splitlines():
-        line = line.strip()
-        if not line:
-            continue
-        parts = line.split(',')
-        if len(parts) < 14:
-            continue
-        try:
-            ts = (
-                f"{int(parts[0]):04d}-{int(parts[1]):02d}-{int(parts[2]):02d}"
-                f" {int(parts[3]):02d}:{int(parts[4]):02d}:{int(parts[5]):02d}"
-            )
-            parsed_rows.append({
-                'timestamp':      ts,
-                'orp_raw':        float(parts[7]),
-                # parts[8]/parts[11] 對調（2026-07-14 現場比對 HMI 面板確認，見
-                # usb_receiver.py 同處註解）。
-                'pressure':       float(parts[11]),  # 反應槽壓力
-                'ph':             float(parts[9]),
-                'temp':           float(parts[10]),
-                'mixer_pressure': float(parts[8]),   # 氣體混合槽壓力
-                'co2_pct':        float(parts[12]),
-                'ch4_pct':        float(parts[13]),
-            })
-        except (ValueError, IndexError):
-            continue
+    # ── 解析 ────────────────────────────────────
+    # 先試新的「標籤文字」格式（BTP.SerialHarbor 記錄程式輸出）：
+    #   [2026-07-22-13:59:53] ORP=534mV | 反應器壓力=2.81kg/cm² | 酸鹼值=pH 7.00 | ...
+    # 此格式無逗號，舊的逗號解析會整批跳過。若不是此格式再走逗號解析。
+    parsed_rows = _parse_btp_labeled(text)
+    if not parsed_rows:
+        parsed_rows = _parse_btp_csv(text)
 
     # ── 去重：過濾掉 sensor_records 中已存在的 timestamp ──
     existing_ts = {r['timestamp'] for r in sensor_records}

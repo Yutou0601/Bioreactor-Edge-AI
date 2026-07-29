@@ -209,6 +209,25 @@ def compute(df: pd.DataFrame) -> dict:
             batch_level.append({"x": x, "label": lab, "r": sf(rr, 3),
                                 "p": sf(pp, 4), "n": int(len(agg))})
 
+    # ── 特徵探索（洪博：把補氣次數、pH 也當特徵推推看）─────────────────
+    # 對每個可用特徵，報「下降速率(slope)」與「平緩化」的簡單相關。純探索：
+    # 補氣壓力固定→每次補氣的 slope 反映消耗快慢；補氣次數＝批次內累積成熟度軸。
+    # 單批次為偽重複、未控制其他項，僅供「哪個特徵值得深挖」的方向判斷。
+    feature_defs = [("pre_injection_orp", "進氣前 ORP"),
+                    ("pre_injection_ph", "進氣前 pH"),
+                    ("refill_index", "補氣次數(週期序)")]
+    features = []
+    for col, lab in feature_defs:
+        if col not in d.columns:
+            continue
+        for ycol, ylab in [("drop_rate", "下降速率slope"), ("flattening", "平緩化")]:
+            sub = d[[col, ycol]].dropna()
+            if len(sub) >= 3 and sub[col].std() > 1e-9 and sub[ycol].std() > 1e-9:
+                rr, pp = stats.pearsonr(sub[col], sub[ycol])
+                features.append({"feature": col, "feature_label": lab,
+                                 "target": ycol, "target_label": ylab,
+                                 "r": sf(rr, 3), "p": sf(pp, 4), "n": int(len(sub))})
+
     caveats = ["此為關聯分析，找到關聯 ≠ 分離了機制",
                "循環少時「無顯著」應讀為「證據不足」而非「無關」"]
     if G >= 2:
@@ -222,7 +241,7 @@ def compute(df: pd.DataFrame) -> dict:
             "single_batch": G < 2, "has_n": bool(has_n),
             "rate_model": terms(rate_rows), "flat_model": flat_model,
             "partial_corr": partial, "verdict": verdict, "verdict_text": verdict_text,
-            "batch_level": batch_level, "caveats": caveats}
+            "batch_level": batch_level, "features": features, "caveats": caveats}
 
 
 def make_demo(bio: bool = True) -> pd.DataFrame:
