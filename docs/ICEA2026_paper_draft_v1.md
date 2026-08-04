@@ -1,14 +1,17 @@
 # The Cost of Trust at the Edge: Bootstrap-Calibrated Parameter Estimation on a Self-Identifying Bioreactor
 
-> **Draft v1 — 2026-08-05.** Springer proceedings format. American English.
+> **Draft v1.1 — 2026-08-05.** Springer proceedings format. American English.
 > Running head suggestion: *Cost of Trust at the Edge*
-> Placeholders in `[ ]` require author input before submission.
+> Short author form for running head: *C.-Y. Li et al.*
 
-Cheng-Yu Li¹✉, [Given Surname]², [Given Surname]¹
+Cheng-Yu Li¹✉, Chun-Hao Chen¹, and Cheng-Yuan Hung²
 
-¹ National Kaohsiung University of Science and Technology, Kaohsiung, Taiwan
-² Metal Industries Research & Development Centre, Kaohsiung, Taiwan
-`lkkyb555@gmail.com`
+¹ Department of Computer Science and Information Engineering,
+National Kaohsiung University of Science and Technology, Kaohsiung, Taiwan
+² Optoelectronics Technology Division,
+Metal Industries Research & Development Centre, Kaohsiung, Taiwan
+
+✉ Corresponding author: `lkkyb555@gmail.com`
 
 ---
 
@@ -42,11 +45,11 @@ This paper makes three contributions.
 
 **Identification from Routine Operating Data.** Closed-loop system identification from routine operating data, without dedicated excitation, is mature in the process industries [4]. We are not aware of its application to separating mass-transfer from biological consumption in a bioreactor.
 
-**Machine Learning for Anaerobic Digestion.** Recurrent models for biogas prediction are well developed, and 2024–2025 work compares them directly against the ADM1 mechanistic model [5]. Accordingly, the neural results reported here serve only to verify deployability; they are not claimed as a contribution.
+**Machine Learning for Anaerobic Digestion.** Recurrent models for biogas prediction are well developed, and recent work compares them directly against the ADM1 mechanistic model [9], finding random forests and LSTMs competitive with simplified ADM1 while requiring far less substrate characterization—at the cost of a training time two orders of magnitude larger [5]. Accordingly, the neural results reported here serve only to verify deployability; they are not claimed as a contribution.
 
 ## 3 Apparatus and Data
 
-The reactor is a granted invention patent of the Metal Industries Research & Development Centre (TW I923176, *Micro-pressure circulation control system and its method for anaerobic methane fermentation*). Its controller fills the headspace to 1.2 kg cm⁻² (gauge) and refills automatically once the pressure decays to 0.9 kg cm⁻², repeating indefinitely.
+The reactor is a granted invention patent of the Metal Industries Research & Development Centre [10]. Its controller fills the headspace to 1.2 kg cm⁻² (gauge) and refills automatically once the pressure decays to 0.9 kg cm⁻², repeating indefinitely.
 
 **Table 1.** Reactor configuration and the subset of patented functions used in this study.
 
@@ -130,7 +133,7 @@ The bounds must be supplied to the refinement stage as well as the initial stage
 
 ### 4.4 Parametric Bootstrap Calibration
 
-To decide whether an estimated *r*_b is distinguishable from an artifact, we generate synthetic data under the null hypothesis *r*_b ≡ 0 and pass it through the identical estimator (Algorithm 3).
+To decide whether an estimated *r*_b is distinguishable from an artifact, we generate synthetic data under the null hypothesis *r*_b ≡ 0 and pass it through the identical estimator (Algorithm 3). The procedure is a parametric bootstrap [7] in which residuals are resampled in blocks [8] rather than pointwise.
 
 ```
 Algorithm 3  Bootstrap calibration of the null
@@ -165,7 +168,7 @@ Applying the two-stage procedure to the 26 cycles yields what appears to be over
 | Recovered *r*_b (kg cm⁻² h⁻¹) | 0.0143 | median 0.0187; 95th pct 0.0276 |
 | p against the null | — | **0.735** |
 
-The mechanism is a correlated estimation error. When the pressure trajectory is close to linear over the observation window—as it is here, since the cycle spans well under one time constant—*k*_La and *P*_eq trade off along a ridge in the likelihood surface, and their estimation errors are positively correlated. Projected onto the *P*_eq′ versus 1/*k*_La plane, that correlation reproduces the sign of the true physical relationship. The regression therefore cannot distinguish signal from fitting geometry, and its nominal p-value of 2.6 × 10⁻¹² carries no evidential weight.
+The mechanism is a correlated estimation error. When the pressure trajectory is close to linear over the observation window—as it is here, since the cycle spans well under one time constant—*k*_La and *P*_eq trade off along a ridge in the likelihood surface—a practical non-identifiability in the sense of [6]—and their estimation errors are positively correlated. Projected onto the *P*_eq′ versus 1/*k*_La plane, that correlation reproduces the sign of the true physical relationship. The regression therefore cannot distinguish signal from fitting geometry, and its nominal p-value of 2.6 × 10⁻¹² carries no evidential weight.
 
 ### 5.2 Joint Estimation Is Nearly Unbiased
 
@@ -267,18 +270,25 @@ Importing a deep-learning framework solely to query GPU availability costs 307 M
 
 On an edge device, producing an estimate is cheap; establishing that it is not an artifact costs roughly two hundred times as much. We showed that the conventional two-stage separation of physical from biological gas removal manufactures an artifact of the same sign and magnitude as the effect sought, proposed and calibrated a single-step joint estimator in its place, and measured the cost of that calibration on real hardware. Because the refill controller turns routine production into a continuous stream of relaxation experiments, the reactor accumulates identifying power at nearly the theoretically optimal rate, requiring no dedicated experiments and no interruption of production.
 
-**Acknowledgments.** The authors thank the Metal Industries Research & Development Centre for providing the experimental platform and data.
+**Acknowledgments.** The authors thank the Metal Industries Research & Development Centre for access to the experimental platform. *[Funding source and grant number to be inserted.]*
+
+**Disclosure of Interests.** The reactor studied here is the subject of granted Taiwanese invention patent TW I923176, assigned to the Metal Industries Research & Development Centre, with which author C.-Y. Hung is affiliated. The authors declare no other competing interests.
 
 ## References
 
-1. Ette, E.I., Williams, P.J.: Population pharmacokinetics II: estimation methods. Ann. Pharmacother. **38**, 1907−1915 (2004). doi:10.1345/aph.1E259
-2. [Author list]: H₂ gas–liquid mass transfer: a key element in biological Power-to-Gas methanation. Renew. Sustain. Energy Rev. **150**, 111203 (2021). doi:10.1016/j.rser.2021.111203
-3. [Author list]: Biomethanation processes: new insights on the effect of a high H₂ partial pressure on microbial communities. Biotechnol. Biofuels **13**, 141 (2020). doi:10.1186/s13068-020-01776-y
-4. [Author list]: Closed-loop identification with routine operating data: effect of time delay and sampling time. J. Process Control **21**, 1027−1035 (2011). doi:10.1016/j.jprocont.2011.06.020
-5. [Author list]: Machine learning vs. ADM1: reliable biogas prediction with minimal data requirements in full-scale plants. (2025)
-6. Raue, A., Kreutz, C., Maiwald, T., et al.: Structural and practical identifiability analysis of partially observed dynamical models by exploiting the profile likelihood. Bioinformatics **25**, 1923−1929 (2009). doi:10.1093/bioinformatics/btp358
-7. Efron, B., Tibshirani, R.J.: An Introduction to the Bootstrap. Chapman & Hall, New York (1993)
-8. Künsch, H.R.: The jackknife and the bootstrap for general stationary observations. Ann. Statist. **17**, 1217−1241 (1989). doi:10.1214/aos/1176347265
-9. Metal Industries Research & Development Centre: Micro-pressure circulation control system and its method for anaerobic methane fermentation. TW Patent I923176 (2026)
+*All entries below were verified against CrossRef, PubMed, or the publisher of record on 2026-08-05. Author lists, volumes, page ranges, and DOIs are as printed by the source.*
 
-> **References still to add (target 12–18):** edge-constrained inference; ADM1; Jetson deployment case studies; gassing-out *k*_La measurement. Author lists for [2]–[5] must be completed from the original sources.
+1. Ette, E.I., Williams, P.J.: Population pharmacokinetics II: estimation methods. Ann. Pharmacother. **38**(11), 1907–1915 (2004). https://doi.org/10.1345/aph.1E259
+2. Jensen, M.B., Ottosen, L.D.M., Kofoed, M.V.W.: H₂ gas-liquid mass transfer: a key element in biological Power-to-Gas methanation. Renew. Sustain. Energy Rev. **147**, 111209 (2021). https://doi.org/10.1016/j.rser.2021.111209
+3. Braga Nan, L., Trably, E., Santa-Catalina, G., Bernet, N., Delgenès, J.-P., Escudié, R.: Biomethanation processes: new insights on the effect of a high H₂ partial pressure on microbial communities. Biotechnol. Biofuels **13**, 141 (2020). https://doi.org/10.1186/s13068-020-01776-y
+4. Shardt, Y.A.W., Huang, B.: Closed-loop identification with routine operating data: effect of time delay and sampling time. J. Process Control **21**(7), 997–1010 (2011). https://doi.org/10.1016/j.jprocont.2011.06.015
+5. Tisocco, S., Weinrich, S., Møller, H.B., Ward, A.J., Kilmartin, L., Zhan, X., Crosson, P.: Machine learning vs. ADM1: reliable biogas prediction with minimal data requirements in full-scale plants. Environ. Sci. Ecotechnol. **29**, 100662 (2026). https://doi.org/10.1016/j.ese.2026.100662
+6. Raue, A., Kreutz, C., Maiwald, T., Bachmann, J., Schilling, M., Klingmüller, U., Timmer, J.: Structural and practical identifiability analysis of partially observed dynamical models by exploiting the profile likelihood. Bioinformatics **25**(15), 1923–1929 (2009). https://doi.org/10.1093/bioinformatics/btp358
+7. Efron, B., Tibshirani, R.J.: An Introduction to the Bootstrap. Chapman & Hall, New York (1993). ISBN 978-0-412-04231-7
+8. Künsch, H.R.: The jackknife and the bootstrap for general stationary observations. Ann. Statist. **17**(3), 1217–1241 (1989). https://doi.org/10.1214/aos/1176347265
+9. Batstone, D.J., Keller, J., Angelidaki, I., Kalyuzhnyi, S.V., Pavlostathis, S.G., Rozzi, A., Sanders, W.T.M., Siegrist, H., Vavilin, V.A.: The IWA Anaerobic Digestion Model No 1 (ADM1). Water Sci. Technol. **45**(10), 65–73 (2002). https://doi.org/10.2166/wst.2002.0292
+10. Metal Industries Research & Development Centre: Micro-pressure circulation control system and its method for anaerobic methane fermentation. TW Patent I923176 (2026)
+
+> **Still to add (target 12–18).** Candidate topics: edge-constrained inference under latency/energy budgets; Jetson deployment case studies; gassing-out *k*_La measurement methodology. **Every added entry must be DOI-verified before insertion**—do not cite from memory.
+>
+> **Ordering.** Entries are currently in citation order. Springer LNCS (`splncs04.bst`) sorts alphabetically by first author surname; the BibTeX run will renumber automatically, so in-text numbers must not be hard-coded in the final LaTeX.
