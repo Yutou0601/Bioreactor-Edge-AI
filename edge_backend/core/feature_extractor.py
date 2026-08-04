@@ -118,6 +118,7 @@ class ORPFeatureExtractor:
         t_m = sum(t) / n
         y_m = sum(y) / n
 
+        # 將每筆 t[i] 減掉 t 的差值，y[i] 減掉 y 的差值，計算斜率
         num = sum((t[i] - t_m) * (y[i] - y_m) for i in range(n))
         den = sum((t[i] - t_m) ** 2 for i in range(n))
         if den == 0:
