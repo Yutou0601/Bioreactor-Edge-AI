@@ -1,4 +1,4 @@
-# The Cost of Trust at the Edge: Bootstrap-Calibrated Parameter Estimation on a Self-Identifying Bioreactor
+# The Cost of Trust at the Edge: Bootstrap-Calibrated Parameter Estimation for Hydrogenotrophic Biomethanation
 
 > **Draft v1.1 — 2026-08-05.** Springer proceedings format. American English.
 > Running head suggestion: *Cost of Trust at the Edge*
@@ -129,7 +129,7 @@ Output: θ = (k_La,1 , k_La,2 , k_La,3 , P_eq , r_b)
  4  stage 2: Nelder–Mead refinement, with the same bounds B
 ```
 
-The bounds must be supplied to the refinement stage as well as the initial stage. Omitting them is a reproducible failure mode: the simplex escapes the feasible region and returns solutions such as *k*_La ≈ 2 × 10⁹ with a compensating saturation pressure, which fit the data no better but are physically meaningless.
+Two implementation choices matter. First, the bounds must be supplied to the refinement stage as well as the initial stage. Omitting them is a reproducible failure mode: the simplex escapes the feasible region and returns solutions such as *k*_La ≈ 2 × 10⁹ with a compensating saturation pressure, which fit the data no better but are physically meaningless. Second, the two-stage local scheme is preferred over a global search: differential evolution converges to the same optimum but costs 35–39× more (5.50 s versus 0.155 s per fit on the workstation of Sect. 6), which is prohibitive once the fit is nested inside 200 bootstrap replicates.
 
 ### 4.4 Parametric Bootstrap Calibration
 
@@ -221,38 +221,24 @@ Precision improves with an exponent of **−0.54** in the accumulated cycle coun
 
 > **Fig. 3.** Self-identifying platform. (a) Threshold-triggered cycles across the campaign; (b) learning curve against the 1/√n reference; (c) convergence of the estimate with operating days. *(file: `fig27_self_identifying_platform.png`)*
 
-## 6 The Cost of Trust: On-Device Budget
+## 6 Deployment Cost of the Calibration
 
-**Table 8.** Pipeline cost on two x86 platforms; identical script with automatic platform detection.
+Calibration is what makes the estimate trustworthy, so its cost determines whether trustworthiness is affordable on-device. We measured the full pipeline on two x86 platforms using one script with automatic platform detection (Table 8).
 
-| Stage | Laptop, 14-core | Workstation, 12-core | Ratio |
-|---|---|---|---|
-| Cycle detection, streaming | 0.56 µs/sample | 0.100 µs/sample | 5.6× |
-| Per-cycle feature extraction | 3.47 ms | 0.571 ms | 6.1× |
-| Joint estimate (Alg. 2) | 0.878 s | 0.148 s | 5.9× |
-| Bootstrap calibration, B = 200 (Alg. 3) | ≈ 3.0 min | 0.50 min | 6.0× |
-| **Calibration / estimate cost ratio** | — | **203×** | — |
-| Multicore speedup of calibration | 6.2× (13 proc.) | 5.67× (11 proc.) | — |
-| Local optimizer vs. differential evolution | 0.78 s vs. 30.8 s | 0.155 s vs. 5.50 s | 35–39× |
-| Peak memory | 326 MB | 330 MB | ≈ 1.0 |
+**Table 8.** Pipeline cost on two x86 platforms.
 
-**Certification costs about 200× the estimate.** Producing one value of *r*_b takes 0.15 s; establishing that it is not an artifact takes 200 bootstrap replicates. Section 5.1 shows what skipping this buys: a result with a nominal p of 2.6 × 10⁻¹² that is entirely artifact.
-
-**It can nonetheless be scheduled.** Streaming detection costs 0.1 µs per sample against a one-minute sampling interval, and refills are 6–15 hours apart. A 0.5–3 minute calibration fits comfortably in the idle interval and never competes with real-time detection.
-
-**The workload wants CPU cores, not a GPU.** The pipeline is numerical optimization throughout; the GPU is idle even on the workstation, which carries an RTX 3060. The 200 replicates are mutually independent, so throughput scales nearly linearly with cores.
-
-**Memory footprint is platform-independent** (326 versus 330 MB despite a sixfold performance difference), which allows feasibility on a memory-constrained device to be predicted before deployment.
-
-**Table 9.** Cost of merely *detecting* GPU availability; same machine, same workload.
-
-| | Without PyTorch | With PyTorch loaded |
+| Stage | Laptop, 14-core | Workstation, 12-core |
 |---|---|---|
-| Joint estimate | 0.148 s | 0.162 s (+9%) |
-| Per bootstrap replicate | 0.151 s | 0.178 s (+18%) |
-| Peak memory | 330 MB | 637 MB (+307 MB) |
+| Cycle detection, streaming | 0.56 µs/sample | 0.100 µs/sample |
+| Joint estimate (Alg. 2) | 0.878 s | 0.148 s |
+| Bootstrap calibration, B = 200 (Alg. 3) | ≈ 3.0 min | 0.50 min |
+| **Calibration / estimate cost ratio** | — | **203×** |
+| Multicore speedup of calibration | 6.2× (13 proc.) | 5.67× (11 proc.) |
+| Peak memory | 326 MB | 330 MB |
 
-Importing a deep-learning framework solely to query GPU availability costs 307 MB and 10–18% throughput, for a workload that never uses the GPU. Lightweight detection through a `nvidia-smi` subprocess avoids this entirely—a saving that is material on a memory-constrained edge device.
+Certification costs about **200×** the estimate it certifies: one value of *r*_b takes 0.15 s, while establishing that it is not an artifact takes 200 replicates. Section 5.1 shows what skipping that step buys—a nominal p of 2.6 × 10⁻¹² that is entirely artifact—so the ratio is the price of not being wrong, not overhead.
+
+The cost is nevertheless schedulable. Streaming detection consumes 0.1 µs per sample against a one-minute sampling interval, and refills are 6–15 hours apart, so a 0.5–3 minute calibration fits inside the idle interval without competing with real-time detection. The workload is numerical optimization throughout and never uses the GPU, which sits idle even on the workstation's RTX 3060; because the replicates are mutually independent, throughput instead scales nearly linearly with CPU cores. Peak memory is essentially platform-independent (326 versus 330 MB despite a sixfold speed difference), which allows feasibility on a memory-constrained device to be predicted before deployment. One practical caveat: importing a deep-learning framework merely to query GPU availability costs 307 MB and 10–18% throughput for a workload that never uses it, whereas an `nvidia-smi` subprocess probe costs neither.
 
 ## 7 Discussion and Limitations
 
