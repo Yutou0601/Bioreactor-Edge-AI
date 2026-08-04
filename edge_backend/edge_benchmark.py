@@ -52,22 +52,54 @@ def platform_info():
         except Exception:
             pass
     info.setdefault('jetson', None)
+    info['hostname'] = platform.node() or 'unknown'
+    # platform.processor() 在 Windows 只給 "Family 6 Model 151"，看不出實際型號，
+    # 故另外取 CPU 品牌名（Windows 讀登錄檔、Linux/Jetson 讀 /proc/cpuinfo）
+    info['cpu_name'] = None
+    try:
+        if sys.platform == 'win32':
+            import winreg
+            k = winreg.OpenKey(
+                winreg.HKEY_LOCAL_MACHINE,
+                r'HARDWARE\DESCRIPTION\System\CentralProcessor\0')
+            info['cpu_name'] = winreg.QueryValueEx(k, 'ProcessorNameString')[0].strip()
+        else:
+            with open('/proc/cpuinfo') as f:
+                for line in f:
+                    if line.startswith(('model name', 'Model')):
+                        info['cpu_name'] = line.split(':', 1)[1].strip()
+                        break
+    except Exception:
+        pass
+    # 標籤需含主機名，否則兩台同為 Windows-AMD64 的機器會覆蓋彼此的輸出
     info['label'] = ('jetson' if info['jetson'] else
-                     f"{info['system']}-{info['machine']}")
+                     f"{info['system']}-{info['machine']}-{info['hostname']}")
     try:
         import numpy as _np
         info['numpy'] = _np.__version__
     except Exception:
         pass
-    # GPU（僅供記錄：本管線為 scipy 最佳化，不使用 GPU）
+    # GPU（僅供記錄：本管線為 scipy 最佳化，全程不使用 GPU）
     info['gpu'] = None
+    info['gpu_source'] = None
     try:
         import torch
         if torch.cuda.is_available():
             info['gpu'] = torch.cuda.get_device_name(0)
-            info['label'] += '-' + info['gpu'].split()[-1]
+            info['gpu_source'] = 'torch'
     except Exception:
         pass
+    if info['gpu'] is None:          # torch 未裝時改問 nvidia-smi
+        try:
+            import subprocess
+            out = subprocess.run(
+                ['nvidia-smi', '--query-gpu=name', '--format=csv,noheader'],
+                capture_output=True, text=True, timeout=10)
+            if out.returncode == 0 and out.stdout.strip():
+                info['gpu'] = out.stdout.strip().splitlines()[0]
+                info['gpu_source'] = 'nvidia-smi'
+        except Exception:
+            pass
     return info
 
 
