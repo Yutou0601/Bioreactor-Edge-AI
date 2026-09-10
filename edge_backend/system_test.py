@@ -205,7 +205,7 @@ try:
     # ⚠ SPA 路由回退：vue-router 用 createWebHistory，/rate 等路徑在伺服器
     #   上沒有對應檔案。只掛 StaticFiles(html=True) 的話，直接輸入網址或
     #   在該頁重新整理就會 404。實際踩過一次。
-    for sub in ('/rate', '/report', '/experiment', '/import'):
+    for sub in ('/rate', '/report', '/experiment', '/import', '/modules'):
         r = c.get(sub)
         check('前端路由 %s 回退到 index.html' % sub,
               r.status_code == 200 and '<html' in r.text[:200].lower(),
