@@ -487,13 +487,23 @@ def get_records(limit: int = Query(4320, ge=0, description="0 = 不限制，回�
 @router.post("/records")
 def add_record(record: SensorRecord):
     new_record = record.dict()
-    return append_record(new_record)
+    saved = append_record(new_record)
+    from core import sample_store
+    sample_store.append(saved)          # 記憶體與表要同步，否則重啟就少一筆
+    return saved
 
 
 @router.delete("/records")
 def clear_records():
+    """清空感測資料——記憶體與 sample 表都清。
+
+    ⚠ 這是真的刪現場資料。以前只清記憶體，重開之後資料會「自己回來」
+      （因為根本沒被刪），現在表也清了就真的沒了。
+    """
     deleted = clear_all()
-    return {"status": "cleared", "deleted": deleted}
+    from core import sample_store
+    n_db = sample_store.clear()
+    return {"status": "cleared", "deleted": deleted, "deleted_db": n_db}
 
 
 @router.delete("/records/{record_id}")
@@ -603,12 +613,13 @@ def _import_csv_btp_daily(text: str, detected_date: str) -> dict:
     imported = 0
     anomaly_count = 0
     ema_values: list[float] = []
+    _persist: list = []
 
     for row in rows:
         is_anomaly = bool(row.get('is_anomaly', False))
         note_val = row.get('note')
         note = note_val if isinstance(note_val, str) and note_val else f'CSV · {detected_date}'
-        append_record({
+        _persist.append(append_record({
             'timestamp':      row['timestamp'],
             'orp':            row['orp'],
             'orp_raw':        row['orp_raw'],
@@ -621,11 +632,17 @@ def _import_csv_btp_daily(text: str, detected_date: str) -> dict:
             'co2_pct':        row.get('co2_pct', 0.0),
             'ch4_pct':        row.get('ch4_pct', 0.0),
             'note':           note,
-        })
+        }))
         imported += 1
         if is_anomaly:
             anomaly_count += 1
         ema_values.append(row['orp'])
+
+    # ⚠ 一併寫進 sample 表。在此之前感測資料只存在記憶體，後端一重開就
+    #   全沒了，而畫面上看不出是「沒資料」還是「重開過」。用 executemany
+    #   批次寫（一次匯入上萬筆，逐筆 commit 會慢到前端誤判逾時）。
+    from core import sample_store
+    sample_store.append_many(_persist)
 
     # 預熱 LSTM buffer：前 N-1 筆直接 append，最後一筆透過正式介面傳入
     if _LSTM_ON:
@@ -887,10 +904,11 @@ async def import_csv(file: UploadFile = File(...)):
     imported = 0
     anomaly_count = 0
     ema_values: list[float] = []
+    _persist: list = []
 
     for pt in all_points:
         src = row_by_ts.get(pt.timestamp, {})
-        append_record({
+        _persist.append(append_record({
             'timestamp':      pt.timestamp,
             'orp':            pt.ema,
             'orp_raw':        pt.raw,
@@ -903,11 +921,17 @@ async def import_csv(file: UploadFile = File(...)):
             'co2_pct':        src.get('co2_pct', 0.0),
             'ch4_pct':        src.get('ch4_pct', 0.0),
             'note':           f'CSV · {detected_date}',
-        })
+        }))
         imported += 1
         if pt.is_anomaly:
             anomaly_count += 1
         ema_values.append(pt.ema)
+
+    # ⚠ 一併寫進 sample 表。在此之前感測資料只存在記憶體，後端一重開就
+    #   全沒了，而畫面上看不出是「沒資料」還是「重開過」。用 executemany
+    #   批次寫（一次匯入上萬筆，逐筆 commit 會慢到前端誤判逾時）。
+    from core import sample_store
+    sample_store.append_many(_persist)
 
     # ── 預熱 LSTM buffer：前 29 筆直接 append，最後一筆透過正式介面傳入
     #    這樣 latest_actual_pressure 也能被正確更新
@@ -1196,3 +1220,35 @@ def api_module_run(name: str):
     if not res.get("ok") and "已有另一個模組" in str(res.get("error", "")):
         raise HTTPException(status_code=409, detail=res["error"])
     return res
+
+
+@router.get("/samples")
+def api_samples():
+    """sample 表的筆數與時間範圍，以及目前記憶體裡有多少。
+
+    ⚠ 兩個數字要一起顯示。表裡有 50 萬筆而記憶體只有 2 萬筆是**正常**的
+      （見 core/sample_store.py：全部載回來會吃 259 MB，預算只有 60 MB）。
+      只顯示其中一個，看的人會以為資料掉了。
+    """
+    from core import sample_store
+    st = sample_store.stats()
+    st["n_in_memory"] = len(sensor_records)
+    st["memory_limit"] = int(_config.get('REACTOR_SAMPLE_LIMIT')
+                             or sample_store.DEFAULT_MEMORY_LIMIT)
+    st["note"] = ("表是完整歷史，記憶體只留最近一段。要分析更早的資料請用"
+                  " /api/samples/window 指定時間範圍。")
+    return st
+
+
+@router.get("/samples/window")
+def api_samples_window(
+    start: str = Query(..., description="起始時間 YYYY-MM-DD HH:MM:SS"),
+    end: str = Query(None, description="結束時間；省略＝到最後一筆"),
+):
+    """從 sample 表取一段時間窗。**不動記憶體**。
+
+    這是「看更早的資料」的正確做法——不要為了看七月的資料把整年載回記憶體。
+    """
+    from core import sample_store
+    rows = sample_store.load_window(start, end)
+    return {"start": start, "end": end, "n": len(rows), "records": rows}

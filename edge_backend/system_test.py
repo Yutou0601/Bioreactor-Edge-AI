@@ -4,7 +4,7 @@
 
     python system_test.py
 
-十項檢查，由內而外：
+十一項檢查，由內而外：
 
   1 記憶體守門  常駐核心不得載入 torch/pandas/sklearn/scipy/xgboost
   2 估計器一致  線上實作 vs 離線腳本，逐段比對 (曲率, k, r_b)
@@ -16,6 +16,7 @@
   8 批次排程    自動開始/結束的判定；預設關閉的守門
   9 記憶體守門  **操作過之後**再檢查一次——第 1 項擋不住請求路徑偷渡
  10 分析模組    子行程隔離：跑模組不得把它的相依帶進常駐核心
+ 11 sample 表   重啟不掉資料；還原有上限（不然一年份吃 259 MB）
 
 ⚠ 第 1 項是最容易悄悄回歸的。torch 曾經因為 routes.py 一行模組層級
   import 而在每次啟動時載入 496 MB，而且沒有任何錯誤訊息。
@@ -444,6 +445,87 @@ finally:
         os.environ.pop('REACTOR_DB', None)
     else:
         os.environ['REACTOR_DB'] = _prev_db
+
+# ── 11 sample 表（durable 儲存）──────────────────────────────
+print('')
+print('11. sample 表（感測資料的 durable 儲存）')
+# ⚠ 這一組守兩件事：
+#   1 **重啟不掉資料。** 在此之前感測資料只存在記憶體，後端一重開監控頁、
+#     批次分析、CH4 預測全部歸零，而畫面上看不出是「沒資料」還是「重開過」。
+#   2 **記憶體不隨時間長大。** 實測每筆記錄在記憶體佔 517 bytes，一年的
+#     一分鐘取樣＝525,600 筆＝259 MB，而這台的常駐預算是 60 MB。所以啟動
+#     只還原最近 N 筆，不是全部——這一項就是在守那個上限真的有作用。
+from core import sample_store as ss                            # noqa: E402
+from core.data_store import sensor_records                     # noqa: E402
+
+_sdb = os.path.join(tempfile.gettempdir(), 'reactor_sampletest.db')
+if os.path.exists(_sdb):
+    os.remove(_sdb)
+_prev_sdb = os.environ.get('REACTOR_DB')
+os.environ['REACTOR_DB'] = _sdb
+try:
+    _csvs = sorted(glob.glob(os.path.join(folder, '*.csv')))[:2]
+    _n_imported = 0
+    for _f in _csvs:
+        with open(_f, 'rb') as _fh:
+            _r = c.post('/api/import_csv',
+                        files={'file': (os.path.basename(_f), _fh, 'text/csv')})
+        _n_imported += (_r.json() or {}).get('imported', 0)
+
+    _st = ss.stats()
+    check('匯入會寫進 sample 表', _st['n_samples'] > 0,
+          '表內 %d 筆（%s → %s）'
+          % (_st['n_samples'], _st['first_ts'], _st['last_ts']))
+
+    # ★ 重匯同一個檔不得產生重複列（ts 是主鍵 + INSERT OR IGNORE）
+    _before = _st['n_samples']
+    with open(_csvs[0], 'rb') as _fh:
+        c.post('/api/import_csv',
+               files={'file': (os.path.basename(_csvs[0]), _fh, 'text/csv')})
+    _after = ss.stats()['n_samples']
+    check('★ 重匯同一個檔不會產生重複列', _after == _before,
+          '%d → %d 筆' % (_before, _after))
+
+    # ★ 重啟還原：清空記憶體，用 load_recent 模擬 lifespan 那段
+    _restored = ss.load_recent()
+    check('★ 重啟後還原得回來', len(_restored) == min(_before, ss.DEFAULT_MEMORY_LIMIT),
+          '還原 %d 筆（表內 %d）' % (len(_restored), _before))
+
+    # ★ 記憶體上限真的有作用——不設限的話一年份會吃掉 259 MB
+    _capped = ss.load_recent(limit=50)
+    check('★ 還原有筆數上限', len(_capped) == min(50, _before),
+          '要 50 筆，拿到 %d 筆' % len(_capped))
+
+    # 還原的順序必須由舊到新：EMA、相位判定、切段都假設時間遞增
+    _ts = [r['timestamp'] for r in _capped]
+    check('★ 還原的順序是由舊到新', _ts == sorted(_ts),
+          '首 %s → 末 %s' % (_ts[0][:19], _ts[-1][:19]) if _ts else '無資料')
+
+    # 欄位不得在還原時靜默掉——架構文件 §6 只列五欄，實際記錄有十二欄
+    _need = ('timestamp', 'orp', 'orp_raw', 'orp_cleaned', 'is_anomaly',
+             'pressure', 'ph', 'temp', 'mixer_pressure', 'co2_pct',
+             'ch4_pct', 'note')
+    _miss = [k for k in _need if _capped and k not in _capped[0]]
+    check('★ 還原不掉欄位', not _miss,
+          ('★ 少了 ' + ', '.join(_miss)) if _miss else '十二欄齊全')
+
+    # 時間窗查詢不得改動記憶體
+    _mem_before = len(sensor_records)
+    _w = ss.load_window(_st['first_ts'], _st['last_ts'])
+    check('時間窗查詢不動記憶體', len(sensor_records) == _mem_before,
+          '查到 %d 筆，記憶體仍為 %d 筆' % (len(_w), len(sensor_records)))
+
+    for _url, _want in (('/api/samples', 200), ('/api/samples/window', 422)):
+        _r = c.get(_url)
+        check('GET %s' % _url, _r.status_code == _want,
+              'HTTP %d（應為 %d）' % (_r.status_code, _want))
+except Exception as _e:                                      # noqa: BLE001
+    check('sample 表', False, '%s: %s' % (type(_e).__name__, _e))
+finally:
+    if _prev_sdb is None:
+        os.environ.pop('REACTOR_DB', None)
+    else:
+        os.environ['REACTOR_DB'] = _prev_sdb
 
 # ── 總結 ────────────────────────────────────────────────────
 print('\n' + '=' * 64)

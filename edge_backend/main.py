@@ -48,6 +48,32 @@ async def lifespan(app: FastAPI):
     #     · 全專案只有 main.py 這一行 import 它
     #   一併移除 pyserial 相依。
 
+    # ⚠ 從 sample 表把感測資料還原回記憶體。在此之前資料只存在記憶體，
+    #   後端一重開監控頁、批次分析、CH4 預測全部歸零，而且畫面上看不出是
+    #   「沒資料」還是「重開過」。
+    #
+    # ⚠ 只還原**最近 N 筆**，不是全部。實測每筆在記憶體佔 517 bytes：
+    #   一年的一分鐘取樣＝525,600 筆＝259 MB，而這台的常駐預算是 60 MB。
+    #   要看更早的資料請查 sample 表（sample_store.load_window），不要把
+    #   整段歷史載回記憶體。上限可用 REACTOR_SAMPLE_LIMIT 調整。
+    try:
+        from core import sample_store
+        from core.data_store import append_record
+        _limit = int(config.get('REACTOR_SAMPLE_LIMIT')
+                     or sample_store.DEFAULT_MEMORY_LIMIT)
+        _restored = sample_store.load_recent(_limit)
+        for _r in _restored:
+            append_record(_r)
+        _st = sample_store.stats()
+        print('[資料] 還原 %d 筆到記憶體（表內共 %d 筆%s）'
+              % (len(_restored), _st['n_samples'],
+                 '，%s → %s' % (_st['first_ts'], _st['last_ts'])
+                 if _st['first_ts'] else ''))
+    except Exception as e:
+        # 還原失敗不擋啟動——記錄照收，只是舊資料看不到。
+        print('[資料] sample 表還原失敗（從空白開始）：%s: %s'
+              % (type(e).__name__, e))
+
     # 批次排程（daemon 執行緒）：到點自動開始／自動結束紀錄。
     # ⚠ 只對有勾 auto_start / auto_stop 的批次動作，預設全關；而且只結束
     #   **紀錄**——系統只讀不控，不會關閥或停機。

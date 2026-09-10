@@ -33,6 +33,10 @@ _DEFAULTS = {
     'REACTOR_ENABLE_LSTM': '0',
     # csv_watcher 檢查間隔（秒）
     'REACTOR_POLL_SECONDS': '60',
+    # 啟動時從 sample 表還原回記憶體的筆數上限。留空＝用內建預設 20000
+    # （約 10 MB、約當 14 天的一分鐘取樣）。實測每筆 517 bytes，一年份
+    # 525,600 筆＝259 MB，遠超這台 60 MB 的預算，所以不能設成「全部」。
+    'REACTOR_SAMPLE_LIMIT': '',
 }
 
 _cache = None
