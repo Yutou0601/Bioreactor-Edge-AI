@@ -151,11 +151,34 @@ def read_series_full(paths):
     if len(ts) < 60:
         return None
     order = sorted(range(len(ts)), key=lambda i: ts[i])
-    ts = [ts[i] for i in order]
-    pres = np.asarray([pres[i] for i in order], dtype=float)
-    temp = [temp[i] for i in order]
-    co2 = [co2[i] for i in order]
-    ch4 = [ch4[i] for i in order]
+
+    # ⚠ 依時間戳去重，先寫的保留。
+    #
+    #   現場的資料夾**會重疊**：例如 `0813_補氣0.15kg_自動化測試` 的
+    #   08-13~08-17 完整包含在 `0825-0831_氫氣不夠暫停進氣__自動化測試`
+    #   裡面。實測兩個資料夾一起丟進來是 34,860 筆，其中 6,230 筆重複。
+    #
+    #   不去重的後果不是報錯，是**靜默算錯**：同一段下降被切成兩份、
+    #   壓降被重複累加、速率與化學計量份額全部偏掉，而且結果看起來完全正常。
+    #   這個專案已經被同一類問題咬過一次（351 個檔只有 251 個相異，
+    #   主結果數字全部重算）。
+    seen = set()
+    keep = []
+    for i in order:
+        if ts[i] in seen:
+            continue
+        seen.add(ts[i])
+        keep.append(i)
+    n_dup = len(order) - len(keep)
+    if n_dup:
+        print('[cycle_store] 依時間戳去重：丟棄 %d 筆重複（保留 %d 筆）'
+              % (n_dup, len(keep)))
+
+    ts = [ts[i] for i in keep]
+    pres = np.asarray([pres[i] for i in keep], dtype=float)
+    temp = [temp[i] for i in keep]
+    co2 = [co2[i] for i in keep]
+    ch4 = [ch4[i] for i in keep]
     t0 = ts[0]
     hours = np.array([(x - t0).total_seconds() / 3600.0 for x in ts])
     return ts, hours, pres, temp, co2, ch4
