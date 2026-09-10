@@ -122,11 +122,25 @@ def _windows(t, y, window_min):
     return out
 
 
+# 容器總容積（L）。2026-09-11 設備方確認：1.99 L 是**總容積**，不是頭空。
+TOTAL_VOLUME_L = 1.99
+
+# 頭空體積（L）。由兩支壓力計反推：閥開時 V_premix·ΔP_premix = V_head·ΔP_reactor，
+# 預混槽 V_premix = 1 L。實測 71 次配對事件，中位 1.00 L。
+#
+# ⚠ 四分位 0.60~2.14，很寬。原因是兩邊的 ΔP 都只有 3~6 個量化階
+#   （量化階 0.01 kgf/cm²），比值的相對誤差因此被放大。這個數字只能當
+#   「約一半」用，不要當精確值引用。
+HEADSPACE_L = 1.00
+
+
 def moles_from_pressure(dp_kgf_cm2, volume_l, temp_c):
     """由分壓變化換算莫耳數。n = ΔP·V / (R·T)
 
-    ⚠ V 必須是**頭空體積**（氣相），不是容器總容積。裝了液體之後氣相只剩
-      一部分，用總容積會把莫耳數高估。會議提到的 1.99 L 需要先確認是哪一個。
+    ⚠ V 必須是**頭空體積**（氣相），不是容器總容積。
+      2026-09-11 確認：容器總容積 1.99 L，而實測頭空約 **1.00 L**
+      （液體約佔一半）。**傳總容積進來會讓莫耳數高估約 99%**，也就是差不多
+      兩倍，而且不會有任何錯誤訊息。
     ⚠ 這個函式只在要報「絕對量」時才用得到。生物份額那個比值不需要體積
       ——分子分母是同一個頭空的分壓，體積自己消掉。
     """
@@ -193,8 +207,15 @@ def stoichiometry(total_drop, ch4_start_pct, ch4_end_pct,
         out['co2_mol'] = out['ch4_mol']
         out['consumed_mol'] = moles_from_pressure(total_drop, volume_l, temp_c)
         out['volume_l'] = volume_l
-        out['note_volume'] = ('莫耳數用的是頭空體積 %.2f L；份額與比值不需要'
-                              '體積（分子分母同一個頭空，體積自己消掉）。' % volume_l)
+        out['note_volume'] = ('莫耳數用的是 %.2f L；份額與比值不需要體積'
+                              '（分子分母同一個頭空，體積自己消掉）。' % volume_l)
+        # ⚠ 最容易犯的錯：把容器總容積當頭空傳進來。實測頭空只有總容積的
+        #   一半，傳錯莫耳數就是兩倍，而且看起來完全正常。
+        if abs(volume_l - TOTAL_VOLUME_L) < 0.05:
+            out['volume_warning'] = (
+                '⚠ %.2f L 是容器**總容積**，不是頭空。實測頭空約 %.2f L'
+                '（液體約佔一半），用總容積會讓莫耳數高估約 %.0f%%。'
+                % (volume_l, HEADSPACE_L, (TOTAL_VOLUME_L / HEADSPACE_L - 1) * 100))
     return out
 
 
@@ -247,7 +268,35 @@ def analyze(ts, hours, pressure, window_min=180, temps=None,
 
     return {'window_min': window_min, 'quantum': QUANT,
             'n_segments': len(rows), 'segments': rows,
+            'coverage': coverage(ts),
             'summary': summarize(rows, window_min)}
+
+
+def coverage(ts, expected_per_day=1440):
+    """逐日資料覆蓋率。現場是一分鐘一筆，所以一天應有 1440 筆。
+
+    ⚠ 為什麼要回報這個：記錄中斷不會讓分析報錯。切段邏輯遇到斷點會強制
+      切開（GAP_HR），所以時長不會算錯——但**使用者看不出那一天其實只有
+      三分之一的資料**，會把「因為沒資料所以沒有段」誤讀成「那天沒有反應」。
+      實測 2026-08-31 只有 540/1440 筆（38%），現場照片註明「數據混亂」。
+    """
+    from collections import Counter
+    per_day = Counter(t.date() for t in ts)
+    days = sorted(per_day)
+    rows = [{'date': str(d), 'n': per_day[d],
+             'coverage': round(per_day[d] / expected_per_day, 3)}
+            for d in days]
+    low = [r for r in rows if r['coverage'] < 0.9]
+    out = {'n_days': len(days), 'per_day': rows, 'n_days_incomplete': len(low)}
+    if low:
+        out['incomplete'] = low
+        out['note'] = ('⚠ 有 %d 天資料不完整（覆蓋率 < 90%%）：%s。'
+                       '記錄中斷不會讓分析報錯，但那幾天的段數會偏少——'
+                       '不要把「沒有段」讀成「沒有反應」。'
+                       % (len(low), '、'.join('%s %.0f%%' % (r['date'],
+                                                            r['coverage'] * 100)
+                                              for r in low[:6])))
+    return out
 
 
 def summarize(rows, window_min):
