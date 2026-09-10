@@ -1,0 +1,12 @@
+{
+  "name": "covariate",
+  "version": "1.0.0",
+  "title": "進氣前 ORP 與下降速率的關聯分析",
+  "description": "以批次分群的叢集穩健標準誤，檢定「斜率平緩化」與菌群成熟度共變數的關聯。這是關聯分析（找關係），不是機理分離。",
+  "entry": "run.py",
+  "input": "complete_cycles",
+  "writes": "mod_covariate",
+  "trigger": { "type": "schedule", "every_minutes": 60 },
+  "timeout_s": 120,
+  "requires": ["numpy>=1.24", "pandas>=2.2", "scipy>=1.11"]
+}

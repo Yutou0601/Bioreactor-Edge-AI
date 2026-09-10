@@ -392,28 +392,32 @@ def _why_no_cycles() -> str:
 
 @router.get("/covariate_analysis")
 def covariate_analysis():
-    """對目前所有批次的每循環特徵，即時跑「進氣前 ORP → 下降速率／平緩化」關聯分析，
-    回答「斜率平緩化是生物還是物理」。吃記憶體中的 all_cycles，不需匯出 CSV。
+    """「進氣前 ORP → 下降速率／平緩化」關聯分析的**最近一次**結果。
 
-    只用完整循環；同批次多循環為偽重複，以批次分群叢集穩健標準誤折算檢定力。
-    這是關聯分析（找關係），非機理分離（灰箱那支太慢、屬離線工具）。
+    ⚠ 2026-09-10 改為模組（modules/covariate/），不再於請求中即時計算。
+      原本這裡是 `import pandas` + `from co2_covariate_association import
+      compute`——一被呼叫，pandas 與 scipy 就永久留在常駐行程裡（Python
+      不卸載已載入的模組），60 MB 的預算當場作廢。而且那支分析腳本住在
+      research/ 底下，根本不會被 pack.bat 打包到監控電腦上。
+
+      現在由核心每 60 分鐘以子行程跑一次，結果寫進 mod_covariate 表。
+      要立刻重算：POST /api/modules/covariate/run。
     """
-    try:
-        import pandas as pd
-        from co2_covariate_association import compute
-    except Exception as e:
-        return {"status": "error", "message": f"分析模組載入失敗：{type(e).__name__}: {e}"}
-
-    rows = exp.all_cycles()      # 每列一個循環（含 run_id/n_minutes/drop_rate/flattening/…）
-    # 只取完整循環（跨斷點的循環平緩化不可信）
-    rows = [r for r in rows if r.get("complete")]
-    if not rows:
-        return {"status": "insufficient", "n_cycles": 0, "n_batches": 0,
-                "message": _why_no_cycles()}
-    try:
-        return compute(pd.DataFrame(rows))
-    except Exception as e:
-        return {"status": "error", "message": f"分析失敗：{type(e).__name__}: {e}"}
+    from core import module_runner as mr
+    got = mr.last_result("covariate")
+    if got.get("status") == "never_run":
+        return {"status": "never_run",
+                "message": "這項分析尚未跑過。它每 60 分鐘自動更新一次；"
+                           "要立刻重算請呼叫 POST /api/modules/covariate/run。"}
+    if got.get("status") != "ok":
+        return {"status": got.get("status"), "message": "模組尚無結果。"}
+    row = got["result"]
+    out = dict(row.get("payload") or {})
+    out["computed_at"] = row.get("computed_at")
+    out["module_version"] = row.get("module_version")
+    if out.get("status") == "insufficient" and not out.get("message"):
+        out["message"] = _why_no_cycles()
+    return out
 
 
 # ==========================================
@@ -427,22 +431,27 @@ def greybox_analysis():
 
     比關聯分析慢（profile likelihood），但已限制只擬合最像暫態的少數循環，數秒內完成。
     這回答的是「你收集到的資料夠不夠分離」，是機理路線的就緒指標。
+
+    ⚠ 2026-09-10 改為模組（modules/greybox/），不再於請求中即時計算。
+    scipy 光磁碟就 109 MB，而 profile likelihood 要跑數秒——放在請求路徑上
+    等於用常駐記憶體換一個沒人在等的數字。現在每 180 分鐘以子行程跑一次。
+    要立刻重算：POST /api/modules/greybox/run。
     """
-    try:
-        from co2_greybox_identifiability import analyze_real
-    except Exception as e:
-        return {"status": "error", "message": f"分析模組載入失敗：{type(e).__name__}: {e}"}
-    try:
-        cycles = exp.complete_cycle_trajectories()
-    except Exception as e:
-        return {"status": "error", "message": f"取軌跡失敗：{type(e).__name__}: {e}"}
-    if not cycles:
-        return {"status": "insufficient", "n_cycles": 0,
-                "message": _why_no_cycles()}
-    try:
-        return analyze_real(cycles)
-    except Exception as e:
-        return {"status": "error", "message": f"分析失敗：{type(e).__name__}: {e}"}
+    from core import module_runner as mr
+    got = mr.last_result("greybox")
+    if got.get("status") == "never_run":
+        return {"status": "never_run",
+                "message": "這項分析尚未跑過。它每 180 分鐘自動更新一次；"
+                           "要立刻重算請呼叫 POST /api/modules/greybox/run。"}
+    if got.get("status") != "ok":
+        return {"status": got.get("status"), "message": "模組尚無結果。"}
+    row = got["result"]
+    out = dict(row.get("payload") or {})
+    out["computed_at"] = row.get("computed_at")
+    out["module_version"] = row.get("module_version")
+    if out.get("status") == "insufficient" and not out.get("message"):
+        out["message"] = _why_no_cycles()
+    return out
 
 
 @router.get("/analysis")
@@ -1117,3 +1126,73 @@ def api_ingest_folder(folder: str = Query(..., description="CSV 資料夾路徑"
     if not os.path.isdir(folder):
         raise HTTPException(status_code=400, detail="資料夾不存在: %s" % folder)
     return cs.ingest_folder(folder)
+
+
+# ==========================================
+# 分析模組（獨立子行程，不進常駐核心）
+# ==========================================
+# 見 docs/系統重構架構_2026-08-31.md §3-§4。核心從不 import 模組的程式碼，
+# 只用 subprocess 啟動它們；所以新增一個分析不必改這裡，也不必改前端。
+
+@router.get("/modules")
+def api_modules():
+    """模組清單。壞掉的模組也會列出來並帶 error——不是靜默略過。
+
+    前端用這份清單自動長出模組頁：title 當標題、last_run 顯示新鮮度。
+    """
+    from core import module_runner as mr
+    out = []
+    for m in mr.discover():
+        item = {k: m.get(k) for k in
+                ("name", "version", "title", "description", "writes",
+                 "trigger", "timeout_s", "requires", "ok", "error")}
+        hist = mr.history(m.get("name"), limit=1)
+        item["last_run"] = hist[0] if hist else None
+        out.append(item)
+    return {"modules": out, "scheduler": mr.status()}
+
+
+@router.get("/modules/{name}/result")
+def api_module_result(name: str):
+    """某個模組最近一次的結果。
+
+    ⚠ 'never_run' 是正常狀態不是錯誤：模組可能剛裝上、或排程還沒到點。
+      介面要說得出「還沒跑過」，而不是顯示一個空白面板。
+    """
+    from core import module_runner as mr
+    got = mr.last_result(name)
+    if got.get("status") == "unknown_module":
+        raise HTTPException(status_code=404, detail="沒有這個模組: %s" % name)
+    return got
+
+
+@router.get("/modules/{name}/runs")
+def api_module_runs(name: str, limit: int = Query(20, ge=1, le=200)):
+    """執行紀錄：什麼時候跑的、成不成功、輸出了什麼。
+
+    ⚠ 失敗也會留紀錄。模組靜默地什麼都沒做，比它報錯更難查——沒有紀錄
+      的話，介面上只會看到結果一直是舊的。
+    """
+    from core import module_runner as mr
+    if mr.get(name) is None:
+        raise HTTPException(status_code=404, detail="沒有這個模組: %s" % name)
+    return {"name": name, "runs": mr.history(name, limit=limit)}
+
+
+@router.post("/modules/{name}/run")
+def api_module_run(name: str):
+    """立刻跑一次。**同步**——跑完才回應。
+
+    ⚠ 一次只跑一個模組。已有別的模組在跑時回 409，不排隊也不並行：
+      兩個各佔 200 MB 的子行程同時跑，就等於把常駐核心省下來的全部還回去。
+    """
+    from core import module_runner as mr
+    m = mr.get(name)
+    if m is None:
+        raise HTTPException(status_code=404, detail="沒有這個模組: %s" % name)
+    if not m.get("ok"):
+        raise HTTPException(status_code=400, detail=m.get("error"))
+    res = mr.run_module(name)
+    if not res.get("ok") and "已有另一個模組" in str(res.get("error", "")):
+        raise HTTPException(status_code=409, detail=res["error"])
+    return res

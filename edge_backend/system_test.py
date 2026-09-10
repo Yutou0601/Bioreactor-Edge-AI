@@ -4,7 +4,7 @@
 
     python system_test.py
 
-九項檢查，由內而外：
+十項檢查，由內而外：
 
   1 記憶體守門  常駐核心不得載入 torch/pandas/sklearn/scipy/xgboost
   2 估計器一致  線上實作 vs 離線腳本，逐段比對 (曲率, k, r_b)
@@ -15,6 +15,7 @@
   7 校準        calibration.json 有沒有被正確套用
   8 批次排程    自動開始/結束的判定；預設關閉的守門
   9 記憶體守門  **操作過之後**再檢查一次——第 1 項擋不住請求路徑偷渡
+ 10 分析模組    子行程隔離：跑模組不得把它的相依帶進常駐核心
 
 ⚠ 第 1 項是最容易悄悄回歸的。torch 曾經因為 routes.py 一行模組層級
   import 而在每次啟動時載入 496 MB，而且沒有任何錯誤訊息。
@@ -347,6 +348,102 @@ try:
                  % '/'.join(already) if already else ''))
 except Exception as e:                                       # noqa: BLE001
     check('記憶體守門（操作後）', False, '%s: %s' % (type(e).__name__, e))
+
+# ── 10 分析模組（子行程隔離）──────────────────────────────────
+print('')
+print('10. 分析模組（獨立子行程）')
+# ⚠ 這一組守的是整個模組化的那條紅線：**核心從不 import 模組的程式碼**。
+#   一旦有人為了方便在 module_runner 裡寫 `from modules.covariate import
+#   analysis`，pandas 與 scipy 就永久進了常駐行程，60 MB 預算當場作廢，
+#   而且不會有任何錯誤訊息——這正是 torch 藏了好幾個月的方式。
+import ast as _ast                                            # noqa: E402
+import shutil as _shutil                                      # noqa: E402
+
+from core import module_runner as mr                          # noqa: E402
+
+# 模組會寫進資料庫。導到暫存檔，不要碰到現場的 reactor.db。
+_moddb = os.path.join(tempfile.gettempdir(), 'reactor_modtest.db')
+if os.path.exists(_moddb):
+    os.remove(_moddb)
+_prev_db = os.environ.get('REACTOR_DB')
+os.environ['REACTOR_DB'] = _moddb
+try:
+    mods = mr.discover()
+    ok_mods = [m for m in mods if m.get('ok')]
+    bad_mods = [m for m in mods if not m.get('ok')]
+    check('探索得到模組', len(ok_mods) >= 2,
+          '可用 %d 個：%s' % (len(ok_mods),
+                           ', '.join(m['name'] for m in ok_mods)))
+    check('沒有壞掉的模組', not bad_mods,
+          ('★ ' + '; '.join('%s: %s' % (m.get('name'), m.get('error'))
+                            for m in bad_mods)) if bad_mods else '全部可載入')
+
+    # ★ 紅線（動態）：跑一個模組之後，常駐行程不得多出任何套件。
+    _before = set(sys.modules)
+    _res = mr.run_module('covariate')
+    _after = set(sys.modules)
+    check('手動執行模組成功', _res.get('ok'),
+          'exit=%s %.1fs %s'
+          % (_res.get('exit_code'), _res.get('seconds', 0),
+             (_res.get('log') or _res.get('error') or '').strip()[:90]))
+    _gained = sorted(m for m in (_after - _before)
+                     if '.' not in m and not m.startswith('_'))
+    check('★ 執行模組不會把它的相依帶進常駐行程', not _gained,
+          ('★ 多出了 ' + ', '.join(_gained)) if _gained
+          else '子行程跑完，核心的 sys.modules 沒有變動')
+
+    _got = mr.last_result('covariate')
+    check('模組結果讀得回來', _got.get('status') == 'ok',
+          'status=%s table=%s' % (_got.get('status'), _got.get('table')))
+    check('執行紀錄有留下', len(mr.history('covariate', limit=5)) >= 1,
+          '%d 筆' % len(mr.history('covariate', limit=5)))
+
+    # ★ 紅線（靜態）：原始碼層級禁止 import 模組的程式碼。
+    #   動態檢查只涵蓋「這次真的跑過的那條路徑」，靜態檢查涵蓋全部分支。
+    _src = io.open(os.path.join(HERE, 'core', 'module_runner.py'),
+                   encoding='utf-8').read()
+    _offend = []
+    for _n in _ast.walk(_ast.parse(_src)):
+        if isinstance(_n, _ast.ImportFrom) and (_n.module or '').startswith('modules'):
+            _offend.append('line %d: from %s' % (_n.lineno, _n.module))
+        elif isinstance(_n, _ast.Import):
+            for _a in _n.names:
+                if _a.name.startswith('modules'):
+                    _offend.append('line %d: import %s' % (_n.lineno, _a.name))
+    check('★ module_runner 原始碼不得 import 模組的程式碼', not _offend,
+          ('★ ' + '; '.join(_offend)) if _offend else '只用 subprocess 啟動')
+
+    # 壞掉的模組必須被列出來並帶 error，不是靜默略過——否則沒有人會發現
+    # 某個分析其實已經幾個月沒更新了。
+    _brokendir = os.path.join(mr.MODULES_DIR, '_systest_broken')
+    os.makedirs(_brokendir, exist_ok=True)
+    try:
+        with io.open(os.path.join(_brokendir, 'module.json'), 'w',
+                     encoding='utf-8') as _fh:
+            _fh.write('{"name": "_systest_broken", "version": "0", '
+                      '"title": "壞的", "entry": "nope.py"}')
+        _found = [m for m in mr.discover() if m.get('name') == '_systest_broken']
+        check('壞掉的模組會被列出並帶 error',
+              bool(_found) and not _found[0].get('ok') and _found[0].get('error'),
+              _found[0].get('error') if _found else '★ 整個被略過了')
+    finally:
+        _shutil.rmtree(_brokendir, ignore_errors=True)
+
+    # API
+    for _url, _want in (('/api/modules', 200),
+                        ('/api/modules/covariate/result', 200),
+                        ('/api/modules/covariate/runs', 200),
+                        ('/api/modules/does_not_exist/result', 404)):
+        _r = c.get(_url)
+        check('GET %s' % _url, _r.status_code == _want,
+              'HTTP %d（應為 %d）' % (_r.status_code, _want))
+except Exception as _e:                                      # noqa: BLE001
+    check('分析模組', False, '%s: %s' % (type(_e).__name__, _e))
+finally:
+    if _prev_db is None:
+        os.environ.pop('REACTOR_DB', None)
+    else:
+        os.environ['REACTOR_DB'] = _prev_db
 
 # ── 總結 ────────────────────────────────────────────────────
 print('\n' + '=' * 64)

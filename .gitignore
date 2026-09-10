@@ -66,3 +66,7 @@ edge_backend/.env
 #   決定 rb 欄位的值，必須與程式碼一起版本化，否則同一份資料在兩台機器
 #   會算出不同結果、而且查不出是哪一版校準。
 !edge_backend/calibration.json
+
+# 模組執行時核心寫給它的輸入快照。每次執行都重寫，是執行期產物不是原始碼。
+edge_backend/modules/*/_input.json
+edge_backend/modules/*/_input.json.tmp

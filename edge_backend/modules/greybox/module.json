@@ -1,0 +1,12 @@
+{
+  "name": "greybox",
+  "version": "1.0.0",
+  "title": "灰箱可分離度就緒指標",
+  "description": "對完整循環軌跡擬合兩狀態灰箱模型，回答「目前收集到的資料夠不夠把溶解與生物消耗分開」。穩態資料下 kLa 不可辨識即尚不可分離。",
+  "entry": "run.py",
+  "input": "cycle_trajectories",
+  "writes": "mod_greybox",
+  "trigger": { "type": "schedule", "every_minutes": 180 },
+  "timeout_s": 300,
+  "requires": ["numpy>=1.24", "scipy>=1.11"]
+}

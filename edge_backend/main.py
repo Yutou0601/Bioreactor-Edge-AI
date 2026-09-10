@@ -54,10 +54,19 @@ async def lifespan(app: FastAPI):
     from core import scheduler
     scheduler.start()
 
+    # 分析模組排程（另一條 daemon 執行緒）：到點以**子行程**跑分析模組。
+    # ⚠ 刻意與批次排程分開兩條執行緒。模組逾時上限 300 秒，共用的話一個
+    #   慢模組會把批次的自動結束延後五分鐘。
+    # ⚠ 核心從不 import 模組的程式碼，只用 subprocess 啟動——這條紅線是
+    #   整個記憶體隔離的全部所在（見 core/module_runner.py）。
+    from core import module_runner
+    module_runner.start()
+
     yield
 
     # ── Shutdown ───────────────────────────────────────
     scheduler.stop()
+    module_runner.stop()
 
 
 app = FastAPI(title="生物反應器 Edge AI API", lifespan=lifespan)
