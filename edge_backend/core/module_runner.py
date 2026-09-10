@@ -168,11 +168,35 @@ def _provide_cycle_trajectories():
     return exp.complete_cycle_trajectories()
 
 
+def _provide_ch4_training_set():
+    """CH4 峰值模型的訓練集（X, y）與其指紋。
+
+    ⚠ 指紋要跟著出去。歸因是排程算的，可能落後於目前的訓練集（期間又排氣了
+      幾次）；核心拿它比對就知道眼前用的特徵選擇是不是舊的。少了它，舊的選擇
+      會被靜默拿去擬合，預測值不對也沒有人看得出來。
+    """
+    from core import ch4_realtime as ch4
+    from core.data_store import sensor_records
+    recs = sorted(sensor_records, key=lambda r: r.get('timestamp') or '')
+    if len(recs) < 30:
+        return {'X': [], 'y': [], 'fingerprint': '', 
+                'feature_names': list(ch4.FEATURE_NAMES)}
+    X, y, meta, _vents = ch4.build_training_set(recs)
+    return {
+        'X': [[float(v) for v in row] for row in X],
+        'y': [float(v) for v in y],
+        'fingerprint': '%d|%s' % (len(y), meta[-1]['vent_time'] if meta else ''),
+        'feature_names': list(ch4.FEATURE_NAMES),
+    }
+
+
 _INPUT_PROVIDERS = {
     # 每列一個完整循環的特徵（drop_rate、pre_injection_orp、n_minutes…）
     'complete_cycles': _provide_all_cycles,
     # 每個完整循環的壓力軌跡，供灰箱擬合
     'cycle_trajectories': _provide_cycle_trajectories,
+    # CH4 峰值模型的訓練集，供特徵歸因
+    'ch4_training_set': _provide_ch4_training_set,
 }
 
 

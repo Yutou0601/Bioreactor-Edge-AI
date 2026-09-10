@@ -1,0 +1,12 @@
+{
+  "name": "ch4_attribution",
+  "version": "1.0.0",
+  "title": "CH4 峰值模型的特徵歸因",
+  "description": "用 XGBoost + TreeSHAP（沒裝就退回 GA+Ridge）找出哪些特徵真正驅動排氣時的 CH4 峰值。選出來的特徵清單會回頭給核心擬合預測模型——所以它會改變預測值，不只是說明用的重要度。",
+  "entry": "run.py",
+  "input": "ch4_training_set",
+  "writes": "mod_ch4_attribution",
+  "trigger": { "type": "schedule", "every_minutes": 60 },
+  "timeout_s": 240,
+  "requires": ["numpy>=1.24", "xgboost>=2.0（選配，沒裝自動退回 GA+Ridge）"]
+}

@@ -107,6 +107,96 @@ def extract_features(seg: list) -> Optional[dict]:
     }
 
 
+# ── 尖峰偵測（純 numpy，取代 scipy.signal.find_peaks）──────────────
+# ⚠ 這裡刻意不用 scipy。`from scipy.signal import find_peaks` 雖然寫在函式
+#   裡（延遲載入），但 detect_vents 在**即時請求路徑**上——只要有人開過一次
+#   CH4 面板，scipy 就永久留在常駐行程裡。實測 numpy 之後再加 scipy.signal
+#   是 **+69.6 MB**，比整個 60 MB 預算還大。Python 不卸載模組，延遲 import
+#   只是把付款時間往後挪。
+#
+# ⚠ 這是行為必須**逐位元相同**的替換，不是「差不多的實作」。驗證方式：
+#   · 真實資料 338 個 CSV、55 個峰 → 與 scipy 完全一致
+#   · 隨機差分測試 4000 組訊號、83372 個峰（含平台、全平訊號、邊界）→ 零不一致
+#   system_test 第 12 組會在有裝 scipy 的機器上重跑這個比對。
+
+
+def _local_maxima(x):
+    """局部極大值的索引。平台（連續相等）取中點，與 scipy 的 _local_maxima_1d 一致。"""
+    n = len(x)
+    out = []
+    i = 1
+    i_max = n - 1
+    while i < i_max:
+        if x[i - 1] < x[i]:
+            i_ahead = i + 1
+            while i_ahead < i_max and x[i_ahead] == x[i]:
+                i_ahead += 1
+            if x[i_ahead] < x[i]:                 # 兩側都比它低才算峰
+                out.append((i + i_ahead - 1) // 2)  # 平台取中點（向下取整）
+                i = i_ahead
+        i += 1
+    return np.asarray(out, dtype=int)
+
+
+def _prominences(x, peaks):
+    """地形突出度。與 scipy.signal.peak_prominences（wlen=None）同演算法。"""
+    out = np.empty(len(peaks), dtype=float)
+    n = len(x)
+    for k, pk in enumerate(peaks):
+        h = x[pk]
+        i = pk
+        left_min = h
+        while i >= 0 and x[i] <= h:
+            if x[i] < left_min:
+                left_min = x[i]
+            i -= 1
+        i = pk
+        right_min = h
+        while i < n and x[i] <= h:
+            if x[i] < right_min:
+                right_min = x[i]
+            i += 1
+        out[k] = h - max(left_min, right_min)
+    return out
+
+
+def _select_by_distance(peaks, priority, distance):
+    """距離篩選。與 scipy 的 _select_by_peak_distance 一致：
+    依 priority 由高到低保留，並把距離內的其他峰剔除。"""
+    n = len(peaks)
+    keep = np.ones(n, dtype=bool)
+    order = np.argsort(priority)[::-1]        # 高的先選
+    for j in order:
+        if not keep[j]:
+            continue
+        k = j - 1
+        while k >= 0 and peaks[j] - peaks[k] < distance:
+            keep[k] = False
+            k -= 1
+        k = j + 1
+        while k < n and peaks[k] - peaks[j] < distance:
+            keep[k] = False
+            k += 1
+    return keep
+
+
+def find_peaks_np(x, prominence, distance):
+    """find_peaks(x, prominence=..., distance=...) 的純 numpy 版。
+
+    ⚠ 篩選順序必須是「先距離、後突出度」——scipy 就是這個順序，反過來會
+      得到不同的峰集合，而且不會報錯。
+    """
+    x = np.asarray(x, dtype=float)
+    peaks = _local_maxima(x)
+    if len(peaks) == 0:
+        return peaks
+    if distance is not None and distance > 1:
+        peaks = peaks[_select_by_distance(peaks, x[peaks], distance)]
+    if prominence is not None and len(peaks):
+        peaks = peaks[_prominences(x, peaks) >= prominence]
+    return peaks
+
+
 def detect_vents(recs: list) -> list:
     """以 CH4 濃度的尖峰判定排氣事件。
 
@@ -116,12 +206,7 @@ def detect_vents(recs: list) -> list:
     ch4 = np.array([float(r.get("ch4_pct") or 0.0) for r in recs])
     if len(ch4) < VENT_MIN_DISTANCE:
         return []
-    try:
-        from scipy.signal import find_peaks
-        idx, _ = find_peaks(ch4, prominence=VENT_PROMINENCE, distance=VENT_MIN_DISTANCE)
-        return idx.tolist()
-    except ImportError:
-        return []
+    return find_peaks_np(ch4, VENT_PROMINENCE, VENT_MIN_DISTANCE).tolist()
 
 
 def build_training_set(recs: list):
@@ -188,202 +273,20 @@ def _loo_rmse(X: np.ndarray, y: np.ndarray) -> Optional[float]:
     return float(np.sqrt(np.mean(errs))) if errs else None
 
 
-# ── GA 特徵選擇（目標：最小化 LOO-CV RMSE）───────────────
-GA_POP, GA_GEN, GA_MUT, GA_ELITE = 24, 25, 0.12, 2
-_ga_cache: dict = {}          # 以訓練集指紋為 key，避免每次輪詢都重跑
+def predict(recs: list, selected=None) -> dict:
+    """對「進行中（最後一次排氣之後）」的週期預測其排氣時的 CH4 峰值。
 
+    `selected`：要拿哪些特徵擬合。由呼叫端從 ch4_attribution 模組最近一次的
+    結果取得；傳 None 就用全部特徵。
 
-def _ga_select(X: np.ndarray, y: np.ndarray, seed: int = 42):
-    """基因演算法挑特徵子集，適應度＝該子集的 LOO-CV RMSE（越小越好）。
+    ⚠ 特徵歸因（XGBoost + TreeSHAP，或退回 GA 搜尋）**不在這裡算**。它原本
+      是在常駐行程裡開背景執行緒跑的，而執行緒不是子行程——只要有人開過一次
+      CH4 面板，xgboost 就永久留在常駐核心裡（實測單獨 +119.5 MB，而預算是
+      60 MB）。2026-09-10 搬成 modules/ch4_attribution/ 的短命子行程。
 
-    與 ch4_peak_analysis.ga_feature_selection 同一套目標函式，差別只在此處為
-    線上即時計算、且用純 numpy 的 Ridge。加入子集大小的輕微懲罰，避免在
-    小樣本下靠塞入更多特徵來壓低 LOO-CV（過度配適的常見表現）。
+      切法沿用 r_b 那一套：閉式、numpy 就能算的留在核心保持**即時**，重相依
+      的進模組產出一個小結果。所以這支預測仍然是每次請求現算，沒有變成每小時。
     """
-    rng = np.random.default_rng(seed)
-    d = X.shape[1]
-
-    def fitness(mask: np.ndarray) -> float:
-        if not mask.any():
-            return 1e9
-        r = _loo_rmse(X[:, mask], y)
-        if r is None:
-            return 1e9
-        return r + 0.02 * mask.sum()          # 簡約性懲罰
-
-    pop = rng.random((GA_POP, d)) < 0.5
-    pop[0] = np.ones(d, dtype=bool)           # 全特徵基準也放進族群
-    scores = np.array([fitness(m) for m in pop])
-    history = [float(scores.min())]
-
-    for _ in range(GA_GEN):
-        order = np.argsort(scores)
-        new = [pop[i].copy() for i in order[:GA_ELITE]]     # 菁英保留
-        while len(new) < GA_POP:
-            # 錦標賽選擇
-            a, b = rng.integers(0, GA_POP, 2)
-            p1 = pop[a] if scores[a] < scores[b] else pop[b]
-            a, b = rng.integers(0, GA_POP, 2)
-            p2 = pop[a] if scores[a] < scores[b] else pop[b]
-            pt = rng.integers(1, d) if d > 1 else 1
-            child = np.concatenate([p1[:pt], p2[pt:]])
-            flip = rng.random(d) < GA_MUT
-            child = np.where(flip, ~child, child)
-            new.append(child)
-        pop = np.array(new)
-        scores = np.array([fitness(m) for m in pop])
-        history.append(float(scores.min()))
-
-    best = pop[int(np.argmin(scores))]
-    if not best.any():
-        best = np.ones(d, dtype=bool)
-    return best, _loo_rmse(X[:, best], y), history
-
-
-# ── XGBoost + TreeSHAP 特徵歸因（有裝 xgboost 才走，否則自動退回 GA+Ridge）──
-# 部署現實：監控電腦的常駐預算是 60 MB，xgboost 光磁碟就 97 MB，所以不列為
-# 必要相依。裝了就用它做更好的特徵歸因（非線性、原生 TreeSHAP），沒裝自動
-# 退回 GA+Ridge。（2026-09-01 之前這裡寫的理由是「後端在 Jetson」，Jetson 已退場。）
-def _xgb():
-    try:
-        import xgboost as xgb
-        return xgb
-    except Exception:
-        return None
-
-
-def _xgb_loo_rmse(xgb, X, y, params, rounds, max_folds: int = 12) -> float:
-    """交叉驗證 RMSE（XGBoost 版）。小樣本用留一；樣本較多時只抽 max_folds 折，
-    避免 LOO 的 O(n) 次 XGBoost 訓練隨排氣次數線性成長、拖慢即時端點。"""
-    n = len(y)
-    idx = np.arange(n)
-    if n > max_folds:                     # 均勻抽樣固定折數，成本封頂
-        idx = np.linspace(0, n - 1, max_folds).round().astype(int)
-    errs = []
-    for i in idx:
-        m = np.ones(n, dtype=bool); m[i] = False
-        if len(np.unique(y[m])) < 2:
-            continue
-        bst = xgb.train(params, xgb.DMatrix(X[m], label=y[m]), num_boost_round=rounds)
-        pred = float(bst.predict(xgb.DMatrix(X[i:i+1]))[0])
-        errs.append((pred - y[i]) ** 2)
-    return float(np.sqrt(np.mean(errs))) if errs else None
-
-
-def feature_analysis_xgb(xgb, X: np.ndarray, y: np.ndarray) -> dict:
-    """訓練（強正則化的）XGBoost，用內建 TreeSHAP 算每特徵平均|SHAP|當重要度。
-    小樣本（~27 循環）極易過擬合，故：淺樹 max_depth=2、少量 round、強 min_child_weight、
-    子抽樣，並以 LOO-CV RMSE 據實回報樣本外誤差、不看漂亮的訓練內配適。"""
-    params = {"max_depth": 2, "eta": 0.15, "min_child_weight": 3.0,
-              "subsample": 0.8, "colsample_bytree": 0.8, "lambda": 1.0,
-              "objective": "reg:squarederror", "seed": 42, "verbosity": 0}
-    rounds = 40
-    dall = xgb.DMatrix(X, label=y)
-    bst = xgb.train(params, dall, num_boost_round=rounds)
-
-    # 內建 TreeSHAP：每列每特徵的貢獻（最後一欄是基準值），平均|SHAP|＝重要度，
-    # 平均帶符號 SHAP 與特徵值的相關方向＝推高(+)/壓低(−)
-    contribs = bst.predict(dall, pred_contribs=True)[:, :len(FEATURE_NAMES)]
-    mean_abs = np.abs(contribs).mean(axis=0)
-    total = float(mean_abs.sum()) or 1.0
-    imp = []
-    for i, name in enumerate(FEATURE_NAMES):
-        if mean_abs[i] <= 1e-9:
-            continue
-        # 方向：SHAP 值與該特徵值的相關符號（正=特徵越大越推高 CH4）
-        col = X[:, i]
-        sign = 1.0
-        if np.std(col) > 1e-9 and np.std(contribs[:, i]) > 1e-9:
-            sign = float(np.sign(np.corrcoef(col, contribs[:, i])[0, 1]) or 1.0)
-        imp.append({"feature": name, "coef": round(sign * float(mean_abs[i]), 4),
-                    "weight": round(float(mean_abs[i]) / total, 4)})
-    imp.sort(key=lambda d: -d["weight"])
-
-    rmse = _xgb_loo_rmse(xgb, X, y, params, rounds)
-    selected = [d["feature"] for d in imp if d["weight"] >= 0.05]   # 佔比≥5% 視為有貢獻
-    return {
-        "method":        "xgboost_shap",
-        "selected":      selected or [imp[0]["feature"]] if imp else [],
-        "n_selected":    len(selected),
-        "n_total":       len(FEATURE_NAMES),
-        "rmse_selected": round(rmse, 3) if rmse is not None else None,
-        "rmse_all":      round(rmse, 3) if rmse is not None else None,
-        "importances":   imp,
-        "cached":        False,
-    }
-
-
-import threading
-_fa_lock = threading.Lock()
-_fa_pending: set = set()          # 正在背景計算的指紋
-
-
-def _feature_analysis_sync(X: np.ndarray, y: np.ndarray, fingerprint: str) -> dict:
-    """實際計算特徵歸因（XGBoost 或退回 GA+Ridge）。CPU 密集，故由背景執行緒呼叫。"""
-    xgb = _xgb()
-    if xgb is not None:
-        try:
-            return feature_analysis_xgb(xgb, X, y)
-        except Exception:
-            pass          # xgboost 失敗（罕見）→ 退回 GA+Ridge
-
-    mask, rmse_sel, hist = _ga_select(X, y)
-    rmse_all = _loo_rmse(X, y)
-
-    # 特徵已標準化，故 |係數| 可直接互相比較，作為重要度
-    model = _Ridge().fit(X[:, mask], y)
-    coefs = model.beta
-    total = float(np.abs(coefs).sum()) or 1.0
-    imp = sorted(
-        [{"feature": FEATURE_NAMES[i], "coef": round(float(c), 4),
-          "weight": round(float(abs(c)) / total, 4)}
-         for i, c in zip(np.where(mask)[0], coefs)],
-        key=lambda d: -d["weight"])
-
-    return {
-        "method":        "ga_ridge",
-        "selected":      [FEATURE_NAMES[i] for i in np.where(mask)[0]],
-        "n_selected":    int(mask.sum()),
-        "n_total":       len(FEATURE_NAMES),
-        "rmse_selected": round(rmse_sel, 3) if rmse_sel is not None else None,
-        "rmse_all":      round(rmse_all, 3) if rmse_all is not None else None,
-        "ga_history":    [round(h, 3) for h in hist],
-        "importances":   imp,
-        "cached":        False,
-    }
-
-
-def feature_analysis(X: np.ndarray, y: np.ndarray, fingerprint: str):
-    """非阻塞特徵歸因：CPU 密集的 XGBoost/GA 一律在**背景執行緒**算，請求路徑
-    絕不等它。回傳規則——
-      已算好 → 回快取結果（帶 computing=False）
-      尚未算 → 觸發背景計算並回 None（前端顯示「計算中」，下次輪詢就有）
-    如此即使新排氣觸發重算，即時面板與批次輪詢都不會被那 ~1 秒 XGBoost 卡住。"""
-    with _fa_lock:
-        if fingerprint in _ga_cache:
-            return {**_ga_cache[fingerprint], "cached": True}
-        if fingerprint in _fa_pending:
-            return None                    # 背景計算中
-        _fa_pending.add(fingerprint)
-
-    def worker(Xw, yw, fp):
-        try:
-            res = _feature_analysis_sync(Xw, yw, fp)
-            with _fa_lock:
-                _ga_cache.clear()          # 只留最新一份
-                _ga_cache[fp] = res
-        except Exception:
-            pass
-        finally:
-            with _fa_lock:
-                _fa_pending.discard(fp)
-
-    threading.Thread(target=worker, args=(X.copy(), y.copy(), fingerprint), daemon=True).start()
-    return None
-
-
-def predict(recs: list) -> dict:
-    """對「進行中（最後一次排氣之後）」的週期預測其排氣時的 CH4 峰值。"""
     out = {
         "status":        "insufficient",
         "n_train":       0,
@@ -423,19 +326,24 @@ def predict(recs: list) -> dict:
         out["reliability"] = "目前週期資料過短，尚無法預測"
         return out
 
-    # 特徵歸因：背景執行緒計算，請求不等它（None＝計算中，下次輪詢就有）
-    fp = f"{len(y)}|{meta[-1]['vent_time'] if meta else ''}"
-    try:
-        fa = feature_analysis(X, y, fp)
-        out["feature_selection"] = fa if fa is not None else {"computing": True}
-    except Exception as e:
-        out["feature_selection"] = {"error": f"{type(e).__name__}: {e}"}
-        fa = None
+    # ⚠ 訓練集指紋要回報出去。歸因是模組排程算的，可能落後於目前的訓練集；
+    #   呼叫端拿它和模組結果裡的指紋比對，就知道這次用的選擇是不是舊的。
+    out["training_fingerprint"] = f"{len(y)}|{meta[-1]['vent_time'] if meta else ''}"
 
-    # 預測改用 GA 選中的子集——特徵選擇的意義就在於用它來建模
+    # 預測用歸因選中的子集——特徵選擇的意義就在於用它來建模。
+    # ⚠ 「用全部特徵」與「用選中的子集」會給出**不同的預測值**，所以
+    #   n_features_used 也要回報，否則看的人分不出眼前這個數字是哪一種。
     try:
-        cols = ([FEATURE_NAMES.index(f) for f in fa["selected"]]
-                if fa and fa.get("selected") else list(range(len(FEATURE_NAMES))))
+        cols = ([FEATURE_NAMES.index(f) for f in selected]
+                if selected else list(range(len(FEATURE_NAMES))))
+    except ValueError as e:
+        # 模組給的特徵名核心不認得（兩邊版本不一致）→ 退回全部特徵。
+        # 靜默錯配比退回更糟：那會拿錯的欄位去擬合，而且不會報錯。
+        out["feature_note"] = "歸因結果的特徵名對不上，已改用全部特徵：%s" % e
+        cols = list(range(len(FEATURE_NAMES)))
+    out["n_features_used"] = len(cols)
+
+    try:
         model = _Ridge().fit(X[:, cols], y)
         pred = float(model.predict(np.array([[cur[FEATURE_NAMES[i]] for i in cols]]))[0])
     except np.linalg.LinAlgError:

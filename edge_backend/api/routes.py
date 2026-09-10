@@ -345,8 +345,40 @@ def ch4_prediction():
     且不給預測值，這是刻意設計。
     """
     from core import ch4_realtime
+    from core import module_runner as mr
     try:
-        return ch4_realtime.predict(_sorted_records())
+        # ⚠ 特徵歸因由 modules/ch4_attribution/ 的子行程排程算，不在請求路徑上。
+        #   它原本是核心的背景**執行緒**——執行緒不是子行程，所以只要有人開過
+        #   一次這個面板，xgboost 就永久留在常駐行程（實測單獨 +119.5 MB，
+        #   而預算是 60 MB）。切法沿用 r_b：閉式的留核心即時算，重的進模組。
+        #
+        # ⚠ 預測**仍然是即時的**。搬走的只有歸因，不是預測值本身。
+        selected, fa = None, None
+        got = mr.last_result("ch4_attribution")
+        if got.get("status") == "ok":
+            row = got["result"]
+            fa = dict(row.get("payload") or {})
+            fa["computed_at"] = row.get("computed_at")
+            fa["module_version"] = row.get("module_version")
+            if fa.get("status") == "ok":
+                selected = fa.get("selected") or None
+
+        out = ch4_realtime.predict(_sorted_records(), selected=selected)
+
+        if fa is None:
+            out["feature_selection"] = {
+                "status": "never_run",
+                "message": "特徵歸因尚未跑過，本次預測使用全部特徵。"
+                           "它每 60 分鐘自動更新；要立刻重算請呼叫 "
+                           "POST /api/modules/ch4_attribution/run。",
+            }
+        else:
+            # ⚠ 歸因可能落後於目前的訓練集（期間又排了幾次氣）。要講出來——
+            #   用舊的特徵選擇擬合不會報錯，只會靜默給出對不上的預測值。
+            fa["stale"] = bool(fa.get("fingerprint")
+                               and fa["fingerprint"] != out.get("training_fingerprint"))
+            out["feature_selection"] = fa
+        return out
     except Exception as e:
         # 這是選配的分析功能，壞掉不應讓前端整頁報錯或讓控制台誤判後端掛了
         return {"status": "error", "n_train": 0, "predicted_peak": None,

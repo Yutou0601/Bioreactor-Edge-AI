@@ -4,7 +4,7 @@
 
     python system_test.py
 
-十一項檢查，由內而外：
+十二項檢查，由內而外：
 
   1 記憶體守門  常駐核心不得載入 torch/pandas/sklearn/scipy/xgboost
   2 估計器一致  線上實作 vs 離線腳本，逐段比對 (曲率, k, r_b)
@@ -17,6 +17,7 @@
   9 記憶體守門  **操作過之後**再檢查一次——第 1 項擋不住請求路徑偷渡
  10 分析模組    子行程隔離：跑模組不得把它的相依帶進常駐核心
  11 sample 表   重啟不掉資料；還原有上限（不然一年份吃 259 MB）
+ 12 CH4 即時路徑 不得拉進 scipy／xgboost；find_peaks 與 scipy 逐點一致
 
 ⚠ 第 1 項是最容易悄悄回歸的。torch 曾經因為 routes.py 一行模組層級
   import 而在每次啟動時載入 496 MB，而且沒有任何錯誤訊息。
@@ -526,6 +527,75 @@ finally:
         os.environ.pop('REACTOR_DB', None)
     else:
         os.environ['REACTOR_DB'] = _prev_sdb
+
+# ── 12 CH4 即時路徑（不得依賴 scipy／xgboost）──────────────────
+print('')
+print('12. CH4 即時路徑')
+# ⚠ CH4 這條路徑上曾經有**兩個**重相依，而且都躲在「延遲 import」後面：
+#   · xgboost（單獨 +119.5 MB）——在核心的背景**執行緒**裡跑。執行緒不是
+#     子行程，所以只要有人開過一次 CH4 面板就永久留著。已搬成模組。
+#   · scipy.signal.find_peaks（numpy 之後再 +69.6 MB，比整個預算還大）——
+#     寫在 detect_vents 函式裡，但 detect_vents 在**即時請求路徑**上。
+#     已改成純 numpy 實作。
+#
+#   兩個都不會報錯、都不影響功能、都是慢慢把常駐行程撐大。這一組守它們。
+try:
+    _before = set(sys.modules)
+    _r = c.get('/api/ch4_prediction')
+    _gained = [m for m in ('scipy', 'xgboost', 'torch', 'sklearn')
+               if m not in _before and m in sys.modules]
+    check('GET /api/ch4_prediction', _r.status_code == 200,
+          'HTTP %d' % _r.status_code)
+    check('★ 即時預測不得拉進 scipy／xgboost', not _gained,
+          ('★ 多了 ' + ', '.join(_gained)) if _gained else '只用 numpy')
+
+    _j = _r.json()
+    check('回應含特徵歸因欄位', 'feature_selection' in _j,
+          'status=%s' % (_j.get('feature_selection') or {}).get('status'))
+
+    # ★ 純 numpy 的 find_peaks 必須與 scipy **逐點相同**。這不是「差不多的
+    #   實作」——峰的位置決定循環怎麼切，切錯不會報錯，只會讓所有下游數字
+    #   靜默偏掉。開發機有裝 scipy 就在這裡重跑比對；監控電腦沒裝就跳過。
+    try:
+        from scipy.signal import find_peaks as _sp_find_peaks
+    except ImportError:
+        _sp_find_peaks = None
+    if _sp_find_peaks is None:
+        check('★ find_peaks 與 scipy 一致', True, '本機未裝 scipy，跳過比對')
+    else:
+        import numpy as _np
+        from core.ch4_realtime import find_peaks_np as _np_find_peaks
+        _rng = _np.random.default_rng(12345)
+        _bad = _npk = 0
+        for _t in range(400):
+            _n = int(_rng.integers(3, 300))
+            _kind = _t % 4
+            if _kind == 0:
+                _a = _rng.normal(0, 1, _n)                     # 連續
+            elif _kind == 1:
+                _a = _np.round(_rng.normal(0, 1, _n))          # 大量平台
+            elif _kind == 2:
+                _a = _np.round(_rng.normal(0, 3, _n), 1)       # 少量平台
+            else:
+                _a = _np.full(_n, 5.0)                         # 幾乎全平
+                _a[_rng.integers(0, _n, 3)] = 9.0
+            _prom = float(_rng.choice([0.3, 1.0, 5.0]))
+            _dist = int(_rng.integers(1, 30)) if _t % 2 else None
+            _ref, _ = _sp_find_peaks(_a, prominence=_prom, distance=_dist)
+            _got = _np_find_peaks(_a, _prom, _dist)
+            _npk += len(_ref)
+            if list(_ref) != list(_got):
+                _bad += 1
+        check('★ find_peaks 與 scipy 逐點一致', _bad == 0,
+              '400 組隨機訊號、%d 個峰，不一致 %d 組' % (_npk, _bad))
+
+    # ch4_attribution 模組要跑得起來（樣本不足也算成功——那是正常狀態）
+    _res = mr.run_module('ch4_attribution')
+    check('ch4_attribution 模組可執行', _res.get('ok'),
+          'exit=%s %s' % (_res.get('exit_code'),
+                          (_res.get('log') or _res.get('error') or '').strip()[:80]))
+except Exception as _e:                                      # noqa: BLE001
+    check('CH4 即時路徑', False, '%s: %s' % (type(_e).__name__, _e))
 
 # ── 總結 ────────────────────────────────────────────────────
 print('\n' + '=' * 64)
