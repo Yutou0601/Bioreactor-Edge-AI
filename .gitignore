@@ -39,7 +39,7 @@ node_modules/
 # ⚠ dist/ 刻意**不** ignore（2026-09-03）。監控電腦是用 git pull 更新的，
 #   它沒有裝 node/npm，前端必須以建置好的形式進版控，否則拉下去只有後端、
 #   打開網頁是 404。體積約 1.3 MB，只在前端有改時才變動。
-#   發布流程見 docs/開發與部署流程.md。
+#   發布流程見 docs/system/開發與部署流程.md。
 
 # =========================
 # ⚠ 現場執行期資料——絕對不可進版控，也不可被 git clean 刪掉
@@ -70,3 +70,7 @@ edge_backend/.env
 # 模組執行時核心寫給它的輸入快照。每次執行都重寫，是執行期產物不是原始碼。
 edge_backend/modules/*/_input.json
 edge_backend/modules/*/_input.json.tmp
+
+# 開發測試伺服器：檔頭自己寫明「本機用，不進版控」。它會灌合成資料，
+# 誤上監控電腦會污染現場紀錄。
+dev_test_server.py

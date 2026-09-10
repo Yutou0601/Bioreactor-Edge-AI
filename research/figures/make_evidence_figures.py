@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
 """產生證據鏈文件的圖表 → docs/figures/
 
-每張圖對應 docs/證據鏈_CO2溶解與生物消耗分離_2026-07-16.md 的一個章節。
+每張圖對應 docs/analysis/證據鏈_CO2溶解與生物消耗分離_2026-07-16.md 的一個章節。
 只用可信訊號（壓力x2/ORP/pH）作圖；CO2/CH4 僅出現在「說明它為何無效」的圖裡。
 """
 # ── 搬進子資料夾後，research/ 根層的共用模組（analyze_three_batches 等）

@@ -1,0 +1,8 @@
+﻿baseline,rho_mean,rho_sd,recovered_median
+B0,0.2688,0.0586,0.013185
+B1,0.1219,0.0785,0.013952
+B2,0.7760,0.0534,-0.005824
+
+rho_observed,0.7900
+rb_observed_median,0.013163
+n_cycles,207

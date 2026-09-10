@@ -958,7 +958,7 @@ async def import_csv(file: UploadFile = File(...)):
 # ==========================================
 # ⚠ 只依賴 core.cycle_store（numpy + sqlite3）。不得在此引入 pandas
 #   等重量級套件——常駐核心的記憶體預算是 60 MB，見
-#   docs/系統重構架構_2026-08-31.md。
+#   docs/system/系統重構架構_2026-08-31.md。
 
 @router.get("/cycles")
 def api_cycles(limit: int = Query(500, ge=1, le=5000),
@@ -1131,7 +1131,7 @@ def api_ingest_folder(folder: str = Query(..., description="CSV 資料夾路徑"
 # ==========================================
 # 分析模組（獨立子行程，不進常駐核心）
 # ==========================================
-# 見 docs/系統重構架構_2026-08-31.md §3-§4。核心從不 import 模組的程式碼，
+# 見 docs/system/系統重構架構_2026-08-31.md §3-§4。核心從不 import 模組的程式碼，
 # 只用 subprocess 啟動它們；所以新增一個分析不必改這裡，也不必改前端。
 
 @router.get("/modules")

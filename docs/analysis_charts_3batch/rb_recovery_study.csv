@@ -1,0 +1,7 @@
+﻿curv_threshold,0.45
+n_kept,301,of,351
+rb_median,0.011790
+rb_pos_frac,0.7940
+spearman_rb_k,0.8292
+null_median,0.000080
+perm_p,0.0244

@@ -1,0 +1,9 @@
+﻿param,value
+kLa,0.053645
+p_star,0.405297
+vmax,0.040270
+KH,2.000000
+fCH4_0,0.220452
+train_rmse,0.045061
+predict_1to1_rmse,0.048959
+old_predict_1to1_rmse,0.040978

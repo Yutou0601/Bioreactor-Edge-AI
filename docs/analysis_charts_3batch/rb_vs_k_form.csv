@@ -1,0 +1,13 @@
+﻿form,params,heldout_score
+C,0.0160,0.4271
+L,0.0032  0.0400,0.5333
+S,0.0238  0.7280,0.5756
+
+recovery_truth,score_C,score_L,score_S,picked
+C,0.7443,0.8415,0.4061,S
+L,0.4977,0.1505,0.1192,S
+S,0.3221,0.8527,0.1353,S
+
+forms_distinguishable,False
+winner,C
+rb_median,0.011721
