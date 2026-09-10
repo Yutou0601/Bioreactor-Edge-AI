@@ -4,7 +4,7 @@
 
     python system_test.py
 
-十二項檢查，由內而外：
+十三項檢查，由內而外：
 
   1 記憶體守門  常駐核心不得載入 torch/pandas/sklearn/scipy/xgboost
   2 估計器一致  線上實作 vs 離線腳本，逐段比對 (曲率, k, r_b)
@@ -18,6 +18,7 @@
  10 分析模組    子行程隔離：跑模組不得把它的相依帶進常駐核心
  11 sample 表   重啟不掉資料；還原有上限（不然一年份吃 259 MB）
  12 CH4 即時路徑 不得拉進 scipy／xgboost；find_peaks 與 scipy 逐點一致
+ 13 下降報表    化學計量與 batch_rates 相同；短視窗與不可能份額要示警
 
 ⚠ 第 1 項是最容易悄悄回歸的。torch 曾經因為 routes.py 一行模組層級
   import 而在每次啟動時載入 496 MB，而且沒有任何錯誤訊息。
@@ -207,7 +208,8 @@ try:
     # ⚠ SPA 路由回退：vue-router 用 createWebHistory，/rate 等路徑在伺服器
     #   上沒有對應檔案。只掛 StaticFiles(html=True) 的話，直接輸入網址或
     #   在該頁重新整理就會 404。實際踩過一次。
-    for sub in ('/rate', '/report', '/experiment', '/import', '/modules'):
+    for sub in ('/rate', '/report', '/experiment', '/import', '/modules',
+            '/descent'):
         r = c.get(sub)
         check('前端路由 %s 回退到 index.html' % sub,
               r.status_code == 200 and '<html' in r.text[:200].lower(),
@@ -596,6 +598,94 @@ try:
                           (_res.get('log') or _res.get('error') or '').strip()[:80]))
 except Exception as _e:                                      # noqa: BLE001
     check('CH4 即時路徑', False, '%s: %s' % (type(_e).__name__, _e))
+
+# ── 13 每段下降報表與化學計量 ───────────────────────────────
+print('')
+print('13. 每段下降報表（2026-09-11 會議需求）')
+# ⚠ 這一組的重點不是「跑得動」，是三件容易靜默出錯的事：
+#   1 化學計量必須與既有的 batch_rates.py **逐位元相同**，否則新功能算出來
+#     的份額與論文/報表對不上，而且不會有人發現。
+#   2 視窗太短時要**講出來**。量化階是 0.01 kgf/cm²，10 分鐘只掉約 0.005，
+#     實測 61% 的 10 分鐘視窗壓力一個數字都沒動——那種斜率是雜訊不是速率。
+#   3 物理上不可能的份額（>100% 或負值）要擋。實測直接用段落端點的 CH4，
+#     46 段**全部**算出負份額，因為那些讀數是管路拖尾不是排氣尖峰。
+from core import descent_report as dr                          # noqa: E402
+from core.cycle_store import read_series_full                  # noqa: E402
+
+try:
+    _paths = sorted(glob.glob(os.path.join(folder, '*.csv')))
+    _got = read_series_full(_paths)
+    check('read_series_full 讀得到資料', _got is not None,
+          '%d 檔' % len(_paths))
+    _ts, _hr, _p, _tp, _co2, _ch4 = _got
+
+    # ★ 驗收 1：化學計量與 batch_rates.py 相同
+    #   ch4 分壓 = f2*(Pg2+ATM) - f1*(Pg1+ATM)，這是既有腳本的定義
+    for _nm, _f1, _f2, _Pg1, _Pg2 in (('批次2', 0.0856, 0.3484, 1.191, 1.014),
+                                      ('批次3', 0.0841, 0.4304, 1.165, 0.962)):
+        _want = _f2 * (_Pg2 + dr.ATM) - _f1 * (_Pg1 + dr.ATM)
+        _r = dr.stoichiometry(1.0, _f1, _f2, _Pg1, _Pg2)
+        check('★ %s 的 CH4 分壓與 batch_rates 相同' % _nm,
+              abs(_r['ch4_gain_kgf_cm2'] - round(_want, 5)) < 1e-9,
+              '%.5f（應為 %.5f）' % (_r['ch4_gain_kgf_cm2'], _want))
+
+    # ★ 驗收 2：短視窗要示警
+    _o10 = dr.analyze(_ts, _hr, _p, window_min=10)
+    _o180 = dr.analyze(_ts, _hr, _p, window_min=180)
+    check('切得出下降段', _o10['n_segments'] > 0, '%d 段' % _o10['n_segments'])
+    _f10 = _o10['summary'].get('frac_windows_below_quantum')
+    _f180 = _o180['summary'].get('frac_windows_below_quantum')
+    check('★ 10 分鐘視窗大多低於感測器分辨力', _f10 is not None and _f10 > 0.5,
+          '%.0f%% 低於量化階' % (_f10 * 100 if _f10 else -1))
+    check('★ 10 分鐘視窗會示警', '⚠' in (_o10['summary'].get('window_verdict') or ''),
+          (_o10['summary'].get('window_verdict') or '')[:48])
+    check('180 分鐘視窗可用', _f180 is not None and _f180 < 0.2,
+          '%.0f%% 低於量化階' % (_f180 * 100 if _f180 is not None else -1))
+
+    # ★ 驗收 3：不可能的份額要擋（兩個方向）
+    _over = dr.stoichiometry(0.1, 0.0, 0.5, 1.0, 1.0)          # 份額遠超上限
+    check('★ 份額超過化學計量上限會被擋', _over.get('status') == 'implausible',
+          (_over.get('warning') or '★ 沒擋')[:46])
+    _neg = dr.stoichiometry(0.1, 0.5, 0.0, 1.0, 1.0)           # CH4 不升反降
+    check('★ 負的生物份額會被擋', _neg.get('status') == 'implausible',
+          (_neg.get('warning') or '★ 沒擋')[:46])
+
+    # 逐段直接用端點 CH4：實測應該全部不可用（這是「自動化不穩」的量化證據）
+    _oc = dr.analyze(_ts, _hr, _p, window_min=180, temps=_tp, ch4_pct=_ch4)
+    _bad = sum(1 for r in _oc['segments']
+               if (r.get('stoichiometry') or {}).get('status') == 'implausible')
+    check('段落端點的 CH4 不可用（會被標出來而不是靜默採用）',
+          _bad == _oc['n_segments'],
+          '%d/%d 段被標為不可用' % (_bad, _oc['n_segments']))
+
+    # 排氣錨點：錨點數就是樣本數，要誠實回報
+    _vi = dr.vent_intervals(_ts, _hr, _p, _ch4, temps=_tp)
+    check('排氣錨點分析可執行', _vi['n_anchors'] >= 0,
+          '錨點 %d、區間 %d、通過 %d'
+          % (_vi['n_anchors'], _vi['n_intervals'], _vi['n_usable']))
+    check('回報涵蓋率（錨點少時要看得出來）',
+          '錨點' in (_vi.get('coverage_note') or ''),
+          (_vi.get('coverage_note') or '')[:40])
+
+    # ★ 常駐核心不得因此變重
+    _b = set(sys.modules)
+    dr.analyze(_ts, _hr, _p, window_min=180)
+    _g = [m for m in ('scipy', 'pandas', 'xgboost', 'torch', 'sklearn')
+          if m not in _b and m in sys.modules]
+    check('★ 下降報表只用 numpy', not _g,
+          ('★ 多了 ' + ', '.join(_g)) if _g else '沒有新增重量級套件')
+
+    # API
+    _r = c.post('/api/descent_report', params={'folder': folder,
+                                               'window_min': 180})
+    check('POST /api/descent_report', _r.status_code == 200,
+          'HTTP %d，%s 段' % (_r.status_code,
+                             (_r.json() or {}).get('n_segments', '?')))
+    _r = c.post('/api/descent_report', params={'window_min': 180})
+    check('沒給 files 或 folder 要回 400', _r.status_code == 400,
+          'HTTP %d' % _r.status_code)
+except Exception as _e:                                      # noqa: BLE001
+    check('每段下降報表', False, '%s: %s' % (type(_e).__name__, _e))
 
 # ── 總結 ────────────────────────────────────────────────────
 print('\n' + '=' * 64)

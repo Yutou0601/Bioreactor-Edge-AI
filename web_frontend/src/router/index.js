@@ -5,6 +5,7 @@ import ExperimentView from '../views/ExperimentView.vue'
 import RateView from '../views/RateView.vue'
 import ImportView from '../views/ImportView.vue'
 import ModulesView from '../views/ModulesView.vue'
+import DescentView from '../views/DescentView.vue'
 
 export default createRouter({
   history: createWebHistory(),
@@ -15,5 +16,6 @@ export default createRouter({
     { path: '/rate',       component: RateView    },
     { path: '/import',     component: ImportView  },
     { path: '/modules',    component: ModulesView },
+    { path: '/descent',    component: DescentView },
   ],
 })

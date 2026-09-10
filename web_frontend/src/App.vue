@@ -11,6 +11,7 @@ import { RouterView, RouterLink } from 'vue-router'
       <RouterLink to="/report">研究分析</RouterLink>
       <RouterLink to="/rate">生物速率</RouterLink>
       <RouterLink to="/import">資料匯入</RouterLink>
+      <RouterLink to="/descent">下降報表</RouterLink>
       <RouterLink to="/modules">分析模組</RouterLink>
     </nav>
     <RouterView />

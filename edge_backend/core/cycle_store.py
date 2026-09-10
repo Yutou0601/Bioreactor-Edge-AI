@@ -23,6 +23,9 @@ CALIB_PATH = os.path.join(HERE, 'calibration.json')
 
 # 欄位索引：與 multivariate_increments.py 同步，勿單方面修改。
 I_P_REACTOR = 11      # 反應器壓力
+I_TEMP = 10           # 溫度（理想氣體換算要用）
+I_CO2 = 12            # CO2 %（⚠ 99.98% 是管路拖尾，只有排氣瞬間可信）
+I_CH4 = 13            # CH4 %（同上）
 I_ORP = 7             # ORP（記錄只存絕對值，真值為負）
 I_PH = 9              # pH
 WASH_PER_DAY = 6      # 每日循環起始超過此數視為洗管線日
@@ -98,6 +101,64 @@ def _read_one(path):
     if not ts:
         return None
     return ts, pres
+
+
+def _read_one_full(path):
+    """同 _read_one，但一併取出溫度與氣體濃度。
+
+    ⚠ 欄位索引與 _read_one 共用同一組常數，不要在這裡另外推測。位置式欄位：
+        年,月,日,時,分,秒,_,ORP,?,pH,溫度,壓力,CO2,CH4
+    """
+    ts, pres, temp, co2, ch4 = [], [], [], [], []
+    with open(path, encoding='utf-8', errors='replace') as fh:
+        for line in fh:
+            p = line.strip().split(',')
+            if len(p) < 14:
+                continue
+            try:
+                ts.append(datetime(int(p[0]), int(p[1]), int(p[2]),
+                                   int(p[3]), int(p[4]), int(float(p[5]))))
+                pres.append(float(p[I_P_REACTOR]))
+            except (ValueError, IndexError):
+                continue
+            def _num(i):
+                try:
+                    return float(p[i])
+                except (ValueError, IndexError):
+                    return None
+            temp.append(_num(I_TEMP))
+            co2.append(_num(I_CO2))
+            ch4.append(_num(I_CH4))
+    if not ts:
+        return None
+    return ts, pres, temp, co2, ch4
+
+
+def read_series_full(paths):
+    """讀多個 CSV，合併排序，回傳 (ts, hours, pressure, temp, co2, ch4)。
+
+    ⚠ 與 read_series 一樣**必須整批讀完再排序**，不可逐檔處理：BTP_Sensor_log
+      是一天一檔而循環中位長 10.2 小時，大多跨過午夜；逐檔切段會把跨日的一段
+      攔腰砍斷，時長與振幅都錯。
+    """
+    ts, pres, temp, co2, ch4 = [], [], [], [], []
+    for path in paths:
+        got = _read_one_full(path)
+        if got is None:
+            continue
+        ts.extend(got[0]); pres.extend(got[1])
+        temp.extend(got[2]); co2.extend(got[3]); ch4.extend(got[4])
+    if len(ts) < 60:
+        return None
+    order = sorted(range(len(ts)), key=lambda i: ts[i])
+    ts = [ts[i] for i in order]
+    pres = np.asarray([pres[i] for i in order], dtype=float)
+    temp = [temp[i] for i in order]
+    co2 = [co2[i] for i in order]
+    ch4 = [ch4[i] for i in order]
+    t0 = ts[0]
+    hours = np.array([(x - t0).total_seconds() / 3600.0 for x in ts])
+    return ts, hours, pres, temp, co2, ch4
 
 
 def read_series(paths):

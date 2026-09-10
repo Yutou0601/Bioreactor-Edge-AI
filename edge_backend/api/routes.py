@@ -1284,3 +1284,78 @@ def api_samples_window(
     from core import sample_store
     rows = sample_store.load_window(start, end)
     return {"start": start, "end": end, "n": len(rows), "records": rows}
+
+
+# ==========================================
+# 每段下降報表（2026-09-11 會議需求）
+# ==========================================
+@router.post("/descent_report")
+async def api_descent_report(
+    files: list[UploadFile] = File(None, description="CSV 檔（可多選）"),
+    folder: str = Query(None, description="伺服器上的資料夾路徑（與 files 二選一）"),
+    window_min: int = Query(180, ge=1, le=1440, description="視窗長度（分鐘）"),
+    volume_l: float = Query(None, gt=0, description="頭空體積（L）；給了才算絕對莫耳數"),
+):
+    """丟 CSV → 每段壓力的總下降、平均速率、斜率，以及化學計量反推。
+
+    ⚠ **要一次丟整個期間，不要一天一天丟。** BTP_Sensor_log 是一天一檔，
+      而循環中位長 7 小時、大多跨過午夜；逐檔處理會把跨日的一段攔腰砍斷，
+      時長與振幅都錯，而且結果看起來完全正常。所以這個端點收多檔或整個
+      資料夾，讀完**合併排序後**才切段。
+
+    ⚠ `window_min` 預設 180 分鐘不是隨便選的。感測器量化階是 0.01 kgf/cm²，
+      而典型下降速率中位數 0.033 kgf/cm²/hr——10 分鐘只掉約 0.005，實測
+      有 61% 的 10 分鐘視窗壓力一個數字都沒動。回應裡的 window_verdict
+      會講明這次選的視窗量不量得到。
+    """
+    import tempfile as _tf
+    from core import cycle_store as cs
+    from core import descent_report as dr
+
+    paths, tmpdir = [], None
+    if folder:
+        if not os.path.isdir(folder):
+            raise HTTPException(status_code=400, detail="資料夾不存在: %s" % folder)
+        import glob as _glob
+        paths = sorted(_glob.glob(os.path.join(folder, "*.csv")))
+    elif files:
+        tmpdir = _tf.mkdtemp(prefix="descent_")
+        for f in files:
+            dest = os.path.join(tmpdir, os.path.basename(f.filename or "x.csv"))
+            with open(dest, "wb") as fh:
+                fh.write(await f.read())
+            paths.append(dest)
+        paths.sort()
+    else:
+        raise HTTPException(status_code=400, detail="請提供 files 或 folder")
+
+    if not paths:
+        raise HTTPException(status_code=400, detail="沒有找到 CSV 檔")
+
+    try:
+        got = cs.read_series_full(paths)
+        if got is None:
+            raise HTTPException(status_code=400,
+                                detail="資料不足（少於 60 筆可解析的列）")
+        ts, hours, pressure, temp, co2, ch4 = got
+        out = dr.analyze(ts, hours, pressure, window_min=window_min,
+                         temps=temp, ch4_pct=ch4, volume_l=volume_l)
+        # ⚠ 段落端點的 CH4 幾乎一定是拖尾，逐段歸因會全部算出負份額。
+        #   真正可用的是**排氣尖峰之間**的區間——那才是會議要的「排完才知道
+        #   剩多少、這段時間轉換了多少」。兩份結果一起回，讓人看得到差別。
+        out["vent_intervals"] = dr.vent_intervals(
+            ts, hours, pressure, ch4, temps=temp, volume_l=volume_l)
+        out["n_files"] = len(paths)
+        out["n_rows"] = len(ts)
+        out["ts_first"] = ts[0].isoformat(sep=" ")
+        out["ts_last"] = ts[-1].isoformat(sep=" ")
+        # ⚠ 段內的 CH4 讀數 99.98% 是管路拖尾，不是頭空組成。端點取值只有在
+        #   那一刻剛好是排氣尖峰時才有意義，所以化學計量結果一律附這句。
+        out["ch4_caveat"] = ("CH4 濃度只有排氣瞬間可信（其餘時間是管路拖尾），"
+                             "而取樣是一分鐘一筆，尖峰常被錯過。段落端點的 CH4 "
+                             "若不是排氣當下的值，化學計量結果不可引用。")
+        return out
+    finally:
+        if tmpdir:
+            import shutil as _sh
+            _sh.rmtree(tmpdir, ignore_errors=True)
