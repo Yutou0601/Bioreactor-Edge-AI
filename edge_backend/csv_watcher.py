@@ -1,157 +1,108 @@
-"""
-CSV 監看轉發器
-================
-監控電腦上的感測器軟體持續把資料寫進 BTP_Sensor_log-YYYY-MM-DD.csv，欄位為
-舊版序列埠格式（年,月,日,時,分,秒,_,ORP(mV),反應器壓力,pH,溫度,混合槽壓力,
-CO2%,CH4%，多一行中文標題），與 usb_receiver.py 直讀序列埠時解析的格式相同。
-這支腳本不走序列埠，而是輪詢該檔案，偵測到新增列就套用跟 usb_receiver.py
-相同的 ORP 訊號前處理（一階差分去突波 + 線性內插 + EMA），確保轉發給 Jetson
-的 ORP 值跟模型訓練時看到的資料型態一致，而不是直接轉發未處理的原始值。
-處理完 publish 到 Jetson 的 MQTT reactor/01/sensors（Jetson 上的
-core/mqtt_client.py 已在訂閱這個主題，收到後自動推論並發布
-reactor/01/prediction，前端訂閱即可顯示即時結果）。
 
-使用方式：
+# -*- coding: utf-8 -*-
+"""監看記錄程式寫出的 CSV 資料夾，有新資料就請後端重新匯入。
+
+2026-09-01 改寫。原本這支是把 CSV 逐行轉發到 Jetson 的 MQTT broker；
+Jetson 退場、前後端同機之後，那條路徑整段消失，改成直接呼叫
+POST /api/ingest_folder。
+
     python csv_watcher.py --dir "C:\\Users\\BTP\\Desktop\\data"
-    python csv_watcher.py --dir "C:\\Users\\BTP\\Desktop\\data" --broker 192.168.55.1 --poll 5
 
-換日時會自動切到新的一天的檔案，重新開始計算已轉發的列數並重置訊號處理器，
-Ctrl+C 結束。
+⚠ 以**整個資料夾**送出，不逐檔處理。BTP_Sensor_log 是一天一檔，而循環
+  中位長 10.2 小時、大多跨過午夜；逐檔匯入會把跨日的一段攔腰砍斷，
+  時長與振幅都會錯（實測：同一批資料 25 段/0.0116 變成 32 段/0.0085）。
+
+⚠ 匯入是冪等的：cycle 表對 (source, ts_start) 有 UNIQUE 條件，重複匯入
+  只會寫入真正新增的段，所以可以放心地整個資料夾重送。
+
+⚠ 只用標準函式庫。這支跑在監控電腦上，與常駐核心共用同一份 60 MB 預算。
 """
-
 import argparse
-import csv
 import json
 import os
 import sys
 import time
-from datetime import datetime
+import urllib.error
+import urllib.parse
+import urllib.request
 
-import paho.mqtt.client as mqtt
+if sys.platform == 'win32':
+    sys.stdout.reconfigure(encoding='utf-8', errors='replace')
 
-from core.signal_processor import ORPSignalProcessor
+# 站台設定集中在 core/config.py（讀 .env）。這三個值以前寫死在這裡，
+# 監控電腦上改過就會被下一次 git pull 覆蓋回去。
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from core import config                                       # noqa: E402
 
-# Windows 主控台/重導向輸出預設用系統 codepage（如 cp1252），無法編碼中文字元
-if sys.platform == "win32":
-    sys.stdout.reconfigure(encoding="utf-8", errors="replace")
-    sys.stderr.reconfigure(encoding="utf-8", errors="replace")
-
-MQTT_PORT = 1883
-MQTT_TOPIC_PUBLISH = "reactor/01/sensors"
-
-_processor = ORPSignalProcessor(
-    ema_window=10,
-    spike_threshold=-20.0,
-    spike_max_minutes=15,
-)
+DEFAULT_DIR = config.data_dir()
+DEFAULT_API = config.api_base()
+DEFAULT_POLL = int(config.get('REACTOR_POLL_SECONDS') or 60)
 
 
-def today_csv_path(folder: str) -> str:
-    today = datetime.now().strftime("%Y-%m-%d")
-    return os.path.join(folder, f"BTP_Sensor_log-{today}.csv")
+def folder_fingerprint(folder):
+    """資料夾裡所有 CSV 的 (檔名, 大小, mtime)。變了就代表有新資料。
 
-
-def read_all_data_rows(path: str) -> list:
-    """回傳所有資料列（跳過標題列），每列是逗號切開的字串陣列。"""
-    if not os.path.exists(path):
-        return []
-    with open(path, 'r', encoding='utf-8-sig', newline='') as f:
-        rows = list(csv.reader(f))
-    return rows[1:] if rows else []
-
-
-def parse_legacy_row(parts: list) -> dict | None:
-    """解析舊版序列埠格式：年,月,日,時,分,秒,_,ORP,反應器壓力,pH,溫度,混合槽壓力,CO2%,CH4%"""
-    if len(parts) < 14:
-        return None
+    比「只看最新 mtime」可靠：記錄程式是往當天的檔案**追加**寫入，
+    檔名不會變、只有大小與 mtime 會動。
+    """
+    sig = []
     try:
-        ts = (
-            f"{int(parts[0]):04d}-{int(parts[1]):02d}-{int(parts[2]):02d}"
-            f" {int(parts[3]):02d}:{int(parts[4]):02d}:{int(parts[5]):02d}"
-        )
-        return {
-            "timestamp":      ts,
-            "orp_raw":        float(parts[7]),
-            # parts[8]/parts[11] 對調（2026-07-14 現場比對 HMI 面板確認，見
-            # usb_receiver.py 同處註解）。
-            "pressure":       float(parts[11]),  # 反應槽壓力
-            "ph":             float(parts[9]),
-            "temp":           float(parts[10]),
-            "mixer_pressure": float(parts[8]),   # 氣體混合槽壓力
-            "co2_pct":        float(parts[12]),
-            "ch4_pct":        float(parts[13]),
-        }
-    except (ValueError, IndexError):
+        for f in sorted(os.listdir(folder)):
+            if not f.lower().endswith('.csv'):
+                continue
+            p = os.path.join(folder, f)
+            st = os.stat(p)
+            sig.append((f, st.st_size, int(st.st_mtime)))
+    except OSError as e:
+        print('[watch] 讀不到資料夾：%s' % e)
         return None
+    return tuple(sig)
 
 
-def publish_point(client: mqtt.Client, parsed: dict, pt) -> None:
-    try:
-        payload = json.dumps({
-            "timestamp":      pt.timestamp,
-            "orp":            pt.ema,
-            "orp_raw":        pt.raw,
-            "orp_cleaned":    pt.cleaned,
-            "is_anomaly":     pt.is_anomaly,
-            "pressure":       parsed["pressure"],
-            "ph":             parsed["ph"],
-            "temp":           parsed["temp"],
-            "mixer_pressure": parsed["mixer_pressure"],
-            "co2_pct":        parsed["co2_pct"],
-            "ch4_pct":        parsed["ch4_pct"],
-            "note":           "anomaly" if pt.is_anomaly else "",
-        })
-        client.publish(MQTT_TOPIC_PUBLISH, payload, qos=1)
-        print(f"[MQTT] 已轉發 {pt.timestamp}  ORP(EMA)={pt.ema:.1f}")
-    except Exception as e:
-        print(f"[MQTT] 發布失敗：{e}")
+def trigger_ingest(api_base, folder, timeout=900):
+    url = (api_base.rstrip('/') + '/api/ingest_folder?folder='
+           + urllib.parse.quote(folder, safe=''))
+    req = urllib.request.Request(url, method='POST')
+    with urllib.request.urlopen(req, timeout=timeout) as r:
+        return json.load(r)
 
 
 def main():
-    parser = argparse.ArgumentParser(description="監看監控電腦的 BTP_Sensor_log CSV，逐行轉發至 Jetson MQTT")
-    parser.add_argument('--dir', required=True, help=r"CSV 所在資料夾，例如 C:\Users\BTP\Desktop\data")
-    parser.add_argument('--broker', default="192.168.55.1", help="Jetson MQTT Broker IP（預設 192.168.55.1）")
-    parser.add_argument('--poll', type=float, default=5.0, help="輪詢間隔秒數（預設 5 秒，遠短於資料 1 分鐘一筆的頻率）")
-    args = parser.parse_args()
+    ap = argparse.ArgumentParser(
+        description='監看 CSV 資料夾，有新資料就請後端重新匯入')
+    ap.add_argument('--dir', default=DEFAULT_DIR, help='記錄程式寫出的資料夾')
+    ap.add_argument('--api', default=DEFAULT_API, help='後端位址')
+    ap.add_argument('--poll', type=int, default=DEFAULT_POLL,
+                    help='檢查間隔（秒）')
+    ap.add_argument('--once', action='store_true', help='只跑一次就結束')
+    a = ap.parse_args()
 
-    if not os.path.isdir(args.dir):
-        print(f"[錯誤] 資料夾不存在：{args.dir}")
-        sys.exit(1)
+    if not os.path.isdir(a.dir):
+        print('[watch] 資料夾不存在：%s' % a.dir)
+        return 1
 
-    client = mqtt.Client(mqtt.CallbackAPIVersion.VERSION2, "csv_watcher")
-    client.connect_async(args.broker, MQTT_PORT, keepalive=60)
-    client.loop_start()
-    print(f"[MQTT] 背景連線至 {args.broker}:{MQTT_PORT}，開始監看 {args.dir}\n")
-
-    seen_count = 0
-    current_path = None
-
-    try:
-        while True:
-            path = today_csv_path(args.dir)
-            if path != current_path:
-                current_path = path
-                seen_count = 0
-                _processor.reset()
-                print(f"[CSV] 監看目標：{current_path}")
-
-            rows = read_all_data_rows(current_path)
-            for parts in rows[seen_count:]:
-                parsed = parse_legacy_row(parts)
-                if parsed is None:
-                    print(f"[CSV] 跳過格式不完整的列：{parts}")
-                    continue
-                for pt in _processor.process(parsed["timestamp"], parsed["orp_raw"]):
-                    publish_point(client, parsed, pt)
-            seen_count = len(rows)
-
-            time.sleep(args.poll)
-    except KeyboardInterrupt:
-        print("\n[CSV] 使用者中斷，結束監看。")
-    finally:
-        client.loop_stop()
-        client.disconnect()
+    print('[watch] 監看 %s，每 %d 秒檢查一次' % (a.dir, a.poll))
+    last = None
+    while True:
+        sig = folder_fingerprint(a.dir)
+        if sig is not None and sig != last:
+            n_files = len(sig)
+            print('[watch] 偵測到變動（%d 個 CSV），匯入中…' % n_files)
+            try:
+                r = trigger_ingest(a.api, a.dir)
+                print('[watch] 切出 %s 段，通過預篩 %s 段，新寫入 %s 筆'
+                      % (r.get('segments'), r.get('screened'),
+                         r.get('inserted')))
+                last = sig
+            except urllib.error.URLError as e:
+                # ⚠ 後端還沒起來是常見情況，不要因此結束——下一輪再試。
+                print('[watch] 後端無回應（%s），稍後重試' % e)
+            except Exception as e:                # noqa: BLE001
+                print('[watch] 匯入失敗：%s' % e)
+        if a.once:
+            return 0
+        time.sleep(a.poll)
 
 
 if __name__ == '__main__':
-    main()
+    sys.exit(main() or 0)

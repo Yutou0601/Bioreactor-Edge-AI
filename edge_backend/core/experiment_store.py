@@ -48,6 +48,7 @@ GAP_MINUTES = 30                 # 相鄰兩筆間隔超過此值＝記錄中斷
                                  # Windows 更新停機，仍會被抓）。即使補氣落在洞裡造成跨洞的
                                  # 壓力位移，_detect_refills 仍會在洞邊界抓成一次補氣，不會漏。
 MIN_CYCLE_MINUTES = 20           # 短於此的片段視為切分雜訊（如多步補氣），不計為循環
+VENT_REMIND_HOURS = 0.5          # 距應結束剩多久開始提醒現場準備排氣
 
 
 def _now() -> str:
@@ -334,9 +335,16 @@ def add_run(run_id: str, n_minutes: float, gas_ratio: str = "4:1",
             intake_lower: float = 0.90, intake_upper: float = 1.185,
             baseline_ch4: float = 9.0, baseline_co2: float = 21.0,
             baseline_pressure: float = 1.185, target_hours: float = 48.0,
-            scheduled_start: Optional[str] = None, note: str = "") -> dict:
+            scheduled_start: Optional[str] = None, note: str = "",
+            auto_start: bool = False, auto_stop: bool = False,
+            scheduled_end: Optional[str] = None) -> dict:
     """新增一個批次（status=planned）。run_id 不可重複。
-    scheduled_start 可預先排定開始時間；未填則由 start_run 時記為當下。"""
+    scheduled_start 可預先排定開始時間；未填則由 start_run 時記為當下。
+
+    auto_start / auto_stop **預設關閉**：不開就完全維持原本的手動流程。
+    開啟後由 core/scheduler.py 到點執行——但那只是自動開始／結束**紀錄**，
+    系統只讀不控，不會關閥、不會停反應器，現場仍須有人實際排氣。
+    scheduled_end 若有填則優先於 target_hours 決定應結束時刻。"""
     if any(r["run_id"] == run_id for r in experiment_runs):
         raise ValueError(f"批次 {run_id} 已存在")
     run = {
@@ -350,9 +358,16 @@ def add_run(run_id: str, n_minutes: float, gas_ratio: str = "4:1",
         "baseline_pressure": baseline_pressure,
         "target_hours":      target_hours,
         "scheduled_start":   _normalize_ts(scheduled_start),
+        "scheduled_end":     _normalize_ts(scheduled_end),
+        "auto_start":        bool(auto_start),
+        "auto_stop":         bool(auto_stop),
         "start_time":        None,
         "end_time":          None,
         "status":            "planned",
+        # 誰開始／誰結束的："manual"（人按的）或 "auto"（排程器）。
+        # 事後查得出來——自動結束的批次其排氣時刻與峰值都沒有人現場確認過。
+        "started_by":        None,
+        "ended_by":          None,
         "note":              note,
         # 手動峰值：排氣時操作員在現場 HMI 觀測到的真實峰值。感測器 1 筆/分鐘常錯過
         # 排氣瞬間的峰（尤其 CH4），手動輸入比自動抓的更準。空＝用自動抓的值。
@@ -363,25 +378,55 @@ def add_run(run_id: str, n_minutes: float, gas_ratio: str = "4:1",
     return _with_results(run)
 
 
-def start_run(run_id: str, at: Optional[str] = None) -> dict:
+def due_time(run: dict) -> Optional[datetime]:
+    """批次的應結束時刻；None＝沒有排定結束時間。
+
+    scheduled_end 優先於 target_hours——指定絕對時刻比「開始後 N 小時」明確，
+    尤其在 start_time 事後被人工修正過的時候。
+    定義放在這裡而不是 scheduler，是因為 scheduler 匯入本模組，反向匯入會循環。
+    """
+    if run.get("scheduled_end"):
+        try:
+            return _parse(_normalize_ts(run["scheduled_end"]))
+        except (ValueError, TypeError):
+            return None
+    start, hours = run.get("start_time"), run.get("target_hours")
+    if not start or not hours:
+        return None
+    try:
+        return _parse(start) + timedelta(hours=float(hours))
+    except (ValueError, TypeError):
+        return None
+
+
+def start_run(run_id: str, at: Optional[str] = None, by: str = "manual") -> dict:
     """開始實驗（記錄起始時間）。at 可指定特定時間（如排定的開始時刻），
-    未填則用排程時間 scheduled_start，再退回當下。"""
+    未填則用排程時間 scheduled_start，再退回當下。
+    by="auto" 代表是排程器到點觸發的；手動呼叫一律覆蓋排程。"""
     run = _find(run_id)
     run["start_time"] = _normalize_ts(at) or run.get("scheduled_start") or _now()
     run["end_time"] = None
     run["status"] = "running"
+    run["started_by"] = by
+    run["ended_by"] = None
     _save()
     return _with_results(run)
 
 
-def vent_run(run_id: str, at: Optional[str] = None, peaks: Optional[dict] = None) -> dict:
+def vent_run(run_id: str, at: Optional[str] = None, peaks: Optional[dict] = None,
+             by: str = "manual") -> dict:
     """標記實驗結束排氣（設定 end_time、status=done）。
-    peaks 可帶現場觀測的手動峰值 {"orp","ph","co2","ch4"}，只更新有填的欄位。"""
+    peaks 可帶現場觀測的手動峰值 {"orp","ph","co2","ch4"}，只更新有填的欄位。
+
+    by="auto" 代表排程器到點自動結束。⚠ 那只結束**紀錄**——反應器沒有停，
+    真正的排氣時刻是後來有人到場才發生的，end_time 與自動抓到的峰值都需要
+    事後以 update_run 補正。前端據 ended_by 提示待確認。"""
     run = _find(run_id)
     if not run.get("start_time"):
         raise ValueError(f"批次 {run_id} 尚未開始，無法排氣")
     run["end_time"] = _normalize_ts(at) or _now()
     run["status"] = "done"
+    run["ended_by"] = by
     _set_manual_peaks(run, peaks)
     _save()
     return _with_results(run)
@@ -409,11 +454,21 @@ def update_run(run_id: str, fields: dict) -> dict:
     run = _find(run_id)
     allowed = {"n_minutes", "gas_ratio", "intake_lower", "intake_upper",
                "baseline_ch4", "baseline_co2", "baseline_pressure", "target_hours",
-               "scheduled_start", "start_time", "end_time", "status", "note"}
-    time_fields = {"scheduled_start", "start_time", "end_time"}
+               "scheduled_start", "scheduled_end", "auto_start", "auto_stop",
+               "start_time", "end_time", "status", "note"}
+    time_fields = {"scheduled_start", "scheduled_end", "start_time", "end_time"}
+    bool_fields = {"auto_start", "auto_stop"}
     for k, v in fields.items():
         if k in allowed and v is not None:
-            run[k] = _normalize_ts(v) if k in time_fields else v
+            if k in time_fields:
+                run[k] = _normalize_ts(v)
+            elif k in bool_fields:
+                run[k] = bool(v)
+            else:
+                run[k] = v
+    # 人工改過 end_time＝有人確認了真正的排氣時刻，把自動結束的待確認標記解除。
+    if fields.get("end_time"):
+        run["ended_by"] = "manual"
     if "manual_peaks" in fields:            # 手動峰值可事後編輯
         _set_manual_peaks(run, fields["manual_peaks"])
     _save()
@@ -544,6 +599,13 @@ def get_live_status(run_id: str) -> dict:
     remaining = cur_p - lower
     eta_refill = round(remaining / rate, 1) if rate > 0 and remaining > 0 else 0.0
     elapsed = (ts[-1] - _parse(run["start_time"])).total_seconds() / 3600.0
+
+    # ── 排定結束與排氣提醒 ──
+    # ⚠ 用牆上時鐘算，不用 ts[-1]：記錄若中斷，elapsed 會停住，但實驗仍在跑，
+    #   提醒不能跟著停。上面的 elapsed 沿用既有語意（資料涵蓋多久）不動。
+    due = due_time(run)
+    hours_left = round((due - datetime.now()).total_seconds() / 3600.0, 2) \
+        if due else None
     return {
         "run_id":            run_id,
         "status":            run["status"],
@@ -557,6 +619,14 @@ def get_live_status(run_id: str) -> dict:
         "elapsed_hours":     round(elapsed, 1),
         "target_hours":      run.get("target_hours"),
         "n_cycles_so_far":   len(cyc),
+        # ── 排程 ──
+        "auto_stop":         bool(run.get("auto_stop")),
+        "due_at":            due.strftime("%Y-%m-%d %H:%M:%S") if due else None,
+        "hours_left":        hours_left,
+        # 提醒現場準備排氣。⚠ 自動停止只結束紀錄，反應器不會停，所以就算開了
+        #   auto_stop 這個提醒仍然要出現——它提醒的是「該去現場」而不是「該按鈕」。
+        "vent_reminder":     bool(hours_left is not None
+                                  and hours_left <= VENT_REMIND_HOURS),
         # ── 記錄健康度 ──
         "last_timestamp":    last["timestamp"],
         "staleness_min":     staleness_min,

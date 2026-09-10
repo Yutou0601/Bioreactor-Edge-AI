@@ -4,6 +4,11 @@ cd /d "%~dp0"
 REM ============================================================
 REM  Launch the desktop control panel.
 REM
+REM  2026-09-01: now points at launcher.pyw. The old
+REM  control_panel.pyw was built for the Jetson topology
+REM  (SSH, remote host 192.168.55.1, preview 4173 vs dev 5173)
+REM  and has been retired. Same file as START.bat launches.
+REM
 REM  NOTE: keep this file ASCII-only. cmd.exe reads .bat files using the
 REM  system ANSI codepage, so UTF-8 Chinese text here gets mangled into
 REM  garbage commands and the launcher fails in a confusing way.
@@ -14,7 +19,7 @@ REM  which is the worst outcome for a launcher. This wrapper resolves an
 REM  interpreter explicitly and reports a clear error when none is found.
 REM ============================================================
 
-set PANEL=control_panel.pyw
+set PANEL=launcher.pyw
 
 if exist "edge_backend\venv\Scripts\pythonw.exe" (
     start "" "edge_backend\venv\Scripts\pythonw.exe" "%PANEL%"

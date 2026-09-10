@@ -1,0 +1,1348 @@
+% ICEA 2026 — 2026-08-07 大改版全篇重寫
+%
+% 改版三條指示：資料探勘反應器導向、聚焦微正壓循環裝置、大幅減少 edge 與操作史。
+% ⚠ 頁數上限 10 頁（含表、圖、附錄、參考文獻）——CFP 明載 "4-6 up to 10 page"。
+%   先前記載的 11 頁／10.99 係 2026-08-12 自行「定案」之誤，2026-08-23 更正。
+%
+% ⚠ 寫作紅線（見結構文件的「可寫／不可寫」表）：
+%   · 三個統計方法全是先前技術，一律寫成 "we apply X in the sense of [cite]"
+%   · 不得宣稱 r_b(k) 的函數形式、r_max、K、"mass-transfer limited"
+%   · 不得寫成「已證明是生物速率」——只證明「純物理產生不出這個成分」
+%   · 不得寫成模擬器已充分——殘餘 AUC 0.706（2026-08-24 去重後重算）
+%
+% 本機無 LaTeX toolchain，無法編譯驗證；改用 lint_tex.py 做靜態檢查，
+% 並刻意避開 siunitx 等需要編譯才能確認的套件，單位改用自訂巨集。
+
+\documentclass[runningheads]{llncs}
+
+\usepackage{graphicx}
+\usepackage{amsmath}
+\usepackage{mhchem}
+\usepackage{booktabs}
+\usepackage{algorithm}
+\usepackage{algpseudocode}
+\usepackage[hidelinks]{hyperref}
+
+% 單位巨集：一律用斜線式（kg/cm²、/hr），全篇統一，不用負指數。
+\newcommand{\pu}{\ensuremath{\mathrm{kg/cm^{2}}}}
+\newcommand{\ratu}{\ensuremath{\mathrm{kg/cm^{2}/hr}}}
+\newcommand{\invh}{\ensuremath{\mathrm{/hr}}}
+\newcommand{\rb}{\ensuremath{r_{b}}}
+\newcommand{\rbh}{\ensuremath{\hat{r}_{b}}}
+\newcommand{\kh}{\ensuremath{\hat{k}}}
+
+\begin{document}
+
+\title{Threshold-Triggered Cycles as Endogenous Relaxation
+Experiments: Mining a Biological Methanation Rate from Quantized
+Pressure}
+
+\titlerunning{Mining a Biological Methanation Rate from Quantized Pressure}
+
+\author{Cheng-Yu Li\inst{1} \and
+Chun-Hao Chen\inst{1} \and
+Cheng-Yuan Hung\inst{2} \and
+Yen-Jie Huang\inst{2}}
+
+\authorrunning{C.-Y. Li et al.}
+
+\institute{Department of Computer Science and Information Engineering,
+National Kaohsiung University of Science and Technology,
+Kaohsiung, Taiwan\\
+\email{lkkyb555@gmail.com}
+\and
+Opto-Electronics Technology Section, Energy and Agile System
+Department, Metal Industries Research \& Development Centre,
+Kaohsiung, Taiwan}
+
+\maketitle
+
+\begin{abstract}
+In the final stage of anaerobic digestion, headspace pressure falls
+both because the biology consumes gas and because freshly injected gas
+dissolves; telling the two apart conventionally requires a second
+instrument. This paper recovers the biological rate from the pressure
+record alone. The reactor is a micro-pressurized recirculating vessel
+that refills whenever pressure falls below a controller threshold, so
+every refill begins an unforced descent and ordinary production
+supplies about two relaxation experiments a day at no cost to
+operation. The obstacle is that the two contributions to a single
+descent are nearly interchangeable, and the quantities estimated from
+one cycle are strongly correlated. We resolve this by calibrating the estimator against
+simulations that reuse each measured cycle's own fitted conditions and
+substitute only a known biological rate, so the distortion is measured
+and removed rather than assumed away. Across 207 screened
+cycles the calibration rules out a constant biological rate and returns
+a corrected consumption rate of $0.0125$~\ratu{},
+accurate to 11 percent, of which 2 percent is systematic and does
+not shrink with a longer record. A classifier-based two-sample test
+shows that the simulator reproduces every marginal trajectory property
+we tested, while remaining distinguishable in joint structure.
+
+\keywords{Process data mining \and Practical identifiability \and
+Anaerobic digestion \and Quantized sensing \and Biomethanation}
+\end{abstract}
+
+
+\section{Introduction}
+\label{sec:intro}
+
+Carbon pricing has moved from proposal to enforced policy across many
+jurisdictions, and causal studies of national schemes now report
+reductions in emissions attributable to the tax itself
+\cite{gugler2023carbon}. As the cost of releasing carbon dioxide
+rises, what to do with the carbon dioxide that has been captured stops
+being an academic question and becomes an operating one, faced by
+plants that must handle a real gas stream every day.
+
+Captured carbon dioxide can be routed in several directions:
+geological storage, mineralization into solid carbonates, catalytic
+conversion into fuels and chemicals, and biological conversion by
+micro-organisms; recent reviews survey these routes and the networks
+that connect them \cite{ghiat2025circularity}. This paper concerns one
+of them. In biological methanation, hydrogenotrophic archaea combine
+\ce{CO2} with hydrogen and release methane, so that captured carbon
+dioxide and surplus renewable electricity---stored as hydrogen---both
+leave through the existing natural-gas infrastructure
+\cite{gonzalez2023biological}. The conversion runs under mild
+conditions, which is what makes a modest vessel a plausible unit of
+deployment.
+
+What one wants from such a plant is the rate at which the culture
+consumes gas, because that rate, not the pressure itself, says whether
+the biology is working. It cannot be read off directly. In a closed
+headspace, methanogenesis consumes five moles of gas for every one it
+produces and so lowers pressure, while dissolution of the freshly
+injected \ce{CO2} lowers it as well; a single descent records only
+their sum. The standard resolution is to add a second physical
+channel---manometric biomethane-potential practice, for instance,
+separates leakage from conversion by weighing the bottle
+\cite{hafner2018quantification}. That option is not available here, and
+it is not merely a matter of cost: a probe that resolves the liquid
+phase must cross a pressure boundary whose tightness is what licenses
+the two-term description in the first place, and any sample drawn from
+the vessel perturbs the very descent being measured.
+
+Our contributions are as follows.
+
+\begin{enumerate}
+\item \textbf{A pressure-decomposition model.} We separate the
+transient physical relaxation that follows a refill from the sustained
+biological removal that continues through the cycle, on a single
+quantized pressure channel, where the field instead adds a second
+instrument \cite{hafner2018quantification}.
+\item \textbf{A cycle-level estimation procedure.} A curvature screen
+computed from the raw trajectory rejects cycles in which the two contributions
+are interchangeable before any model is fitted, and the retained cycles
+yield the relaxation rate $k$ and the biological removal rate \rb{}
+(Algorithm~1).
+\item \textbf{Two validations of what the estimate means.} A
+design-matched simulation measures the degeneracy the estimator itself
+introduces (Algorithm~2), and a purely physical null model asks whether
+the observed removal could have been produced with no biology at all
+(Algorithm~3).
+\end{enumerate}
+
+\section{Pressure Dynamics and Problem Formulation}
+\label{sec:dynamics}
+
+\subsection{Pressure Cycles in Biomethanation}
+
+The data behind this paper come from an industrial biomethanation
+reactor (Fig.~\ref{fig:panel}) built as a cascade of pressure
+tiers (Fig.~\ref{fig:cascade}):
+hydrogen and carbon dioxide are premixed at high pressure, stepped down
+to hold the culture under a small positive pressure, and vented at low
+pressure to a gas analyser, while a pump continuously returns headspace
+gas to the bottom of the liquid as bubbles. Gas-liquid mass transfer is
+the limiting step of biological methanation, and holding the gases
+under pressure and recirculating them is how this reactor addresses it
+\cite{yoruklu2025comprehensive}. Its logger records one pressure value
+a minute, quantized at $0.01$~\pu{}. The controller that decides when
+to refill is a closed unit: its setpoint, its state and the timing of
+its decisions are never written down, nothing can be added to the
+instrument, and no excitation can be imposed on a vessel in production.
+
+\begin{figure}[t]
+\centering
+\includegraphics[width=\textwidth]{equipment.png}
+\caption{The instrument as built. The panel carries the touch-panel
+controller running the plant program, the pH and oxidation--reduction
+potential meters, and the two optical gas analysers reading
+\ce{CH4} and \ce{CO2}; the reactor vessel is at the right. The
+pressure record analysed in this paper comes from a transducer in the
+headspace of that vessel.}
+\label{fig:panel}
+\end{figure}
+
+\begin{figure}[t]
+\centering
+\includegraphics[width=\linewidth]{figE_cascade_narrow.pdf}
+\caption{The cascaded pressure-tier design of the reactor. Gas is
+stepped down from the reactant tier through the culture tier to the
+product tier, so that the culture is held under a small positive
+pressure while the analyser downstream stays near ambient. The
+recirculation pump returns headspace gas to the bottom of the vessel
+as bubbles, which is what keeps the reactant gases dissolving. The
+pressure transducer (PT) marked in the headspace is the only channel
+this paper uses; the controller that opens valve V3 is a closed unit
+whose state is never logged.}
+\label{fig:cascade}
+\end{figure}
+
+The reactor is a micro-pressurized recirculating vessel operated under
+a granted invention patent (TW~I923176). Liquid is recirculated
+continuously; the headspace is charged with an \ce{H2}:\ce{CO2} mixture
+premixed at $4{:}1$, the stoichiometric ratio for
+$\mathrm{CO_2}+4\mathrm{H_2}\rightarrow\mathrm{CH_4}+2\mathrm{H_2O}$.
+The controller opens the inlet valve when headspace pressure falls
+below a threshold and closes it on reaching a target, so a refill is
+complete within about one minute and is treated here as instantaneous.
+The arrangement is that of Fig.~\ref{fig:cascade}; the controller reads
+pressure and commands the inlet valve, but its state is never logged.
+
+Of the logged channels only four are trustworthy: two pressure
+transducers, oxidation--reduction potential (ORP), and pH. The gas-analyzer
+composition channels are stale for $99.98\%$ of samples and are not
+used as evidence anywhere in this paper. The present analysis uses the
+headspace pressure channel alone.
+
+\begin{figure}[t]
+\centering
+\includegraphics[width=\textwidth]{figD_device_pipeline.pdf}
+\caption{Four days of measured pressure; red lines mark
+threshold-triggered refills, about twice a day and $270$ times in
+total. Each descending flank is one endogenous relaxation experiment,
+and the sawtooth is the signature of the trigger loop.}
+\label{fig:device}
+\end{figure}
+
+Figure~\ref{fig:device} shows a representative four-day window. Because a refill raises
+pressure by far more than the sensor quantum within a single sample
+interval, cycle boundaries need no changepoint machinery: a threshold
+rule on the rise above the running minimum yields $270$ distinct
+descents.
+
+Those cycles are long and shallow. Pressure is logged once a minute, so
+a cycle of median duration $10.2$~hr carries roughly $610$ samples. The
+median descent amplitude is $0.27$~\pu{}, which is $27$ quantization
+steps, while the median residual scale about a fitted trajectory is
+$0.0056$~\pu{}, below a single step. The biological term accounts for
+roughly half of the descent, so the quantity to be recovered spans on
+the order of thirteen steps against a per-sample noise smaller than
+one.
+That is the regime the rest of the paper works in: many samples, a
+coarse ladder, and an effect large against the noise but small against
+the physical term it must be separated from.
+
+\subsection{Physical and Biological Contributions}
+
+The difficulty runs deeper than the missing channel. A single
+relaxation is not enough to separate the two contributions even in
+principle. Writing the descent as
+\begin{equation}
+P(t)=P_{eq}+A\,e^{-kt}-\rb\,t ,
+\label{eq:le}
+\end{equation}
+where $P_{eq}$ is the pressure the headspace would settle at on physics
+alone, $A=P(0)-P_{eq}$ is how far the refill leaves it from that value,
+and $k$ sets how fast it returns. Table~\ref{tab:params} collects the
+four quantities. The exponential term carries the physical approach to
+equilibrium and the linear term the constant-rate biological removal,
+and the only feature that tells them apart is the curvature of the
+exponential.
+
+\begin{table}[t]
+\caption{The four quantities of Eq.~\eqref{eq:le}. Only \rb{} is the
+target of this paper; the other three describe the physical transient
+that has to be separated from it.}
+\label{tab:params}
+\centering
+\begin{tabular}{ll}
+\toprule
+Symbol & Meaning \\
+\midrule
+$P_{eq}$ & Physical equilibrium baseline of the headspace \\
+$A$      & Initial amplitude of the physical relaxation \\
+$k$      & Physical relaxation rate \\
+\rb{}    & Biological removal rate \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+Over a window in which $kT$ is small that curvature is never expressed.
+Expanding $e^{-kt}\approx 1-kt$ and collecting terms turns
+Eq.~\eqref{eq:le} into
+\begin{equation}
+P(t)\;\approx\;(P_{eq}+A)\;-\;(Ak+\rb)\,t ,
+\label{eq:degen}
+\end{equation}
+a straight line whose slope is the \emph{sum} $Ak+\rb$. A descent of
+five units an hour is then explained equally well by $Ak=4$ with
+$\rb=1$, by $Ak=2$ with $\rb=3$, or by $Ak=0$ with $\rb=5$: the record
+fixes the sum and says nothing about the split. Recovering $\rb$ from
+that sum is the problem this paper addresses. Practical
+identifiability of exactly this kind
+is a recognized open problem in the anaerobic-digestion modeling
+literature \cite{donosobravo2011model}, and it persists in the
+mechanistic models written specifically for biomethanation: recent
+extensions of Anaerobic Digestion Model No.~1 (ADM1) to this process
+carry biological and mass-transfer
+parameters that must be identified together from the same measurements
+\cite{acostapavas2023dynamic}.
+
+Given only the observed pressure trajectory $P(t)$, the objective of
+this paper is to estimate \rb{} reliably while separating the transient
+physical contribution characterized by $k$. Sections~\ref{sec:method}
+and~\ref{sec:results} address, in turn, how that estimate is formed and
+how far it can be trusted.
+
+\section{Related Work}
+\label{sec:related}
+
+Three lines of work bear directly on this problem, and the first is the
+one that most constrains what we may claim.
+
+\subsubsection{Two rates from one gas trace.}
+The estimation geometry we face is fifty-nine years old.
+Bandyopadhyay, Humphrey and Taguchi addressed the problem of measuring
+a volumetric oxygen transfer coefficient in a fermenter whose culture
+keeps consuming oxygen throughout the measurement, and proposed the
+dynamic gassing-out method as the
+solution \cite{bandyopadhyay1967dynamic}. The procedure is to interrupt
+the aeration briefly, trace the dissolved oxygen concentration of the
+broth across that interruption, and analyse the resulting trace for
+the coefficient $k_{L}a$. One scalar channel therefore has to carry both a transfer
+term and a biological one, which is the structure we inherit and in
+which we claim no novelty. The authors report the technique as rapid
+and internally consistent, and they probe its limit with prolonged
+starvation experiments, finding that the oxygen uptake rate itself
+changes once the interruption lasts between two and ten minutes. Our
+regime differs in two ways: their protocol imposes the interruption
+where ours may not perturb a production vessel, and they report a point
+estimate where we report a degeneracy-calibrated aggregate.
+
+Linek, Bene\v{s} and Vacek attacked a specific failure of such dynamic
+methods \cite{linek1989dynamic}. Their target was the error introduced
+when the transient is created by a step change in the oxygen
+concentration of the entering gas: interfacial nitrogen transport and
+the finite rate at which the concentration change propagates into
+individual bubbles can distort the reported coefficient by more than
+hundreds of percent. Their solution replaces that step with a change of
+roughly twenty percent in the total reactor pressure, which alters the
+oxygen concentration in every bubble of the dispersion simultaneously
+and so suppresses the influence of non-ideal mixing in the gas phase.
+They validate the procedure against two independent references, the
+standard dynamic method in which pure oxygen is absorbed into a
+previously degassed liquid, and the steady-state sulphite method, and
+they describe a test for the one requirement the method imposes, that
+the oxygen probe signal be independent of pressure. The method is
+reported as suitable for large-scale reactors because the necessary
+pressure changes are small and ordinary air can be used. Both
+references it is checked against are chemical rather than biological,
+which is the point of contact with our problem: the transient is
+imposed rather than observed, and the biological term is not among the
+quantities being estimated.
+
+\subsubsection{Adding a channel rather than resolving the degeneracy.}
+Where the split matters in practice, the field measures something else.
+Hafner, Rennuit, Olsen and Pedersen took as their problem the leaks
+that undermine batch biogas assays, and proposed detecting and
+correcting them from the change in bottle mass during
+incubation \cite{hafner2018quantification}. Three experiments were run
+to test the method, on pure chemicals, on wastewater sludge and on
+other complex substrates, and leaks were found in all three; their
+frequency and magnitude tracked headspace pressure and the number of
+times the bottle septa had been punctured. Comparison against an
+independent estimate of leakage in two of the experiments showed the
+mass-based estimate to be accurate. The reported sensitivity is that
+leaks as small as twenty percent of total biogas or methane production
+can be detected, and smaller ones when production is high relative to
+the precision of the mass measurement, on the strength of which the
+authors recommend that the measurement always be made. What that
+method supplies is a second and physically independent observable, and
+that is why the degeneracy is rarely confronted directly; it is also
+precisely what our vessel cannot give us.
+
+Where the quantity of interest is too costly or too slow to instrument
+continuously, the field instead infers it from measurements already
+available. Rutland, You, Liu and Bowman addressed the FOS/TAC ratio,
+which sets the volatile fatty acids of a digester against its
+buffering capacity and is used as an indicator of process stability;
+its continuous monitoring is limited by the cost and calibration
+burden of live sensors and by the delay of offline laboratory
+analysis \cite{rutland2025application}. Their solution is a soft sensor
+trained on variables that are already logged online, using data from a
+one-hundred-and-sixty-day pilot trial of a microbial-electrolysis-cell
+digester treating brewery wastewater. The procedure first reduces the
+variable set to seven by random-forest feature importance, with pH
+ranking highest and hydrogen sulphide second, and then compares
+decision trees, XGBoost, support vector regression and artificial
+neural networks under five-fold cross-validation in which the temporal
+order of the record is preserved rather than shuffled. The neural
+network performed best, reaching an explained variance of $0.77$; an
+out-of-fold ensemble of that architecture averaged $0.62$ across folds,
+or $0.74$ once the single fold containing a loading and temperature
+excursion is set aside. The authors also report where the model
+degrades, with accuracy falling from $0.79$ to $0.58$ and $F_1$ from
+$0.89$ to $0.73$ once the ratio exceeds $0.6$. Ours is an inference of
+that kind, but with no offline assay for \rb{} it cannot be supervised,
+and without a second channel the identifiability question is
+unavoidable.
+
+\subsubsection{Identifiability diagnostics.}
+Raue and colleagues addressed the question of how well the parameters
+of a partially observed dynamical model are determined by the data at
+hand, and answered it by exploiting the profile
+likelihood \cite{raue2009structural}, which re-optimises the remaining
+parameters while one is held fixed across a range of values. They
+report that the approach detects structural non-identifiabilities,
+which manifest as functionally related model parameters, and also
+practical non-identifiabilities, which arise from the limited amount
+and quality of the experimental data. Confidence intervals follow from
+the same computation. The authors describe the results as easy to
+interpret and directly usable both for planning further experiments and
+for reducing the model, and they provide an implementation for MATLAB
+and the PottersWheel toolbox.
+
+Simpson and Baker have since set the same territory out as a
+self-contained course, aimed at the gap between the applied-statistics
+treatment of identifiability and the differential-equation models
+applied mathematicians actually
+use \cite{simpson2026parameter}. Their approach is likelihood-based
+throughout: a process model and a noise model together give a
+log-likelihood, numerical optimisation gives the maximum-likelihood
+estimate, and univariate profiles---each obtained by holding one
+parameter fixed on a grid while the others are optimised out---are
+thresholded against a $\chi^{2}$ quantile to give confidence
+intervals, which are then propagated into prediction intervals by
+sampling parameter sets from inside the confidence set. Three
+exercises carry this through an ordinary differential equation, a
+partial differential equation and a boundary-value problem, supported
+by open-source code in Julia and Python. The first two problems are
+identifiable; the third is not, and it is the one that resembles ours.
+There the steady-state solution depends on the parameters only through
+the combinations $J/\sqrt{kD}$ and $\sqrt{k/D}$, so the univariate
+profiles for $J$, $D$ and $k$ come out flat---infinitely many triples
+fit the data equally well---whereas reparameterising in terms of those
+two combinations restores single-peaked profiles and finite intervals.
+The authors also caution that local diagnostics built from the Hessian
+at the estimate can mislead precisely when a problem is
+non-identifiable, which is why they treat the profile as a global
+method. Our degeneracy is of that kind:
+Eq.~\eqref{eq:degen} identifies only the sum $Ak+\rb$, and the coupled
+alternative discussed in Sect.~\ref{sec:method} identifies only
+$P_{eq}-\rb/k$.
+
+The specific ill-conditioning we face was characterized by Varah, whose
+subject was the fitting of discrete data or a continuous function by
+least squares using exponential functions \cite{varah1985fitting}. He
+examined the uniqueness and the sensitivity of the best least-squares
+solution and gave both analytic and numerical examples exhibiting
+possible non-uniqueness and extreme sensitivity in those solutions.
+That result is the mathematical root of the degeneracy in
+Eq.~\eqref{eq:le} rather than a defect of our implementation, since any
+model containing an exponential inherits it.
+
+Both diagnostics, however, are computed \emph{from} a fit, which is the
+gap our screen addresses: we must decide which cycles are worth fitting
+before we have a fit to diagnose.
+
+\section{Proposed Method}
+\label{sec:method}
+
+The method has one estimator and two validations, and it is worth
+separating them at the outset. Algorithm~1 is what produces a number:
+it screens a cycle and, if the cycle survives, returns $k$ and \rb{}.
+Algorithms~2 and~3 produce no estimate of their own; they exist to
+answer two questions about the number Algorithm~1 gives---how much of
+it is an artifact of the estimator, and whether physics alone could
+have produced it. Figure~\ref{fig:method} places the three in that
+relation.
+
+Two preparation steps come before any fitting. Their thresholds are set
+far from the values they must separate rather than tuned to them, as
+the comparisons below indicate.
+Segmentation cuts the record wherever pressure rises more than
+$0.03$~\pu{} above its running minimum. A refill lifts pressure by far
+more than that within a single sample interval, so this threshold
+separates refills from noise without any changepoint machinery. Three
+exclusions then remove what cannot carry a rate: segments shorter than
+$4$~hr and segments shallower than $0.10$~\pu{}, against median values
+of $10.2$~hr and $0.27$~\pu{}, and the first $3$~min of every segment,
+which is the refill itself and therefore violates the assumption that
+refilling is instantaneous. Cleaning finally removes two contaminants
+that the equipment operators identified: pipe-washing days, on which
+the vessel is deliberately cycled to clean lines, and the refill
+interval.
+
+Why should \eqref{eq:le} take that particular form? Because the two
+processes act in different places. The culture lives in the liquid and
+consumes gas that is already dissolved, so the headspace never loses
+gas to the biology directly---it loses gas only across the gas--liquid
+interface. That one fact splits the descent into two stages. Just after
+a refill the liquid is undersaturated, transfer across the interface is
+fast, and it slows as saturation is approached: this is the exponential
+term $A\,e^{-kt}$. Once the liquid is near saturation, transfer no
+longer runs ahead of consumption but merely replaces what the culture
+has removed, so the headspace drains at whatever rate the biology sets:
+this is the linear term $-\rb t$. The two terms are added because they
+describe two stages of one descent, not two sinks acting at once.
+
+Writing them additively is also what keeps \rb{} visible, which is
+worth stating because the alternative fails silently. Had the
+biological sink been attached to the headspace instead, as in
+$\dot{P}=-k(P-P_{eq})-\rb$, the rate would enter only through the
+combination $P_{eq}-\rb/k$ and the equilibrium pressure would absorb it
+entirely. The data prefer the additive form as well: by the Akaike
+information criterion (AIC) it wins on $74.9\%$ of the analysed cycles,
+against $4.8\%$ for a pure line and $20.3\%$ for a pure exponential.
+
+Its degeneracy is not a defect of our implementation but a long-known
+property of exponential fitting, whose non-uniqueness and extreme
+sensitivity to the data Varah characterized
+directly \cite{varah1985fitting}; in the language of
+Gutenkunst et al.~\cite{gutenkunst2007universally} the model is sloppy
+along the direction that trades $A$ and $k$ against \rb{}. On real data
+two fits differing by a factor of $2.5$ in \rb{} lie within $1\%$ of the
+same residual sum of squares.
+
+\begin{figure}[t]
+\centering
+\includegraphics[width=\linewidth]{figF_method_flow.pdf}
+\caption{The method. Algorithm~1 is the only step that produces a
+number: it screens each descent and, for those retained, returns the
+pair $(\rbh,\kh)$. Those same estimates are then put to two
+independent questions. Algorithm~2 asks how much of the number the
+estimator itself introduced, and Algorithm~3 asks whether physics with
+no biological term could have produced it. The two answers together
+bound what the calibrated rate means.}
+\label{fig:method}
+\end{figure}
+
+\subsection{Cycle-Level Rate Estimation}
+
+The profile likelihood \cite{raue2009structural} would diagnose this
+degeneracy, but it is computed \emph{from} a fit, and on this data a
+fit is exactly what we do not yet trust. We therefore screen on the
+shape of the raw trajectory before fitting anything.
+
+The screen statistic is the normalized mid-point curvature
+\begin{equation}
+c \;=\; \frac{y(0)-y(T/2)}{y(0)-y(T)} ,
+\label{eq:curv}
+\end{equation}
+which equals exactly $0.5$ for a straight descent, where the two terms
+of \eqref{eq:le} are indistinguishable, and rises as the trajectory
+bends. A cycle is retained when $c \ge c^{*}$, with $c^{*}=0.45$ fixed
+by recovery on synthetic cycles of known truth $\rb=0.012$: below that
+value the recovered median is biased by more than $25\%$.
+
+For a cycle that survives the screen, Eq.~\eqref{eq:le} is non-linear
+in $k$ alone: once $k$ is held fixed the model is linear in $A$,
+$P_{eq}$ and \rb{}. Writing the design matrix for a candidate $k$ as
+\begin{equation}
+D(k)=\left[\,e^{-kt},\; t,\; \mathbf{1}\,\right] ,
+\label{eq:design}
+\end{equation}
+the remaining three coefficients follow in closed form from ordinary
+least squares, $\hat{\boldsymbol\beta}(k)=\arg\min_{\boldsymbol\beta}
+\lVert y-D(k)\boldsymbol\beta\rVert^{2}$, with residual
+\begin{equation}
+S(k)=\bigl\lVert y-D(k)\,\hat{\boldsymbol\beta}(k)\bigr\rVert^{2} ,
+\qquad
+\hat{k}=\arg\min_{k\in K} S(k) .
+\label{eq:profile}
+\end{equation}
+The four-parameter non-linear fit therefore reduces to a scan over a
+grid $K$ of $150$ values with one exact $3\times3$ solve at each,
+and \rbh{} is read off as the negative of the coefficient on $t$ at
+$\hat{k}$. Profiling is preferred to a joint non-linear optimiser for
+reasons beyond speed. The scan is exhaustive over $K$, so the minimum
+reported is global on that grid and no starting value has to be
+guessed---which matters precisely here, because
+Eq.~\eqref{eq:degen} makes the objective nearly flat and a descent
+method can halt anywhere along it while reporting convergence. The
+profile is also its own diagnostic: where the degeneracy bites, $S(k)$
+has no distinct minimum, so the curve that yields $\hat{k}$ shows at
+the same time how weakly the data constrain it.
+Eq.~\eqref{eq:curv} is the cheaper test that anticipates this before
+any fit is run. Algorithm~1 states the screen and this estimator together;
+both run in NumPy alone, within the $60$~MB budget of the monitoring
+computer.
+
+\begin{figure}[t]
+\noindent\textbf{Algorithm 1  Extracting a Trustworthy Rate from One Cycle} Cycles too straight to constrain the relaxation constant are rejected before any fit is attempted. The profiled
+least-squares estimator for \eqref{eq:le}. Solving all $150$ grid
+values of $k$ as one stacked $3\times3$ system keeps a full pass over
+$239$ cycles under one second
+
+\begin{verbatim}
+Input: one cycle (t, y) of duration T
+Parameter: c* = 0.45, grid K over k
+Output: the estimates r_b and k for the cycle
+c <- (y(0)-y(T/2)) / (y(0)-y(T))  // shape only
+if c < c* then reject the cycle and stop
+for each k in K do
+    D(k) <- [exp(-k t), t, 1]     // design matrix
+    b(k) <- argmin_v |y - D(k)v|^2  // 3x3 solve
+    s(k) <- |y - D(k) b(k)|^2     // residual
+end for
+k_fit <- argmin_k s(k)
+return r_b = -b_2(k_fit) and k_fit
+\end{verbatim}
+
+\end{figure}
+
+Line~1 computes the curvature
+$c$ of Eq.~\eqref{eq:curv} from three points of the raw trajectory; no
+model is fitted, so nothing about a fit can influence what follows.
+Line~2 discards the cycle outright when $c$ falls below $c^{*}$: such a
+descent is too straight for the two terms of Eq.~\eqref{eq:le} to be
+told apart, and no estimate is preferable to a meaningless one.
+Line~3 opens a sweep over the grid $K$, which is worth doing because
+Eq.~\eqref{eq:le} is linear in $P_{eq}$, $A$ and \rb{} once $k$ is
+held fixed. Line~4 builds the design matrix $D(k)$ of
+Eq.~\eqref{eq:design} for the current $k$, Line~5 solves the resulting
+$3\times3$ least-squares problem in closed form, and Line~6 records the
+residual sum of squares $S(k)$ of Eq.~\eqref{eq:profile}. Line~7 closes
+the sweep, which has by then replaced one four-parameter non-linear
+fit with $150$ exact linear ones---the reason a full pass stays inside
+the memory budget of the monitoring computer. Line~8 keeps the $k$
+whose residual was smallest, and Line~9 returns it together with
+\rb{}, read off as the negative of the coefficient on $t$ because the
+linear term enters Eq.~\eqref{eq:le} with a minus sign.
+
+Algorithms~2 and~3 both call three small subroutines, listed together
+below so that each is defined before it is used. What separates the two
+validations is not these routines but the numbers they are given.
+
+\begin{figure}[t]
+\noindent\textbf{Subroutines called by Algorithms 2 and 3}
+
+\begin{verbatim}
+FitPhysical(t, y):
+  for each k in K do
+    fit P_eq + A exp(-k t) by least squares
+  return the (P_eq, A, k) of smallest residual
+ResidualSD(t, y, P_eq, A, k):
+  r <- y - (P_eq + A exp(-k t))
+  return sqrt(r.r / (n - 3))    // 3 fitted
+DrawAR1(n, sigma, phi):
+  s <- sigma sqrt(1 - phi^2)
+  z(1) <- Normal(0, sigma)
+  for j <- 2 to n do
+    z(j) <- phi z(j-1) + Normal(0, s)
+  return z
+\end{verbatim}
+\end{figure}
+
+$\mathrm{FitPhysical}$ is Algorithm~1 with the biological term deleted:
+the same grid over $k$, but a design matrix of two columns instead of
+three, so the fit returns the best account of the descent that a purely
+physical model can give. $\mathrm{ResidualSD}$ then measures what that
+account failed to explain, dividing by $n-3$ because three parameters
+were fitted; the result is a single number per cycle, in the units of
+pressure. $\mathrm{DrawAR1}$ returns a first-order autoregressive
+sequence whose innovations are scaled by $\sigma\sqrt{1-\varphi^{2}}$
+rather than by $\sigma$, which is what keeps the standard deviation of
+the sequence itself at $\sigma$ regardless of $\varphi$; without that
+factor a larger autocorrelation would silently inflate the noise as
+well.
+
+\subsection{Parameter-Degeneracy Assessment}
+
+Across the retained cycles the fitted \rbh{} and \kh{} correlate at
+$\rho=0.790$, which read naively looks like proof that the estimate is
+an artifact. It is not readable in isolation: \rbh{} and \kh{} jointly
+absorb the same descent, so they correlate even when the truth is
+fixed. The question is how far the correlation \emph{exceeds} what a
+fixed truth already produces.
+
+We therefore apply empirical calibration in the sense of Schuemie et
+al.~\cite{schuemie2014interpreting}, replacing the theoretical null
+$\rho=0$ with one estimated from cases where the truth is known. The
+null is generated by design-matched simulation (Algorithm~2): each real
+cycle contributes its own fitted $\kh,\hat{A},\hat{P}_{eq}$, duration,
+residual scale and first-order autoregressive
+(AR(1)) coefficient, only the true \rb{} is
+substituted, and the result passes through the identical pipeline, so
+the estimator's distortion appears on both sides and cancels---the
+logic of indirect inference \cite{gourieroux1993indirect}. Our adaptation is the source of the negative controls: ours are
+simulations reusing the real designs, which fixes the truth exactly
+instead of assuming it.
+
+\begin{figure}[t]
+\noindent\textbf{Algorithm 2  Measuring and Removing the Degeneracy Bias} Sweeping
+$\beta$ with this routine gives the curve of Fig.~\ref{fig:matched};
+a constant truth ($\beta=0$) returns $\rho=0.290\pm0.048$, and a truth
+independent of $k$ returns $\rho=0.122\pm0.079$, against an observed
+$0.790$
+
+\begin{verbatim}
+Input: per-cycle LE fits k, A, P_eq, t, sigma, phi
+Parameter: truth r_b(.), R = 25, quantum q = 0.01
+Output: baseline distributions of rho and m
+for r <- 1 to R do
+  for i <- 1 to 207 do
+    e <- DrawAR1(n, sigma, 1.3 phi)   // from LE fit
+    z <- P_eq + A exp(-k t) - r_b(k) t + e
+    y <- q round(z / q)         // same quantum
+    (rb, kk) <- Algorithm 1 (t, y)
+  end for
+  rho(r) <- Spearman(rb, kk)    // over the 207
+  m(r) <- median(rb)
+end for
+return the distributions of rho and m
+\end{verbatim}
+
+\end{figure}
+
+Line~1 repeats the whole
+pipeline $R$ times, so that the baseline comes out as a distribution
+rather than a single number, and Line~2 walks the $207$ retained
+cycles inside each repetition. Line~3 calls $\mathrm{DrawAR1}$, which
+returns a first-order autoregressive sequence at that cycle's own
+residual scale rather than white noise, because the measured
+residuals are not white. Line~4 assembles the synthetic
+trace from that same cycle's own fitted $P_{eq}$, $A$ and $k$, with
+only the biological rate replaced by the candidate truth $\rb(k)$:
+every quantity except the one under test is inherited from the real
+cycle, so the distortion measured is the distortion that applies to
+\emph{that} cycle. Line~5 puts the trace through the same
+$0.01$~\pu{} quantization as the instrument, and Line~6 through the
+estimator of Algorithm~1, unchanged. Line~7 closes the pass over the
+cycles. Line~8 then records the correlation the pipeline produces
+from a truth that is known, which is the quantity to be compared
+against the observed $\rho$, and Line~9 records the aggregate median,
+whose departure from the truth put in is the bias to be removed.
+Line~10 closes the repetitions and Line~11 returns both
+distributions.
+
+The simulator itself must be shown adequate, or the baseline means
+nothing. We use a classifier two-sample test, introduced for this
+purpose by Friedman \cite{friedman2003multivariate} and revisited by
+Lopez-Paz and Oquab \cite{lopezpaz2017revisiting}, and applied to
+simulator and emulator validation by Dalmasso et
+al.~\cite{dalmasso2020validation}: a classifier is trained to tell real
+trajectories from simulated ones, and an area under the receiver
+operating characteristic curve (AUC) near $0.5$ indicates the
+two are indistinguishable. The noise model is calibrated on one half of
+the cycles and the AUC computed on the held-out half.
+
+\subsection{Purely Physical Null-Model Test}
+\label{sec:null}
+
+The validity of the test behind $p=0.024$ (Algorithm~3) rests on what the null is
+allowed to contain. For each retained cycle we fit the two-parameter
+form $P(t)=P_{eq}+A\,e^{-kt}$, that is \eqref{eq:le} with $\rb$ forced
+to zero, so the fitted null reproduces the cycle's own equilibrium,
+amplitude and relaxation constant. We regenerate the cycle from that
+fit, add AR(1) noise at its own residual scale, quantize to
+$0.01$~\pu{}, and pass it through the identical screen and estimator.
+Over all $207$ cycles this yields one draw of the aggregate median
+under a physics-only truth; $60$ draws give its null distribution.
+
+\begin{figure}[t]
+\noindent\textbf{Algorithm 3  Ruling Out a Purely Physical Explanation}
+The reference is fitted per cycle, so it inherits every degree of
+freedom the alternative has except the biological rate itself, and it
+passes through the same quantization, screen and estimator
+
+\begin{verbatim}
+Input: the retained cycles (t, y), i = 1..207
+Parameter: draws D, grid K, quantum q = 0.01
+Output: reference distribution of the median
+for i <- 1 to 207 do
+  (P_eq, A, k) <- FitPhysical(t, y)  // r_b fixed 0
+  sigma <- ResidualSD(t, y, P_eq, A, k)
+end for
+for d <- 1 to D do
+  for i <- 1 to 207 do
+    e <- DrawAR1(n, sigma, 1.3 phi)  // physics-only
+    z <- P_eq + A exp(-k t) + e
+    w <- q round(z / q)         // same quantum
+    rb <- Algorithm 1 (t, w)    // same estimator
+  end for
+  m(d) <- median(rb)
+end for
+return the distribution of m over D draws
+\end{verbatim}
+
+\end{figure}
+
+Line~1 opens a first pass over the retained cycles, in which the
+reference itself is constructed. Line~2 calls $\mathrm{FitPhysical}$,
+which refits the cycle with the rate held at zero and returns the
+$P_{eq}$, $A$ and $k$ that give the best purely physical account of
+that particular descent. Line~3 calls $\mathrm{ResidualSD}$, which
+returns the root-mean-square residual of that same fit with its three
+fitted parameters removed from the degrees of freedom; that scalar is
+how much scatter physics alone leaves behind on this cycle, and it
+sets the amplitude of the synthetic noise added later at Line~7.
+Line~4 closes the pass. Line~5 then
+draws $D$ realisations of the reference and Line~6 walks the cycles
+within each. Line~7 calls the same $\mathrm{DrawAR1}$ routine that
+Algorithm~2 uses, but not with the same numbers: there the scale and
+the autocorrelation come from the residuals of the full fit of
+\eqref{eq:le}, whereas here they come from the residuals of the
+physics-only fit at Line~2. The distinction matters and it runs in our
+favour. A straight biological trend that the physics-only model cannot
+represent is left in its residuals, so those residuals are both larger
+and smoother: across the retained cycles the median scale rises from
+$0.0056$ to $0.0064$~\pu{} and the median autocorrelation from $0.30$
+to $0.48$. The reference is therefore granted more noise, and noise of
+exactly the slowly varying kind that a linear term can be mistaken
+for, than the alternative it is being compared against. Line~8
+generates a trace from the physics-only fit, with no linear term
+present at all. Line~9 applies the same quantization and
+Line~10 the same estimator, which is what makes the outcome
+interpretable: any rate reported here is an artifact of the pipeline,
+since there is no biological rate in the data to find. Line~11 closes
+the pass over cycles, Line~12 records the aggregate median of that
+realisation, Line~13 closes the draws, and Line~14 returns the
+resulting distribution.
+
+The null is fitted per cycle rather than pooled, so it is granted every
+degree of freedom the alternative has except $\rb$ itself. Under it the
+aggregate median is
+$+0.00008 \pm 0.00010$~\ratu{}, two orders of magnitude below the
+observed $0.0132$.
+
+\section{Experimental Results}
+\label{sec:results}
+
+The results are organised by question rather than by algorithm: which
+cycles enter the analysis, what rate they give, how much of that rate
+survives the degeneracy, whether physics alone can account for it, and
+whether an independent channel agrees.
+
+\subsection{Experimental Setup and Pressure Cycles}
+\label{sec:setup}
+
+The record analysed here is the plant's own operating log: one pressure
+value a minute, quantized at $0.01$~\pu{}, with nothing added to the
+instrument and no excitation imposed on it. Applying the threshold rule
+of Sect.~\ref{sec:dynamics} to the whole archive returns $351$ segments, of which $270$ are
+distinct: the same logger files are stored in more than one folder,
+and the copies are removed before anything is fitted. The distinct
+descents were logged over periods that do not all share the same operating
+condition, and three groups are set aside before any rate is compared.
+One period was charged at an \ce{H2}:\ce{CO2} ratio of $1{:}1$ instead
+of the $4{:}1$ of Sect.~\ref{sec:dynamics}, which changes the
+proportion in which the two gases leave the headspace. One covers an
+interval during which liquid recirculation was switched off, so
+gas--liquid transfer is not the regime Eq.~\eqref{eq:le} describes.
+The third returns a negative median rate---biology producing
+pressure---which is physically impossible and points to a fault in the
+record rather than to a slow culture.
+
+The first two criteria are settled by the recorded operating condition
+alone. The third is not: it is settled by the fitted result, and we
+therefore report what happens without it. Keeping only the two
+condition-based exclusions moves the screened median from $0.0132$ to
+$0.0126$~\ratu{}, and applying none of the three moves it to
+$0.0120$~\ratu{}; the two shifts, $-4.6\%$ and $-8.8\%$, are both
+smaller than the accuracy quoted for the reported rate, so the result
+does not rest on the exclusion that looked at an outcome. What the
+exclusions leave is $239$ cycles, of which the curvature screen retains
+$207$. The median descent runs for $10.2$~hr, with quartiles at $7.1$
+and $21.6$~hr, and ends in a narrow band---three quarters of them
+between $0.70$ and $0.80$~\pu{}---which is the refill threshold making
+itself visible in a record that never states it.
+
+Those $207$ cycles come from four logging periods whose individual
+medians run from $0.0113$ to $0.0203$~\ratu{}, and dropping either of
+the two largest periods moves the aggregate by $-13.6\%$ or $+26.6\%$.
+That spread is wider than the $\pm 11.0\%$ accuracy that
+Sect.~\ref{sec:degen} will attach to the calibrated rate, and the two
+statements do not contradict each other: the interval says how
+precisely the median of \emph{this} record is pinned down, not how
+steady the culture is from month to month. The
+rate reported below is an aggregate over the record analysed, and the
+variation between periods is itself what
+Sect.~\ref{sec:degen} establishes on independent grounds---a rate that
+is constant across cycles is excluded by the calibration.
+
+\subsection{Physical and Biological Rate Estimation}
+
+Figure~\ref{fig:estimates} shows what Algorithm~1 returns on the
+retained cycles.
+Panel~(a) is a single cycle whose $\hat{k}$ and \rbh{} both sit close
+to the medians of the retained set: the fitted trajectory follows the
+quantized record over ten hours, and the gap between the fitted total
+and its physical part is the biological contribution the decomposition
+is there to isolate. Panels~(b) and~(c) give the distributions over all
+retained cycles. The relaxation constant spans two orders of magnitude
+with median $0.15$~\invh{}, and the per-cycle rate has median
+$0.0132$~\ratu{} before calibration.
+
+\begin{figure*}[t]
+\centering
+\includegraphics[width=\textwidth]{figG_estimates.pdf}
+\caption{What the estimator returns on the $207$ retained cycles.
+(a)~A cycle with \kh{} and \rbh{} near the medians of the set; the
+logged trace advances in steps of $0.01$~\pu{}, and the shaded band
+between the fitted total and its physical part is the biological
+contribution. (b)~Distribution of the fitted relaxation
+constant, on a logarithmic axis. (c)~Distribution of the fitted
+biological rate; the dotted line marks zero, and values outside the
+plotted range are collected in the end bars rather than shown at their
+own positions.}
+\label{fig:estimates}
+\end{figure*}
+
+The spread in panel~(c) is why the aggregate is reported and the
+per-cycle value is not: $42$ of the $207$ cycles return a negative
+rate, which is physically impossible and is the degeneracy of
+Sect.~\ref{sec:dynamics} expressing itself on individual descents.
+
+That spread also fixes how the cycles are pooled. With those negative
+values at one end and a tail reaching several times the centre at the
+other, the mean over per-cycle estimates is neither robust nor
+interpretable, whereas the median of a set whose members are noisy but
+not systematically ordered remains a usable summary. The median is
+equally what the calibration is built around: the matched simulations
+of Sect.~\ref{sec:degen} report that same functional on data generated
+from a known truth, so the distortion measured there is the distortion
+of the quantity actually reported. The estimand is therefore the median
+rate over the cycles the screen retains, and every correction and
+interval quoted below refers to that functional rather than to any
+individual cycle. What the median survives and a single cycle does not
+is the subject of the next two subsections.
+
+\subsection{Robustness Against Parameter Degeneracy}
+\label{sec:degen}
+
+Rather than assume a form for the $k$ dependence, we treat its strength
+as the quantity to be inverted. Writing the truth as
+$\rb(k)=\rb^{0}(k/k_{med})^{\beta}$---a power law, so that \rb{} cannot
+turn negative and the median truth is $\rb^{0}$ for every
+$\beta$---we sweep $\beta$ and run the full matched pipeline at each
+value, obtaining the calibration curve of Fig.~\ref{fig:matched}(a).
+Table~\ref{tab:rate} collects the resulting figures alongside the
+counts and the rate they lead to.
+
+\begin{table}[t]
+\caption{The recovered rate and the calibration checks behind it. The
+baseline rows are design-matched simulations in which the true rate is
+known, so the estimator's own distortion can be read off directly.}
+\label{tab:rate}
+\centering
+\begin{tabular}{lrr}
+\toprule
+Quantity & Value & Note \\
+\midrule
+Descents segmented & $351$ & threshold rule \\
+Distinct descents & $270$ & duplicate copies removed \\
+Cycles analysed & $239$ & after condition exclusions \\
+Cycles retained & $207$ & $c \ge 0.45$ \\
+Calibrated \rb{} & $0.0125$~\ratu{} & $95\%$ $[0.0112,\ 0.0139]$ \\
+\quad sampling component & $6.0\%$ & standard error, $207$ cycles \\
+\quad systematic component & $\pm 2.2\%$ & range over the compatible set \\
+Physics-only reference & $p=0.024$ & pure exponential truth \\
+\midrule
+Observed $\rho(\rbh,\kh)$ & $0.790$ & \\
+Calibration, $\beta=0$ (constant) & $0.290 \pm 0.048$ & artefact level \\
+Baseline, \rb{} independent of $k$ & $0.122 \pm 0.079$ & \\
+Compatible set & $0.15 \le \beta \le 0.80$ & within calibration scatter \\
+\midrule
+Raw profiled median & $0.0132$~\ratu{} & before correction \\
+Calibrated correction & $-4.8\%$ & estimator distortion only \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+A constant truth is excluded: $\beta=0$ produces only
+$\rho=0.290 \pm 0.048$ against the observed $0.790$, a gap of roughly
+ten standard deviations, and making \rb{} merely variable without
+tying it to $k$ lowers the correlation further, to $0.122$. Truths
+with $\beta$ between $0.15$ and $0.80$ reproduce the observed
+correlation to within the calibration scatter, and it is that
+compatible set we carry forward.
+
+The same calibration then supplies the correction
+(Fig.~\ref{fig:matched}(b)), and it separates two effects that must not
+be conflated. The screen admits cycles by curvature, so the truths it
+keeps are not those of the whole population; that displacement grows
+with $\beta$ and reaches $30\%$ at the top of the compatible set. This
+displacement must not be corrected, because it is not a distortion of
+the estimate but a property of the quantity being estimated: what we
+report is the rate \emph{on the cycles where it is identifiable}, and
+the screen is what selects them. Correcting it would mean reporting a
+rate for cycles on which no rate can be recovered. What must be
+corrected is the estimator's own distortion, measured against
+the truths actually kept, and that stays between $+2.1\%$ and
+$+6.7\%$ across the whole compatible set---positive at every value of
+$\beta$, so the estimator overstates the rate throughout. Inverting it corrects the raw
+profiled median by $-4.8\%$, to $0.0125$~\ratu{}, at the centre of the
+compatible set. That single point is not the reported value. Because
+the correction enters as a quotient and the bias is not symmetric
+across the set, we draw the bias and the sampling error together by
+Monte Carlo, which shifts the centre slightly. The calibrated rate,
+with the bracket giving its $95\%$ confidence interval, is
+\begin{equation}
+\rb = 0.0125\ [0.0112,\ 0.0139]~\ratu{} .
+\label{eq:rate}
+\end{equation}
+
+That confidence interval combines two sources that behave differently. Resampling
+the $207$ cycles gives a standard error of $6.0\%$ on the median, which
+shrinks as logging continues; the spread over the compatible truths is
+$\pm 2.2\%$ and does not, being set by how sharply the calibration
+separates members of the family rather than by how many cycles are
+seen. Since the correction enters as a quotient we draw from both by
+Monte Carlo. The two figures are quoted in different units---the first
+is one standard error, the second a full range---so they do not add:
+the Monte Carlo returns the $95\%$ half-width of $\pm 11.0\%$ in
+\eqref{eq:rate}---the accuracy
+with which a single quantized pressure channel fixes the biological
+rate, and the main quantitative result of this paper.
+
+The classifier two-sample test is reported next. A
+white-Gaussian noise model is separated at $\mathrm{AUC}=0.954$; the
+residuals of real cycles in fact carry a lag-1 autocorrelation with
+median $0.237$. Modeling the noise as AR(1) reduces this to $0.766$,
+and inflating $\hat{\varphi}$ by the factor $1.3$ calibrated on the
+held-out split reaches $0.706$. All ten marginal trajectory features
+then agree to within $0.34$ pooled standard deviations, the largest gap
+being the monotone fraction ($0.815$ against $0.788$), with curvature,
+residual scale, lag-1 autocorrelation, amplitude and duration all
+within $0.18$; we return to the residual mismatch in
+Sect.~\ref{sec:limits}.
+
+\label{sec:endpoint}
+
+Segmentation ends each cycle at the sample immediately before a refill,
+and that sample is selected \emph{because} pressure fell far enough to
+trigger, so it should sit below the underlying trend. It does: across
+the retained cycles the terminal residual averages $-0.0067$ of the
+cycle amplitude, with a $95\%$ interval of $[-0.0115,\ -0.0019]$ that
+excludes zero, against a mid-cycle mean indistinguishable from zero
+with a spread of $0.0017$. Most of the effect has already been removed
+by the screen, and not by design: on the unscreened descents the same
+statistic is $-0.0675$, ten times larger, because a cycle too straight
+to constrain $k$ is also one whose fit is least anchored at its ends.
+Since a linear slope is most sensitive at its endpoints, what remains
+is still a route to an inflated rate, though small enough to move the
+slope by about a percent.
+
+Trimming settles it. Removing the last $5$ to $90$ minutes of every
+cycle moves the median \rb{} within $0.0125$--$0.0142$~\ratu{}, a
+scatter of $\pm 6\%$ about the untrimmed value with no monotone trend,
+and a design-matched simulation carrying no trigger selection at all
+drifts over a comparable range as the same samples are removed. The
+displacement is therefore a property of shortening the window rather
+than of the trigger: one anomalous sample among roughly $610$ has too
+little leverage to bend the slope.
+
+\begin{figure}[t]
+\centering
+\includegraphics[width=\linewidth]{figB_matched_baseline.pdf}
+\caption{Calibration against the strength $\beta$ of the $k$
+dependence, each point a full matched pipeline; the band in~(a) is
+$\pm1$ standard deviation and the shading in both is the compatible
+set. (a) A
+constant truth ($\beta=0$) falls ten standard deviations below the
+observation. (b) The estimator's own distortion, which we correct, and
+the screen's selection of truths, which is definitional; inverting the
+first gives the $-4.8\%$ correction.}
+\label{fig:matched}
+\end{figure}
+
+\subsection{Evaluation Against the Purely Physical Null Model}
+
+The remaining question is whether the observed rate could have arisen
+with no biology at all. Following Algorithm~3, each retained cycle is
+refitted with \rb{} forced to zero, regenerated from that fit with
+AR(1) noise at its own residual scale, quantized to $0.01$~\pu{}, and
+passed through the same screen and the same estimator. The reference
+therefore keeps every degree of freedom the alternative has except the
+biological term itself.
+
+\begin{figure}[t]
+\centering
+\includegraphics[width=\textwidth]{figH_null.pdf}
+\caption{The physics-only reference never reaches the observed rate.
+Bars are the aggregate median returned by the same pipeline when the
+truth is $\rb\equiv 0$; the vertical line is the observed median.}
+\label{fig:null}
+\end{figure}
+
+The reference does not come close. Its aggregate median is
+$0.00027$~\ratu{} and its largest draw reaches $0.0056$, against an
+observed median of $0.0132$: no draw attains the observation, which
+gives a permutation $p=0.024$ over $41$ draws
+(Fig.~\ref{fig:null}). The pressure descent therefore contains a
+component that a physics-only model cannot produce. We stress the
+direction of this inference: it excludes a purely physical explanation;
+it does not by itself establish that the residual component is
+biological.
+
+\subsection{An Independent Channel: Redox Potential}
+
+Everything above is derived from pressure, and surviving a
+physics-only reference says what the residual component cannot be, not
+what it is. The reactor also logs ORP. It
+enters no part of the estimate and is not a rate. Redox potential is an
+established monitoring variable for anaerobic digestion, used as an
+indicator of process state and as an early warning of instability
+\cite{ao2021role}, with methanogenesis reported to proceed in a
+characteristic reducing window \cite{vongvichiankul2017relationship};
+the potential recorded here, referred to the standard hydrogen
+electrode, falls inside that window. It is a mixed potential rather
+than a probe of any single species, so we use it only to order cycles,
+never to measure a rate, and that is what makes it usable as a check.
+
+The comparison has to be made per unit time. Taken over a whole cycle
+the net change in redox potential is largely a clock: a long descent
+accumulates more of it, and long descents also carry a lower fitted
+rate, so ordering cycles by the cumulative change reproduces the
+duration effect rather than any activity. Using the change per hour
+instead, and comparing the aggregate rate across terciles, gives
+$0.0120$, $0.0129$ and $0.0150$~\ratu{} from least to most active---a
+$25\%$ span, in the direction the interpretation predicts.
+
+That span is not resolved by the present record. Its bootstrap
+interval, $[-0.0043,\ 0.0077]$, contains zero, so the ordering is
+consistent with the redox channel tracking the same variation the
+calibration found in \rb{}, but does not on its own establish it. We
+report it as a direction that agrees rather than as a confirmation, and
+the reason is the one the rest of the paper keeps meeting: ORP is a
+mixed potential with no composition anchor, so what it supplies is a
+ranking of limited precision, not a second measurement of the rate.
+Sharpening it needs the chemical channel discussed in
+Sect.~\ref{sec:limits}, not more cycles.
+
+\section{Discussion}
+\label{sec:limits}
+
+\subsubsection{Why pressure decline cannot be read as biological
+activity.}
+The pressure record is cheap, continuous and already being logged,
+which is what makes it attractive for process monitoring; the
+difficulty is that a descent is not a measurement of the culture. Every
+refill leaves the liquid undersaturated, so for part of each cycle the
+headspace is losing gas to dissolution at the same time as the culture
+is consuming it. Reading the descent rate as biological activity
+therefore overstates it, and the overstatement is largest exactly when
+the plant has just been refilled. That is the reason the decomposition
+of Eq.~\eqref{eq:le} is needed at all, and the reason a screen has to
+run before the fit: on a cycle whose curvature is too weak, the two
+contributions are interchangeable and no fit can apportion them.
+
+\subsubsection{What the recovered rate is, and what it is not.}
+The quantity in Eq.~\eqref{eq:rate} is a \emph{pressure-derived
+biological removal rate}: the part of the headspace pressure loss that
+a purely physical model cannot produce. It is not a methane production
+rate. Converting one into the other would require the headspace volume
+and the operating temperature, and would then have to be checked
+against a composition measurement, which this instrument cannot supply
+because its analyser channels are stale for $99.98\%$ of samples. The
+direction of the inference matters as much as its size: the null test
+of Sect.~\ref{sec:null} excludes a purely physical explanation, but
+what excludes physics does not by itself identify biology. That
+attribution rests on the stoichiometry of the process, and on a redox
+ordering that agrees in direction without resolving the size, rather
+than on the pressure channel itself.
+Used as a relative indicator on one vessel over time---has the rate
+fallen since last week, did the new circulation setting help---the
+number is on firmer ground than it would be as an absolute figure.
+
+\subsubsection{Limitations.}
+Three limits bound what the preceding numbers support. First,
+Eq.~\eqref{eq:le} treats \rb{} as constant within a cycle. That is a
+simplifying assumption: the culture is not obliged to consume at a
+fixed rate across ten hours, and a slow decline within the cycle would
+be partly absorbed by the exponential term. It is the assumption that
+makes the linear term identifiable at all, and relaxing it would
+require a second observable.
+
+Second, the aggregate median is recoverable but the per-cycle estimates
+are not: individual values scatter widely and are coupled to \kh{}, so
+nothing here licenses reading a single cycle as a rate measurement. The
+same applies to the redox check: it also responds to pH and to
+dissolved carbon dioxide, so it is not a hydrogen probe, and without a
+composition anchor it cannot be turned into a rate to set against
+Eq.~\eqref{eq:rate}. Of the $\pm 11.0\%$ on the rate, the $\pm 2.2\%$
+systematic part is fixed by the calibration rather than by the record
+length; narrowing it needs the form of $\rb(k)$ itself, which a second
+chemical channel would supply.
+
+Third, the simulator remains distinguishable from reality at
+$\mathrm{AUC}=0.706$ even after all ten marginal features are matched,
+so the mismatch lies in joint structure we have not identified. The
+matched baselines are consequently approximate, and we do not attempt
+simulation-based inference on this simulator: a posterior learned from
+a misspecified simulator would be narrow and wrong rather than merely
+uncertain.
+
+\section{Conclusion}
+
+We have presented a pressure-based framework that separates the
+transient physical relaxation following a refill from the sustained
+biological gas removal that continues through a biomethanation cycle,
+using a single pressure channel quantized at $0.01$~\pu{} and nothing
+added to a vessel in production. A screen computed from the raw
+trajectory decides which cycles can carry the separation at all, and
+the estimator returns a rate only for those.
+
+Two validations bound what that rate means. A design-matched
+calibration measures the distortion the estimator itself introduces and
+removes it, and in doing so rules out a constant biological rate across
+cycles. A purely physical null model, fitted per cycle and passed
+through the same screen and estimator, shows that physical relaxation
+alone does not reproduce the observed removal. Across $207$ screened
+cycles the recovered rate is $0.0125$~\ratu{}, accurate to $11.0\%$, of
+which $2.2\%$ is systematic and does not shrink with a longer record.
+
+Future work will validate this pressure-derived biological removal rate
+against direct methane-production measurements, which would also fix
+the conversion to molar units, and will examine its use as a real-time
+indicator of culture activity in continuous biomethanation.
+
+\subsubsection{Acknowledgements.} The reactor is operated under
+invention patent TW~I923176 held by the Metal Industries Research \&
+Development Centre.
+
+% 13 筆。改版時砍掉 7 筆較邊緣者以省版面：jackson2005／killick2012
+% （§3 原本誤述為用最佳分割切分，實際是閾值規則，連同誤述一併移除）、
+% scargiali2010（與 linek1989 重複）、pastorpoquet2019（與 donosobravo2011
+% 重複）、decrescenzo2022、guerrier2019（與 gourieroux1993 重複）、
+% palminteri2017（與 wilson2019 重複）。每一筆保留者都在正文被引用過。
+
+\begin{thebibliography}{12}
+
+\bibitem{acostapavas2023dynamic}
+Acosta-Pavas, J.C., Robles-Rodr\'{i}guez, C.E., Morchain, J., Dumas, C.,
+Cockx, A., Aceves-Lara, C.A.: Dynamic modeling of biological methanation
+for different reactor configurations: an extension of the anaerobic
+digestion model No.~1. Fuel \textbf{344}, 128106 (2023).
+\url{https://doi.org/10.1016/j.fuel.2023.128106}
+
+\bibitem{ao2021role}
+Ao, T., Chen, L., Zhou, P., Liu, X., Li, D.: The role of
+oxidation--reduction potential as an early warning indicator, and a
+microbial instability mechanism in a pilot-scale anaerobic mesophilic
+digestion of chicken manure. Renew. Energy \textbf{179}, 223--232 (2021).
+\url{https://doi.org/10.1016/j.renene.2021.07.047}
+
+\bibitem{bandyopadhyay1967dynamic}
+Bandyopadhyay, B., Humphrey, A.E., Taguchi, H.: Dynamic measurement of
+the volumetric oxygen transfer coefficient in fermentation systems.
+Biotechnol. Bioeng. \textbf{9}(4), 533--544 (1967).
+\url{https://doi.org/10.1002/bit.260090408}
+
+\bibitem{dalmasso2020validation}
+Dalmasso, N., Lee, A.B., Izbicki, R., Pospisil, T., Kim, I., Lin,
+C.-A.: Validation of approximate likelihood and emulator models for
+computationally intensive simulations. In: AISTATS. PMLR, vol.~108,
+pp. 3349--3361 (2020)
+
+\bibitem{donosobravo2011model}
+Donoso-Bravo, A., Mailier, J., Martin, C., Rodr\'{i}guez, J.,
+Aceves-Lara, C.A., Vande Wouwer, A.: Model selection, identification
+and validation in anaerobic digestion: a review. Water Res.
+\textbf{45}(17), 5347--5364 (2011).
+\url{https://doi.org/10.1016/j.watres.2011.08.059}
+
+\bibitem{friedman2003multivariate}
+Friedman, J.H.: On multivariate goodness-of-fit and two-sample testing.
+In: Proc. PHYSTAT2003, SLAC, Stanford, CA. SLAC-PUB-10325 (2003).
+\url{https://doi.org/10.2172/826696}
+
+\bibitem{ghiat2025circularity}
+Ghiat, I., Banu, A., Bicer, Y., Amhamed, A.I., Al-Ansari, T.:
+Circularity within carbon capture networks: a review of capture and
+utilization technologies. J. CO2 Util. \textbf{95}, 103075 (2025).
+\url{https://doi.org/10.1016/j.jcou.2025.103075}
+
+\bibitem{gonzalez2023biological}
+Gonz\'{a}lez, R., Cabeza, I.O., Casallas-Ojeda, M., G\'{o}mez, X.:
+Biological hydrogen methanation with carbon dioxide utilization:
+methanation acting as mediator in the hydrogen economy. Environments
+\textbf{10}(5), 82 (2023).
+\url{https://doi.org/10.3390/environments10050082}
+
+\bibitem{gourieroux1993indirect}
+Gouri\'{e}roux, C., Monfort, A., Renault, E.: Indirect inference.
+J. Appl. Econom. \textbf{8}(S1), S85--S118 (1993).
+\url{https://doi.org/10.1002/jae.3950080507}
+
+\bibitem{gugler2023carbon}
+Gugler, K., Haxhimusa, A., Liebensteiner, M.: Carbon pricing and
+emissions: causal effects of Britain's carbon tax. Energy Econ.
+\textbf{121}, 106655 (2023).
+\url{https://doi.org/10.1016/j.eneco.2023.106655}
+
+\bibitem{gutenkunst2007universally}
+Gutenkunst, R.N., Waterfall, J.J., Casey, F.P., Brown, K.S., Myers,
+C.R., Sethna, J.P.: Universally sloppy parameter sensitivities in
+systems biology models. PLoS Comput. Biol. \textbf{3}(10), e189 (2007).
+\url{https://doi.org/10.1371/journal.pcbi.0030189}
+
+\bibitem{hafner2018quantification}
+Hafner, S.D., Rennuit, C., Olsen, P.J., Pedersen, J.M.: Quantification
+of leakage in batch biogas assays. Water Pract. Technol.
+\textbf{13}(1), 52--61 (2018).
+\url{https://doi.org/10.2166/wpt.2018.012}
+
+\bibitem{linek1989dynamic}
+Linek, V., Bene\v{s}, P., Vacek, V.: Dynamic pressure method for
+$k_{L}a$ measurement in large-scale bioreactors. Biotechnol. Bioeng.
+\textbf{33}(11), 1406--1412 (1989).
+\url{https://doi.org/10.1002/bit.260331107}
+
+\bibitem{lopezpaz2017revisiting}
+Lopez-Paz, D., Oquab, M.: Revisiting classifier two-sample tests. In:
+International Conference on Learning Representations (2017)
+
+\bibitem{raue2009structural}
+Raue, A., Kreutz, C., Maiwald, T., Bachmann, J., Schilling, M.,
+Klingm\"{u}ller, U., Timmer, J.: Structural and practical
+identifiability analysis of partially observed dynamical models by
+exploiting the profile likelihood. Bioinformatics \textbf{25}(15),
+1923--1929 (2009).
+\url{https://doi.org/10.1093/bioinformatics/btp358}
+
+\bibitem{rutland2025application}
+Rutland, H., You, J., Liu, H., Bowman, K.: Application of machine learning
+for FOS/TAC soft sensing in bio-electrochemical anaerobic digestion.
+Molecules \textbf{30}(5), 1092 (2025).
+\url{https://doi.org/10.3390/molecules30051092}
+
+\bibitem{schuemie2014interpreting}
+Schuemie, M.J., Ryan, P.B., DuMouchel, W., Suchard, M.A., Madigan, D.:
+Interpreting observational studies: why empirical calibration is needed
+to correct p-values. Stat. Med. \textbf{33}(2), 209--218 (2014).
+\url{https://doi.org/10.1002/sim.5925}
+
+\bibitem{simpson2026parameter}
+Simpson, M.J., Baker, R.E.: Parameter identifiability, parameter
+estimation, and model prediction for differential equation models.
+SIAM Rev. \textbf{68}(1), 153--171 (2026).
+\url{https://doi.org/10.1137/24M1667968}
+
+\bibitem{varah1985fitting}
+Varah, J.M.: On fitting exponentials by nonlinear least squares. SIAM
+J. Sci. Stat. Comput. \textbf{6}(1), 30--44 (1985).
+\url{https://doi.org/10.1137/0906003}
+
+\bibitem{vongvichiankul2017relationship}
+Vongvichiankul, C., Deebao, J., Khongnakorn, W.: Relationship between
+pH, oxidation reduction potential (ORP) and biogas production in
+mesophilic screw anaerobic digester. Energy Procedia \textbf{138},
+877--882 (2017).
+\url{https://doi.org/10.1016/j.egypro.2017.10.113}
+
+\bibitem{yoruklu2025comprehensive}
+Y\"{o}r\"{u}kl\"{u}, H.C., Kamravamanesh, D., K\"{o}ro\u{g}lu, E.O.,
+Patel, G.H., Havukainen, J., Karjunen, H., Sillman, J., Kokko, M.:
+A comprehensive review on biological methanation processes: from gaseous
+feedstocks to biomethane. Energy Convers. Manag. \textbf{341}, 120075
+(2025).
+\url{https://doi.org/10.1016/j.enconman.2025.120075}
+
+\end{thebibliography}
+
+\end{document}

@@ -11,7 +11,7 @@
     # 指定 CSV 檔案與間隔
     python sensor_simulator.py --csv data/BTP_Sensor_log-2026-02-10.csv --interval 2
 
-前提：main.py 必須已在執行中（http://192.168.55.1:8000）
+前提：main.py 必須已在執行中（http://127.0.0.1:8000）
 """
 
 import argparse

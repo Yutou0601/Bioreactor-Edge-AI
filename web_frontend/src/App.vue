@@ -5,10 +5,12 @@ import { RouterView, RouterLink } from 'vue-router'
 <template>
   <div class="shell">
     <nav class="page-nav">
-      <span class="nav-brand">BTP Edge AI</span>
+      <span class="nav-brand">BTP 監測系統</span>
       <RouterLink to="/">即時監控</RouterLink>
       <RouterLink to="/experiment">實驗批次</RouterLink>
       <RouterLink to="/report">研究分析</RouterLink>
+      <RouterLink to="/rate">生物速率</RouterLink>
+      <RouterLink to="/import">資料匯入</RouterLink>
     </nav>
     <RouterView />
   </div>

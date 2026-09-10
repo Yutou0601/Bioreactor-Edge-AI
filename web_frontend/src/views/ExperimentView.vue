@@ -16,7 +16,8 @@ const editForm = ref({ start_time: '', end_time: '' })
 const baseline = ref({ baseline_ch4: 9.0, baseline_co2: 21.0, baseline_pressure: 1.185 })
 
 // 手動新增批次
-const newRun = ref({ run_id: '', n_minutes: 1, scheduled_start: '' })
+const newRun = ref({ run_id: '', n_minutes: 1, scheduled_start: '',
+                     target_hours: 48, auto_start: false, auto_stop: false })
 
 let pollTimer = null
 
@@ -36,6 +37,11 @@ const STATUS_META = {
 
 const runningRun = computed(() => runs.value.find(r => r.status === 'running'))
 const live = computed(() => runningRun.value ? liveMap.value[runningRun.value.run_id] : null)
+
+// ⚠ 這頁顯示的一律是**總**下降速率。生物速率 r_b 是另一回事：要逐段擬合
+//    LE 模型再取多段中位數，單段 17.9％ 為負，累積 50 段（約 38 天）才進
+//    得了 ±15%。兩者混為一談會讓人把物理溶解當成生物活性。
+const RATE_TIP = '壓力總下降速率（物理溶解＋洩漏＋生物消耗全部加總）。這不是生物速率 r_b——r_b 要從 LE 模型逐段擬合、再取多段中位數，單一循環有 17.9％ 會算出負值。見「生物速率」頁。'
 
 function flash(t) { msg.value = t; setTimeout(() => { if (msg.value === t) msg.value = '' }, 3000) }
 function fmt(v, d = 3) { return (v === null || v === undefined) ? '—' : Number(v).toFixed(d) }
@@ -163,9 +169,13 @@ async function addRun() {
       run_id: newRun.value.run_id.trim(),
       n_minutes: Number(newRun.value.n_minutes),
       scheduled_start: newRun.value.scheduled_start || null,
+      target_hours: Number(newRun.value.target_hours) || 48,
+      auto_start: !!newRun.value.auto_start,
+      auto_stop: !!newRun.value.auto_stop,
       ...baseline.value,
     })
     newRun.value.run_id = ''
+    newRun.value.scheduled_start = ''   // 不留在表單裡，避免下一筆誤用同一時刻
     await loadRuns()
   } catch (e) { flash(e.response?.status === 409 ? '批次編號已存在' : '新增失敗') }
 }
@@ -329,13 +339,22 @@ onUnmounted(() => { clearInterval(pollTimer); clearInterval(ch4Timer) })
             {{ live.remaining_kg <= 0 ? '即將補氣' : live.eta_refill_hours + ' hr' }}
           </span>
           <span class="ll">距下次補氣（降到 {{ live.intake_lower }}）
-            <b class="ref">{{ live.rate_is_live ? '實測速率' : '預估速率' }}</b>
+            <b class="ref" :title="RATE_TIP">總降速 {{ fmt(live.rate_used, 4) }}{{ live.rate_is_live ? '（實測）' : '（預估）' }}</b>
           </span>
         </div>
         <div class="live-cell">
           <span class="lv">{{ fmt(live.elapsed_hours, 1) }} <small>/ {{ live.target_hours }}</small></span>
-          <span class="ll">實驗已跑 / 預計 hr</span>
+          <span class="ll">實驗已跑 / 預計 hr
+            <b v-if="live.auto_stop" class="ref">到點自動結束紀錄</b>
+          </span>
         </div>
+      </div>
+
+      <!-- 排氣提醒。⚠ 就算開了自動結束也要出現——它提醒的是「該去現場」，
+           不是「該按按鈕」；系統只讀不控，反應器不會自己停。 -->
+      <div v-if="live.vent_reminder" class="vent-warn">
+        ⚠ 批次預定 <b>{{ live.due_at }}</b> 結束（剩 {{ fmt(live.hours_left, 1) }} hr）——請準備到現場排氣。
+        <template v-if="live.auto_stop">系統會自動結束<b>紀錄</b>，但<b>不會關閥或停機</b>。</template>
       </div>
 
       <!-- 本循環即時壓力曲線 + 臨時平緩化（觀測用，未結束不進建模）-->
@@ -567,7 +586,18 @@ onUnmounted(() => { clearInterval(pollTimer); clearInterval(ch4Timer) })
       <label class="sched">開始時間（可填過去，抓既有資料）
         <input v-model="newRun.scheduled_start" type="datetime-local" class="inp" />
       </label>
+      <label class="sched">時長 hr
+        <input v-model.number="newRun.target_hours" type="number" min="1" step="1" class="inp inp-num" />
+      </label>
       <button class="btn btn-ghost" @click="addRun">＋ 新增批次</button>
+    </div>
+    <!-- 排程旗標：預設關閉＝維持原本的手動流程 -->
+    <div class="auto-row">
+      <label class="chk"><input type="checkbox" v-model="newRun.auto_start" /> 到點自動開始</label>
+      <label class="chk"><input type="checkbox" v-model="newRun.auto_stop" /> 到時自動結束紀錄</label>
+      <span class="auto-note">
+        ⚠ 本系統<b>只讀不控</b>：自動結束只是結束紀錄並計算結果，<b>不會關閥、不會停反應器</b>，現場仍須有人實際排氣。
+      </span>
     </div>
 
     <!-- 批次表 -->
@@ -579,7 +609,7 @@ onUnmounted(() => { clearInterval(pollTimer); clearInterval(ch4Timer) })
             <th>補氣band</th><th>狀態</th>
             <th class="grp">總時間<br><small>hr</small></th>
             <th class="grp">補氣<br>循環數</th>
-            <th class="grp">下降速率中位<br><small>kg/cm²/hr</small></th>
+            <th class="grp" :title="RATE_TIP">總下降速率中位<br><small>kg/cm²/hr · 含物理，非 r_b</small></th>
             <th class="grp">離散度<br><small>IQR·範圍</small></th>
             <th class="grp cov">進氣前ORP漂移<br><small>菌群共變數</small></th>
             <th class="grp">排氣峰值<br><small>ORP/pH/CO2/CH4 · <span class="pkm">橘=手動</span></small></th>
@@ -602,7 +632,19 @@ onUnmounted(() => { clearInterval(pollTimer); clearInterval(ch4Timer) })
                 <span class="badge" :style="{ color: STATUS_META[r.status]?.color, borderColor: STATUS_META[r.status]?.color }">
                   {{ STATUS_META[r.status]?.label || r.status }}
                 </span>
-                <div v-if="r.status === 'planned' && r.scheduled_start" class="sched-hint">排定 {{ r.scheduled_start.slice(5,16) }}</div>
+                <div v-if="r.status === 'planned' && r.scheduled_start" class="sched-hint">
+                  排定 {{ r.scheduled_start.slice(5,16) }}
+                  <b v-if="r.auto_start" class="auto-tag">自動</b>
+                </div>
+                <div v-if="r.status === 'running' && r.auto_stop" class="sched-hint">
+                  <b class="auto-tag">自動</b> 到時結束紀錄
+                </div>
+                <!-- ⚠ 自動結束的批次，排氣時刻與峰值都沒有人在現場確認過。
+                     感測器 1 筆/分鐘常錯過排氣瞬間的 CH4 峰，必須提示補正。-->
+                <div v-if="r.ended_by === 'auto'" class="sched-hint warn-hint"
+                     title="系統到點自動結束紀錄；真正的排氣時刻與峰值需人工補正">
+                  ⚠ 排氣時刻待確認
+                </div>
               </td>
               <td class="mono">{{ fmt(r.results.total_hours, 1) }}</td>
               <td class="mono">
@@ -894,6 +936,19 @@ onUnmounted(() => { clearInterval(pollTimer); clearInterval(ch4Timer) })
 .empty { color: #555; padding: 2rem; }
 .badge { font-size: 0.7rem; padding: 2px 8px; border: 1px solid; border-radius: 10px; }
 .sched-hint { font-size: 0.62rem; color: #557; margin-top: 3px; }
+.warn-hint { color: #b5651d; font-weight: 600; cursor: help; }
+.auto-tag { font-size: 0.58rem; padding: 0 4px; border-radius: 3px;
+            background: #e8f0fb; color: #3a6ea5; }
+.inp-num { width: 62px; }
+.auto-row { display: flex; gap: 14px; align-items: center; flex-wrap: wrap;
+            margin: -6px 0 1rem; padding: 7px 10px; border-radius: 5px;
+            background: #fbf7ee; border: 1px solid #ecdfc4; }
+.chk { font-size: 0.74rem; color: #555; display: flex; align-items: center;
+       gap: 5px; cursor: pointer; white-space: nowrap; }
+.auto-note { font-size: 0.66rem; color: #8a6d3b; line-height: 1.5; }
+.vent-warn { margin-top: 10px; padding: 8px 11px; border-radius: 5px;
+             background: #fdf3e3; border: 1px solid #e8c98d;
+             color: #8a5a1d; font-size: 0.76rem; line-height: 1.55; }
 
 .expand-cell { width: 26px; padding: 0 !important; }
 .expander { background: none; border: none; color: #667; cursor: pointer; font-size: 0.9rem; }

@@ -1,0 +1,322 @@
+% ICEA 2026 — references（2026-08-07 大改版重建）
+%
+% 查證規則（見 memory/citations_must_be_doi_verified.md）：
+%   1. 每筆先以 Crossref api.crossref.org/works/{DOI} 解析，比對題名／作者／刊名／卷期頁
+%   2. 姓氏另以第二來源交叉查證——**Crossref 自己的紀錄會截斷長姓氏**
+%   3. 無 DOI 者（會議論文集／PMLR／ICLR／書）另外標記，投稿前需人工再確認
+%   4. **每一筆都必須在正文被引用過**，未被引用者一律刪除
+%   5. **給定名（given name）也要查**——2026-08-24 實測有 7 處錯，
+%      只比對姓氏會全部漏掉。判準：三個獨立來源一致才採信。
+%      ⚠ OpenAlex 的 display_name 是它猜的作者實體，不可單獨採信
+%      （raue2009 它作 Tim/Jasmin，PubMed 原始紀錄是 T/J）。
+%      無法證實的一律降回縮寫，不要猜。
+%
+% ── 領域：厭氧消化／生物甲烷化 ────────────────────────────────
+%
+% ⚠ 威脅引用：動態除氣法從**單一**溶氧軌跡同時取出 kLa 與生物耗氧率，
+%   結構上與本文問題相同且早 59 年。必須自己先引並說明四個差異。
+%   ⚠ 第三作者 Taguchi 在二手來源常被漏掉。
+@article{bandyopadhyay1967dynamic,
+  author  = {Bandyopadhyay, B. and Humphrey, Arthur E. and Taguchi, H.},
+  title   = {Dynamic measurement of the volumetric oxygen transfer coefficient
+             in fermentation systems},
+  journal = {Biotechnology and Bioengineering},
+  volume  = {9},
+  number  = {4},
+  pages   = {533--544},
+  year    = {1967},
+  doi     = {10.1002/bit.260090408}
+}
+
+@article{donosobravo2011model,
+  author  = {Donoso-Bravo, Andres and Mailier, Johan and Martin, Cristina and
+             Rodr\'{i}guez, Jorge and Aceves-Lara, C\'{e}sar Arturo and
+             Vande Wouwer, Alain},
+  title   = {Model selection, identification and validation in anaerobic
+             digestion: A review},
+  journal = {Water Research},
+  volume  = {45},
+  number  = {17},
+  pages   = {5347--5364},
+  year    = {2011},
+  doi     = {10.1016/j.watres.2011.08.059}
+}
+
+% 用**第二個物理通道（瓶重變化）**分開生物與物理——正是本文拒絕做的事。
+@article{hafner2018quantification,
+  author  = {Hafner, Sasha D. and Rennuit, Charlotte and Olsen, Palle J. and
+             Pedersen, Johanna M.},
+  title   = {Quantification of leakage in batch biogas assays},
+  journal = {Water Practice and Technology},
+  volume  = {13},
+  number  = {1},
+  pages   = {52--61},
+  year    = {2018},
+  doi     = {10.2166/wpt.2018.012}
+}
+
+% ── 動態壓力法量 kLa ──────────────────────────────────────────
+@article{linek1989dynamic,
+  author  = {Linek, V\'{a}clav and Bene\v{s}, Petr and Vacek, Vladim\'{i}r},
+  title   = {Dynamic pressure method for {kLa} measurement in large-scale
+             bioreactors},
+  journal = {Biotechnology and Bioengineering},
+  volume  = {33},
+  number  = {11},
+  pages   = {1406--1412},
+  year    = {1989},
+  doi     = {10.1002/bit.260331107}
+}
+
+% ── 可辨識性 ──────────────────────────────────────────────────
+% 標準的擬合**後**診斷——審稿人會問為什麼不用這個，必須引並說明。
+@article{raue2009structural,
+  author  = {Raue, Andreas and Kreutz, Clemens and Maiwald, Thomas and
+             Bachmann, Julie and Schilling, Marcel and
+             Klingm\"{u}ller, Ursula and Timmer, Jens},
+  title   = {Structural and practical identifiability analysis of partially
+             observed dynamical models by exploiting the profile likelihood},
+  journal = {Bioinformatics},
+  volume  = {25},
+  number  = {15},
+  pages   = {1923--1929},
+  year    = {2009},
+  doi     = {10.1093/bioinformatics/btp358}
+}
+
+@article{gutenkunst2007universally,
+  author  = {Gutenkunst, Ryan N. and Waterfall, Joshua J. and Casey, Fergal P.
+             and Brown, Kevin S. and Myers, Christopher R. and
+             Sethna, James P.},
+  title   = {Universally sloppy parameter sensitivities in systems biology
+             models},
+  journal = {PLoS Computational Biology},
+  volume  = {3},
+  number  = {10},
+  pages   = {e189},
+  year    = {2007},
+  doi     = {10.1371/journal.pcbi.0030189}
+}
+
+% 指數擬合病態條件的來源（可追至 Lanczos 1956）——本文簡併的數學根源。
+@article{varah1985fitting,
+  author  = {Varah, James M.},
+  title   = {On fitting exponentials by nonlinear least squares},
+  journal = {SIAM Journal on Scientific and Statistical Computing},
+  volume  = {6},
+  number  = {1},
+  pages   = {30--44},
+  year    = {1985},
+  doi     = {10.1137/0906003}
+}
+
+% ── 配對基準／經驗校準 ────────────────────────────────────────
+% ⚠ 頁碼是 S85--S118（增刊），二手來源常誤寫成 85--118。
+@article{gourieroux1993indirect,
+  author  = {Gouri\'{e}roux, Christian and Monfort, Alain and Renault, Eric},
+  title   = {Indirect inference},
+  journal = {Journal of Applied Econometrics},
+  volume  = {8},
+  number  = {S1},
+  pages   = {S85--S118},
+  year    = {1993},
+  doi     = {10.1002/jae.3950080507}
+}
+
+% 最貼近本文做法：不跟理論虛無比，改跟**已知為虛無的對照**建的經驗虛無比。
+@article{schuemie2014interpreting,
+  author  = {Schuemie, Martijn J. and Ryan, Patrick B. and DuMouchel, William
+             and Suchard, Marc A. and Madigan, David},
+  title   = {Interpreting observational studies: why empirical calibration is
+             needed to correct p-values},
+  journal = {Statistics in Medicine},
+  volume  = {33},
+  number  = {2},
+  pages   = {209--218},
+  year    = {2014},
+  doi     = {10.1002/sim.5925}
+}
+
+% ── 分類器雙樣本檢定 ──────────────────────────────────────────
+% SLAC-PUB-10325 / PHYSTAT-2003-THPD002 會議論文集。優先權歸此篇。
+% 2026-08-24 查證：OSTI 有指派 DOI 10.2172/826696，題名與作者相符
+% （type=report）。年份仍記會議年 2003；OSTI 的 issued 為 2004-01-26，
+% 那是報告的存放日，不是發表年。
+% ⚠ 註解一律寫在 entry **之外**——refs_acm.py 以大括號配對抓欄位，
+%   寫在 entry 內部的 % 註解會被當成欄位值，整段漏進書目。
+@inproceedings{friedman2003multivariate,
+  author    = {Friedman, Jerome H.},
+  title     = {On multivariate goodness-of-fit and two-sample testing},
+  booktitle = {Proceedings of PHYSTAT2003, SLAC, Stanford, California,
+               September 8--11, 2003},
+  note      = {SLAC-PUB-10325},
+  year      = {2003},
+  doi       = {10.2172/826696}
+}
+
+% ⚠ 無 DOI（ICLR 不發 DOI）。作者以 dblp conf/iclr/Lopez-PazO17 與 arXiv 交叉查證。
+@inproceedings{lopezpaz2017revisiting,
+  author    = {Lopez-Paz, David and Oquab, Maxime},
+  title     = {Revisiting classifier two-sample tests},
+  booktitle = {International Conference on Learning Representations (ICLR)},
+  year      = {2017},
+  note      = {arXiv:1610.06545}
+}
+
+% ⚠ 無 DOI（PMLR）。**Schafer 不是作者**——二手來源常與另一篇 Izbicki/Lee/Schafer 混淆。
+%   本篇正是「用雙樣本檢定驗模擬器／代理模型」，與本文用途完全相同。
+@inproceedings{dalmasso2020validation,
+  author    = {Dalmasso, Niccol\`{o} and Lee, Ann B. and Izbicki, Rafael and
+               Pospisil, Taylor and Kim, Ilmun and Lin, Chieh-An},
+  title     = {Validation of approximate likelihood and emulator models for
+               computationally intensive simulations},
+  booktitle = {Proceedings of the 23rd International Conference on Artificial
+               Intelligence and Statistics (AISTATS)},
+  series    = {Proceedings of Machine Learning Research},
+  volume    = {108},
+  pages     = {3349--3361},
+  year      = {2020},
+  note      = {PMLR v108; AISTATS proceedings are not assigned DOIs}
+}
+
+% ── 模型回收（model recovery）──────────────────────────────────
+% ⚠ 2026-08-07 移除的 7 筆（正文已不引用，依「每筆都必須被引用」原則刪除）：
+%   pastorpoquet2019（與 donosobravo2011 重複）、decrescenzo2022、
+%   scargiali2010（與 linek1989 重複）、guerrier2019（與 gourieroux1993 重複）、
+%   palminteri2017（與 wilson2019 重複）、
+%   **jackson2005 與 killick2012**——原本 §3 寫「以最佳分割＋PELT 切分循環」，
+%   但 `seg_clean()` 實際是閾值規則，沒有任何變點偵測。該敘述是誤述，
+%   連同這兩筆引用一併移除。
+
+% ── 近年文獻（2026-08-12 補，皆以標題查 Crossref 取回 DOI 後核對）──
+% ⚠ 第一作者姓氏 Yörüklü，given 是「Hulya Civelek」兩個字，別拆錯。
+@article{yoruklu2025comprehensive,
+  author  = {Y\"{o}r\"{u}kl\"{u}, Hulya Civelek and Kamravamanesh, Donya and
+             K\"{o}ro\u{g}lu, Emre O\u{g}uz and Patel, Gulam Husain and
+             Havukainen, Jouni and Karjunen, Hannu and Sillman, Jani and
+             Kokko, Marika},
+  title   = {A comprehensive review on biological methanation processes:
+             from gaseous feedstocks to biomethane},
+  journal = {Energy Conversion and Management},
+  volume  = {341},
+  pages   = {120075},
+  year    = {2025},
+  doi     = {10.1016/j.enconman.2025.120075}
+}
+
+% ⚠ 末位作者 Aceves-Lara 與 donosobravo2011 是同一人，兩筆並存不是重複。
+@article{acostapavas2023dynamic,
+  author  = {Acosta-Pavas, Juan Camilo and
+             Robles-Rodr\'{i}guez, Carlos Eduardo and Morchain, J\'{e}r\^{o}me
+             and Dumas, Claire and Cockx, Arnaud and
+             Aceves-Lara, C\'{e}sar Arturo},
+  title   = {Dynamic modeling of biological methanation for different
+             reactor configurations: An extension of the anaerobic
+             digestion model No. 1},
+  journal = {Fuel},
+  volume  = {344},
+  pages   = {128106},
+  year    = {2023},
+  doi     = {10.1016/j.fuel.2023.128106}
+}
+
+% ── 2026-08-12 再補兩筆，皆以標題查 Crossref 取回 DOI 後核對 ──
+@article{simpson2026parameter,
+  author  = {Simpson, Matthew J. and Baker, Ruth E.},
+  title   = {Parameter identifiability, parameter estimation, and model
+             prediction for differential equation models},
+  journal = {SIAM Review},
+  volume  = {68},
+  number  = {1},
+  pages   = {153--171},
+  year    = {2026},
+  doi     = {10.1137/24M1667968}
+}
+
+@article{rutland2025application,
+  author  = {Rutland, Harvey and You, Jiseon and Liu, Haixia and
+             Bowman, Kyle},
+  title   = {Application of machine learning for {FOS/TAC} soft sensing in
+             bio-electrochemical anaerobic digestion},
+  journal = {Molecules},
+  volume  = {30},
+  number  = {5},
+  pages   = {1092},
+  year    = {2025},
+  doi     = {10.3390/molecules30051092}
+}
+
+% ── 領域：碳定價與二氧化碳處置（2026-08-23 新增，簡介改版用）──
+%
+% 簡介第一段的政策背景。選因果推論的實證研究而非政策報告，
+% 是為了可被 DOI 解析、也經得起審稿人查。
+@article{gugler2023carbon,
+  author  = {Gugler, Klaus and Haxhimusa, Adhurim and
+             Liebensteiner, Mario},
+  title   = {Carbon pricing and emissions: causal effects of
+             {Britain}'s carbon tax},
+  journal = {Energy Economics},
+  volume  = {121},
+  pages   = {106655},
+  year    = {2023},
+  doi     = {10.1016/j.eneco.2023.106655}
+}
+
+% 簡介第二段：CO2 有多條處置路徑，本文只取其中一條。
+@article{ghiat2025circularity,
+  author  = {Ghiat, Ikhlas and Banu, Aliya and Bicer, Yusuf and
+             Amhamed, Abdulkarem I. and Al-Ansari, Tareq},
+  title   = {Circularity within carbon capture networks: a review of
+             capture and utilization technologies},
+  journal = {Journal of CO2 Utilization},
+  volume  = {95},
+  pages   = {103075},
+  year    = {2025},
+  doi     = {10.1016/j.jcou.2025.103075}
+}
+
+% 簡介第二段：生物甲烷化本身的定位（氫經濟的中介）。
+@article{gonzalez2023biological,
+  author  = {Gonz{\'a}lez, Rub{\'e}n and Cabeza, Iv{\'a}n Orlando and
+             Casallas-Ojeda, Miguel and G{\'o}mez, Xiomar},
+  title   = {Biological hydrogen methanation with carbon dioxide
+             utilization: methanation acting as mediator in the
+             hydrogen economy},
+  journal = {Environments},
+  volume  = {10},
+  number  = {5},
+  pages   = {82},
+  year    = {2023},
+  doi     = {10.3390/environments10050082}
+}
+
+% ── 領域：氧化還原電位（2026-08-22 新增，第五節用）──────────
+%
+% ⚠ 這兩筆支持「ORP 是厭氧消化的既有監控與預警指標」，
+%   **不支持**把 ORP 當速率量測。正文的措辭必須守住這條界線。
+@article{ao2021role,
+  author  = {Ao, Tianjie and Chen, Lin and Zhou, Pan and
+             Liu, Xiaofeng and Li, Dong},
+  title   = {The role of oxidation--reduction potential as an early
+             warning indicator, and a microbial instability mechanism
+             in a pilot-scale anaerobic mesophilic digestion of
+             chicken manure},
+  journal = {Renewable Energy},
+  volume  = {179},
+  pages   = {223--232},
+  year    = {2021},
+  doi     = {10.1016/j.renene.2021.07.047}
+}
+
+@article{vongvichiankul2017relationship,
+  author  = {Vongvichiankul, Chotinath and Deebao, Jirawan and
+             Khongnakorn, Watsa},
+  title   = {Relationship between {pH}, oxidation reduction potential
+             ({ORP}) and biogas production in mesophilic screw
+             anaerobic digester},
+  journal = {Energy Procedia},
+  volume  = {138},
+  pages   = {877--882},
+  year    = {2017},
+  doi     = {10.1016/j.egypro.2017.10.113}
+}

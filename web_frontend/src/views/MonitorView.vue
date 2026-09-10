@@ -1,7 +1,6 @@
 <script setup>
 import { ref, computed, onMounted, onUnmounted } from 'vue'
 import * as echarts from 'echarts'
-import mqtt from 'mqtt'
 import apiClient from '../services/apiClient'
 
 // ==========================================
@@ -9,16 +8,15 @@ import apiClient from '../services/apiClient'
 // ==========================================
 const lastUpdateTime    = ref('--:--:--')
 const isAutoFetch       = ref(true)
-const isMqttConnected   = ref(false)
 const isBackendOnline   = ref(true)   // HTTP 後端是否可達
 const isLoadingRecords  = ref(false)
 let   _fetchPending     = false       // 防止 poll 重疊
 
-// 系統狀態文字：HTTP 為主，MQTT 為輔
+// 系統狀態文字
 const systemStatus = computed(() => {
   if (!isBackendOnline.value) return '後端無回應'
-  if (isMqttConnected.value)  return '連線正常 (Active)'
-  return 'HTTP 正常 · MQTT 離線'
+  if (isBackendOnline.value)  return '連線正常 (Active)'
+  return 'HTTP 正常'
 })
 
 // ==========================================
@@ -122,18 +120,6 @@ const phaseTimeline = computed(() => {
 })
 
 // ==========================================
-// CH4 峰值預測靜態結果（GA 特徵 LOO-CV，Ridge α=1.0）
-// ==========================================
-const CH4_PEAK_CYCLES = [
-  { id: 'C1', date: '2026-02-23', actual: 66.22, predicted: 65.81, error: -0.41 },
-  { id: 'C2', date: '2026-03-03', actual: 65.16, predicted: 59.45, error: -5.71 },
-  { id: 'C3', date: '2026-03-10', actual: 52.77, predicted: 52.60, error: -0.17 },
-  { id: 'C4', date: '2026-03-16', actual: 51.91, predicted: 53.42, error:  1.51 },
-  { id: 'C5', date: '2026-03-19', actual: 33.87, predicted: 37.58, error:  3.71 },
-  { id: 'C6', date: '2026-03-24', actual: 48.15, predicted: 51.28, error:  3.13 },
-]
-const CH4_RMSE = 3.13
-const CH4_GA_FEATURES = ['cycle_length_min', 'phase2_duration_min', 'phase2_fraction', 'phase3_onset_fraction', 'pressure_mean']
 const showCh4Panel = ref(false)
 
 // ==========================================
@@ -176,16 +162,15 @@ const fetchRecords = async () => {
   }
 }
 
-const submitRecord = async (andPublish = false) => {
+const submitRecord = async () => {
   isSubmitting.value = true
   try {
     const res = await apiClient.post('/records', formData.value)
     records.value.push(res.data)
     updateChart()
-    if (andPublish) publishViaMqtt(res.data)
     lastUpdateTime.value = new Date().toLocaleTimeString('zh-TW', { hour12: false })
   } catch (e) {
-    alert('新增失敗，請確認後端連線 (http://192.168.55.1:8000)')
+    alert('新增失敗，請確認後端服務是否啟動')
   } finally {
     isSubmitting.value = false
   }
@@ -200,20 +185,6 @@ const deleteRecord = async (id) => {
   } catch (e) { console.error('刪除失敗:', e) }
 }
 
-const publishViaMqtt = (record) => {
-  if (!mqttClient?.connected) { alert('MQTT 尚未連線'); return }
-  const payload = JSON.stringify({
-    timestamp:      record.timestamp,
-    orp:            record.orp,
-    pressure:       record.pressure,
-    ph:             record.ph,
-    temp:           record.temp,
-    mixer_pressure: record.mixer_pressure,
-    co2_pct:        record.co2_pct,
-    ch4_pct:        record.ch4_pct,
-  })
-  mqttClient.publish('reactor/01/sensors', payload, { qos: 1 })
-}
 
 // ==========================================
 // ORP 分析圖表（原始 / 去突波 / SG 濾波 / EMA + 突波標注）
@@ -317,7 +288,7 @@ const clearRecords = async () => {
     csvDetectedDate.value = ''
   } catch (e) {
     console.error('清除失敗:', e)
-    alert('清除失敗，請確認後端連線 (http://192.168.55.1:8000)')
+    alert('清除失敗，請確認後端服務是否啟動')
   } finally {
     isClearing.value = false
   }
@@ -595,24 +566,7 @@ const updateChart = () => {
 }
 
 // ==========================================
-// MQTT
 // ==========================================
-let mqttClient = null
-
-const initMqtt = () => {
-  try {
-    mqttClient = mqtt.connect('ws://192.168.55.1:9001', {
-      reconnectPeriod: 15000,   // 15s 重試一次，不要每秒洗狀態
-      connectTimeout:  4000,
-    })
-
-    mqttClient.on('connect', () => { isMqttConnected.value = true  })
-    mqttClient.on('error',   () => { isMqttConnected.value = false })
-    mqttClient.on('offline', () => { isMqttConnected.value = false })
-  } catch {
-    isMqttConnected.value = false
-  }
-}
 
 // ==========================================
 // 生命週期
@@ -628,7 +582,6 @@ onMounted(async () => {
   // 輪詢（60 秒）才畫。這裡在建圖後立刻補畫一次，避免載入後空白 60 秒。
   updateChart()
   updateGasChart()
-  initMqtt()
   // USB 每分鐘一筆，60 秒輪詢一次即可
   pollTimer = setInterval(() => {
     if (isAutoFetch.value) {
@@ -639,7 +592,6 @@ onMounted(async () => {
   window.addEventListener('resize', () => { myChart?.resize(); myGasChart?.resize() })
 })
 onUnmounted(() => {
-  mqttClient?.end()
   clearInterval(pollTimer)
   window.removeEventListener('resize', () => { myChart?.resize(); myGasChart?.resize() })
   myChart?.dispose()
@@ -653,9 +605,9 @@ onUnmounted(() => {
     <!-- ===== Header ===== -->
     <header class="header">
       <div class="brand">
-        <h1>生物反應器感測器數據管理 <small>ORP Edge Monitor · Jetson Orin NANO</small></h1>
+        <h1>生物反應器感測器數據管理 <small>ORP Monitor</small></h1>
         <div class="status-group">
-          <span class="dot" :class="{ connected: isMqttConnected && isBackendOnline, error: !isBackendOnline }"></span>
+          <span class="dot" :class="{ connected: isBackendOnline, error: !isBackendOnline }"></span>
           <span class="status-text">{{ systemStatus }}</span>
         </div>
       </div>
@@ -720,16 +672,10 @@ onUnmounted(() => {
               </div>
             </div>
             <div class="form-actions">
-              <button class="btn primary-btn" @click="submitRecord(false)" :disabled="isSubmitting">
+              <button class="btn primary-btn" @click="submitRecord()" :disabled="isSubmitting">
                 {{ isSubmitting ? '新增中...' : '新增到列表' }}
               </button>
-              <button class="btn publish-btn" @click="submitRecord(true)"
-                :disabled="isSubmitting || !isMqttConnected"
-                :title="isMqttConnected ? '新增並透過 MQTT 發布' : 'MQTT 未連線'">
-                新增並發布
-              </button>
             </div>
-            <p v-if="!isMqttConnected" class="mqtt-hint">⚠ MQTT 未連線，「新增並發布」暫不可用</p>
           </div>
         </div>
 
@@ -966,75 +912,6 @@ onUnmounted(() => {
           <div ref="gasChartRef" class="chart-container" style="height:180px"></div>
         </div>
 
-        <!-- CH4 峰值預測結果 -->
-        <div class="panel ch4-panel">
-          <div class="ch4-header">
-            <h2 class="panel-title">CH4 峰值預測結果 <small>GA + Ridge LOO-CV · 6 排氣週期</small></h2>
-            <div class="ch4-badges">
-              <span class="rmse-badge">RMSE = {{ CH4_RMSE }}%</span>
-              <span class="ga-badge">GA 選出 5/11 特徵</span>
-              <button class="btn toggle-ch4-btn" @click="showCh4Panel = !showCh4Panel">
-                {{ showCh4Panel ? '▲ 收起' : '▼ 展開' }}
-              </button>
-            </div>
-          </div>
-
-          <div v-show="showCh4Panel" class="ch4-body">
-
-            <!-- GA 特徵標籤 -->
-            <div class="ga-features">
-              <span class="ga-label">GA 選出特徵：</span>
-              <span v-for="f in CH4_GA_FEATURES" :key="f" class="ga-feat-tag">{{ f }}</span>
-            </div>
-
-            <!-- 預測 vs 實際表格 -->
-            <table class="ch4-table">
-              <thead>
-                <tr>
-                  <th>週期</th>
-                  <th>日期</th>
-                  <th class="ta-r">實際 CH4 峰值</th>
-                  <th class="ta-r">預測值</th>
-                  <th class="ta-r">誤差</th>
-                  <th class="ta-r">誤差條</th>
-                </tr>
-              </thead>
-              <tbody>
-                <tr v-for="c in CH4_PEAK_CYCLES" :key="c.id"
-                  :class="{ 'ch4-row-warn': Math.abs(c.error) > 4 }">
-                  <td class="cy-id">{{ c.id }}</td>
-                  <td class="cy-date">{{ c.date }}</td>
-                  <td class="ta-r cy-val">{{ c.actual.toFixed(2) }}%</td>
-                  <td class="ta-r cy-pred">{{ c.predicted.toFixed(2) }}%</td>
-                  <td class="ta-r cy-err"
-                    :class="c.error < -4 || c.error > 4 ? 'err-large' : 'err-ok'">
-                    {{ c.error > 0 ? '+' : '' }}{{ c.error.toFixed(2) }}%
-                  </td>
-                  <td class="ta-r cy-bar">
-                    <div class="err-bar-wrap">
-                      <div class="err-bar-track">
-                        <div class="err-bar-fill"
-                          :style="{
-                            width: Math.min(Math.abs(c.error) / 7 * 100, 100) + '%',
-                            background: Math.abs(c.error) > 4 ? '#e74c3c' : '#2ecc71',
-                            marginLeft: c.error < 0 ? 'auto' : '0',
-                          }">
-                        </div>
-                      </div>
-                    </div>
-                  </td>
-                </tr>
-              </tbody>
-            </table>
-
-            <!-- RMSE 計算說明 -->
-            <div class="rmse-formula">
-              RMSE = √[(0.41² + 5.71² + 0.17² + 1.51² + 3.71² + 3.13²) / 6]
-              = √(58.64 / 6) = √9.77 = <b>3.13%</b>
-              <span class="rmse-note">（C2 誤差最大；其餘均 &lt; 4%）</span>
-            </div>
-          </div>
-        </div>
 
         <!-- 資料表格 -->
         <div class="panel table-panel">
@@ -1082,8 +959,6 @@ onUnmounted(() => {
                   <td class="td-ch4">{{ record.ch4_pct?.toFixed(1) ?? '-' }}</td>
                   <td class="td-note">{{ record.note || '—' }}</td>
                   <td class="td-action">
-                    <button class="btn-sm publish" @click="publishViaMqtt(record)"
-                      :disabled="!isMqttConnected" title="發布至 MQTT">發布</button>
                     <button class="btn-sm del" @click="deleteRecord(record.id)" title="刪除">刪除</button>
                   </td>
                 </tr>
@@ -1137,17 +1012,6 @@ onUnmounted(() => {
 .btn.active                { border-color: #2980b9; color: #3498db; }
 .primary-btn               { border-color: #2980b9; color: #3498db; }
 .primary-btn:hover:not(:disabled) { background: rgba(52,152,219,0.08); }
-.publish-btn               { border-color: #27ae60; color: #2ecc71; }
-.publish-btn:hover:not(:disabled) { background: rgba(46,204,113,0.08); }
-.publish-btn:disabled      { border-color: #222; color: #333; }
-
-/* ─── Layout ─── */
-.main-grid {
-  display: grid;
-  grid-template-columns: 320px 1fr;
-  gap: 1.25rem;
-  align-items: start;
-}
 
 /* ─── Panel ─── */
 .panel {
@@ -1188,7 +1052,6 @@ onUnmounted(() => {
 }
 .form-group input:focus { outline: none; border-color: #2980b9; }
 .form-actions { display: flex; gap: 8px; margin-top: 0.85rem; }
-.mqtt-hint { margin: 6px 0 0; font-size: 0.73rem; color: #6a5a1f; }
 
 /* ─── CSV Import Panel ─── */
 .import-panel .panel-title { border-left-color: #16a085; }
@@ -1370,18 +1233,6 @@ td:nth-child(7) { text-align: right; font-family: monospace; color: #888; }
   margin: 0 2px; transition: opacity 0.15s;
 }
 .btn-sm:disabled { opacity: 0.25; cursor: not-allowed; }
-.btn-sm.publish { background: #0d2018; color: #27ae60; border: 1px solid #163d24; }
-.btn-sm.publish:hover:not(:disabled) { background: #152d1e; }
-.btn-sm.del     { background: #1e0d0d; color: #c0392b; border: 1px solid #3d1616; }
-.btn-sm.del:hover:not(:disabled) { background: #2d1212; }
-
-/* ─── Analysis Bar ─── */
-.analysis-bar {
-  display: flex; align-items: center; flex-wrap: wrap; gap: 6px 20px;
-  padding: 10px 14px; margin-top: 8px;
-  background: #0c0c0c; border-top: 1px solid #1a1a1a;
-  border-radius: 0 0 5px 5px;
-}
 
 .an-block {
   display: flex; flex-direction: column; gap: 2px; min-width: 90px;
@@ -1489,17 +1340,6 @@ td:nth-child(7) { text-align: right; font-family: monospace; color: #888; }
 
 /* ─── CH4 Peak Panel ─── */
 .ch4-panel { border-top: 3px solid #e67e22; }
-.ch4-header {
-  display: flex; align-items: center; gap: 10px; flex-wrap: wrap;
-}
-.ch4-header .panel-title { margin: 0; flex: 1; }
-.ch4-header small { font-size: 0.7rem; color: #444; margin-left: 6px; font-weight: 400; }
-.ch4-badges { display: flex; align-items: center; gap: 8px; }
-
-.rmse-badge {
-  font-size: 0.8rem; font-weight: 700; padding: 2px 11px; border-radius: 10px;
-  background: rgba(46,204,113,0.12); color: #2ecc71; border: 1px solid #1a5c35;
-}
 .ga-badge {
   font-size: 0.72rem; padding: 1px 9px; border-radius: 10px;
   background: rgba(52,152,219,0.1); color: #3498db; border: 1px solid #1a4a7a;
@@ -1508,16 +1348,6 @@ td:nth-child(7) { text-align: right; font-family: monospace; color: #888; }
 
 .ch4-body { margin-top: 10px; display: flex; flex-direction: column; gap: 10px; }
 
-.ga-features {
-  display: flex; align-items: center; flex-wrap: wrap; gap: 6px;
-  font-size: 0.75rem;
-}
-.ga-label { color: #444; flex-shrink: 0; }
-.ga-feat-tag {
-  background: #0d1a2a; border: 1px solid #1a3a5a;
-  color: #3498db; padding: 1px 8px; border-radius: 8px; font-family: monospace;
-  font-size: 0.72rem;
-}
 
 .ch4-table {
   width: 100%; border-collapse: collapse; font-size: 0.83rem;
@@ -1533,17 +1363,6 @@ td:nth-child(7) { text-align: right; font-family: monospace; color: #888; }
 .cy-id   { color: #555; font-family: monospace; font-size: 0.76rem; }
 .cy-date { color: #555; font-family: monospace; font-size: 0.76rem; }
 .cy-val  { color: #bbb; font-family: monospace; font-weight: 600; }
-.cy-pred { color: #3498db; font-family: monospace; font-weight: 600; }
-.cy-err  { font-family: monospace; font-weight: 700; }
-.err-ok    { color: #2ecc71; }
-.err-large { color: #e74c3c; }
-
-.cy-bar { width: 90px; }
-.err-bar-wrap { display: flex; align-items: center; height: 100%; }
-.err-bar-track {
-  width: 100%; height: 6px; background: #1a1a1a; border-radius: 3px;
-  display: flex; align-items: center; overflow: hidden;
-}
 .err-bar-fill { height: 100%; border-radius: 3px; min-width: 3px; }
 
 .rmse-formula {
@@ -1552,14 +1371,6 @@ td:nth-child(7) { text-align: right; font-family: monospace; color: #888; }
   border: 1px solid #1a1a1a; border-radius: 4px; line-height: 1.6;
 }
 .rmse-formula b { color: #2ecc71; }
-.rmse-note { color: #333; margin-left: 8px; }
-
-/* ─── Responsive ─── */
-@media (max-width: 1024px) {
-  .main-grid { grid-template-columns: 1fr; }
-  .chart-container { height: 240px; }
-  .table-wrapper { max-height: 380px; }
-}
 
 .pred-unit { font-size: 0.72rem; color: #555; font-weight: 400; margin-left: 2px; }
 .badge-red { background: rgba(231,76,60,0.12); color: #e74c3c; border: 1px solid #5c1a1a; }

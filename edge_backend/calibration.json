@@ -1,0 +1,16 @@
+{
+  "calibrated_at": "2026-08-24",
+  "n_cycles": 207,
+  "correction": -0.048,
+  "rate": 0.0125,
+  "ci95": [
+    0.0112,
+    0.0139
+  ],
+  "compatible_beta": [
+    0.15,
+    0.8
+  ],
+  "null_p": 0.024,
+  "source": "Algorithm 2/3, dataset C（去重後）"
+}
