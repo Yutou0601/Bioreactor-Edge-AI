@@ -7,7 +7,7 @@ python-multipart>=0.0.9   # /api/import_csv 檔案上傳（FastAPI File()）需�
 # Data Processing & Math
 # 原本用 == 釘死版本（numpy==1.24.4 等），但這些版本沒有新版 Python（3.12+）的
 # 預編譯 wheel，會退回原始碼編譯並因 setuptools/pkg_resources 相容性問題失敗。
-# 部署到金工電腦／Jetson 等未知 Python 版本的機器時容易卡住，改用下限版本讓
+# 部署到金工電腦等未知 Python 版本的機器時容易卡住，改用下限版本讓
 # pip 自動挑相容版本（本專案開發環境實測 numpy 2.5 / pandas 3.0 / scikit-learn 1.9 皆可正常運作）。
 numpy>=1.24.4
 pandas>=2.2.1
@@ -18,22 +18,22 @@ openpyxl>=3.1.0        # 實驗批次報表匯出（api/experiment/export 的 xl
 
 # 選配：CH4 特徵歸因升級（XGBoost + 內建 TreeSHAP）。裝了 ch4_realtime 就用它，
 # 沒裝自動退回 GA+Ridge，故非必要（未列入控制台必檢清單）。內建 pred_contribs
-# 即 TreeSHAP，不需另裝 shap 套件。Jetson(ARM64) 若不裝，即時面板會顯示 GA+Ridge。
+# 即 TreeSHAP，不需另裝 shap 套件。不裝的話即時面板會顯示 GA+Ridge。
 xgboost>=2.0.0
 
 # Hardware
-pyserial>=3.5          # USB 感測器接收器
+# pyserial 已於 2026-09-03 移除：本系統只做 CSV 分析，
+#   序列埠由現場的記錄程式自己開，不經過這裡。
 
 # HTTP client（sensor_simulator.py / batch_import_csv.py 用）
 requests>=2.31.0
 
-# MQTT
-paho-mqtt>=2.0.0
+# ⚠ paho-mqtt 已於 2026-09-01 移除：MQTT 原本是「監控電腦 → Jetson」
+#   的跨機傳輸，同機之後不需要。
 
-# AI / Deep Learning (Jetson 請使用官方 CUDA 版本)
+# AI / Deep Learning
+# ⚠ torch 僅供 core/inference.py 的 LSTM 使用，且已改為延遲載入。
+#   LSTM 是否保留為待確認事項，見 docs/系統重構架構。
 torch>=2.0.0
 
 # 跨平台推論（x86 監控電腦 / Jetson 雙環境驗證用）
-onnx>=1.16.0
-onnxruntime>=1.18.0        # 僅適用 x86；Jetson (ARM64) 需改用 NVIDIA 官方對應 JetPack 版本的 wheel，不能直接 pip install 這個
-onnxscript>=0.1.0          # torch>=2.7 預設的 dynamo-based ONNX exporter 需要

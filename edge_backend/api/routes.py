@@ -1,16 +1,41 @@
 import io
+import os
 import re
 import time
 from datetime import datetime
 import numpy as np
 from fastapi import APIRouter, HTTPException, File, UploadFile, Query
 from fastapi.responses import StreamingResponse
-from core.inference import get_pressure_prediction, sensor_buffer as _lstm_buffer
+# ⚠ 不要在模組層級 import core.inference：它會拉進 torch（實測磁碟
+#   496 MB），而服務一啟動就付這個代價，與有沒有人用推論無關。
+#   改為在需要的函式內延遲載入，行為不變。見 docs/系統重構架構。
+def _inference():
+    from core.inference import get_pressure_prediction, sensor_buffer
+    return get_pressure_prediction, sensor_buffer
+
+
+# ⚠ 2026-09-03 量測：延遲匯入只把成本往後挪，沒有避免它。CSV 匯入路徑在
+#   預熱 LSTM buffer 時呼叫 _inference()，一次上傳就把 torch → sklearn →
+#   scipy 全部拉進常駐行程，**RSS 62 MB → 348 MB**，而且模組不會卸載。
+#
+#   而那個預測值前端根本不用：MonitorView 只渲染 imported /
+#   anomalies_detected / orp_stats 三個欄位，回應裡的 prediction 被丟掉。
+#   資料本身只有 1.6 MB（9944 筆），286 MB 全是 import 開銷。
+#
+#   LSTM 的去留是待確認事項（見架構文件 §8），所以這裡不刪功能，只是
+#   預設不在 CSV 匯入時付這筆錢。要恢復：set REACTOR_ENABLE_LSTM=1
+# ⚠ 要走 core.config 不能直接讀 os.environ：config 的合約是
+#   「環境變數 > .env > 內建預設」，直接讀 environ 會讓寫在 .env 的
+#   REACTOR_ENABLE_LSTM 完全沒有作用，而部署時設定就是寫在 .env。
+from core import config as _config
+_LSTM_ON = _config.get('REACTOR_ENABLE_LSTM') == '1'
+
 from core.data_store import sensor_records, append_record, clear_all
 from core.signal_processor import ORPSignalProcessor
 from core.feature_extractor import ORPFeatureExtractor
-from data_pipeline.loader import _detect_schema, read_btp_daily
-from api.schemas import (PressurePredictionResponse, SensorDataPayload, SensorRecord,
+# data_pipeline.loader 會拉進 pandas（磁碟 61.9 MB），但它只在 CSV
+# 匯入時用得到。同樣改為延遲載入。
+from api.schemas import (SensorDataPayload, SensorRecord,
                          ExperimentRunCreate, ExperimentRunUpdate, ExperimentStartPayload)
 from core import experiment_store as exp
 from core import experiment_report as exp_report
@@ -64,47 +89,9 @@ def health():
     }
 
 
-# ==========================================
-# 通道 1：前端來拿取預測結果
-# ==========================================
-@router.get("/predict_pressure")
-def predict_pressure_api():
-    # buffer 不足時，從 sensor_records 最近 35 筆自動補齊（MIN_BUF=35）
-    if len(_lstm_buffer) < 35 and len(sensor_records) >= 35:
-        sorted_recs = sorted(sensor_records, key=lambda r: r.get('timestamp') or '')
-        for r in sorted_recs[-35:]:
-            _lstm_buffer.append([
-                r.get('orp_raw') or r['orp'],
-                r['ph'],
-                r['temp'],
-                r.get('pressure', 0.0),
-            ])
-
-    try:
-        t0 = time.time()
-        result = get_pressure_prediction()
-        inference_ms = round((time.time() - t0) * 1000, 1)
-        return {
-            "device":                   "Jetson Orin Nano",
-            "current_pressure_kg_cm2":  round(result["current_pressure_kg_cm2"], 2),
-            "predicted_pressure_5min":  round(result["predicted_pressure_5min"], 2),
-            "predicted_ch4_5min":       round(result.get("predicted_ch4_5min", 0.0), 2),
-            "status":                   result["status"],
-            "inference_time_ms":        inference_ms,
-            "message": (
-            "預測即將超標，請緊急處理！" if result["status"] == "危險 (Danger)"
-            else "壓力上升趨勢，請留意！" if result["status"] == "警告 (Warning)"
-            else "系統穩定運行中"
-        ),
-        }
-    except Exception as e:
-        return {
-            "device": "Jetson Orin Nano",
-            "current_pressure_kg_cm2": 0.0, "predicted_pressure_5min": 0.0,
-            "predicted_ch4_5min": 0.0, "inference_time_ms": 0.0,
-            "status": "模型未載入", "message": str(e),
-        }
-
+# ⚠ /predict_pressure 已移除（2026-08-31）。全專案掃描確認只有定義、
+#   沒有任何呼叫端：前端三個 view 都沒用它，也沒有其他腳本打它。
+#   原始碼保留在 routes.py.before_slim。
 
 # ==========================================
 # 通道 2：前端/感測器傳送最新數據過來
@@ -113,6 +100,7 @@ def predict_pressure_api():
 def upload_sensor_data(payload: SensorDataPayload):
     print(f"[成功接收數據] ORP: {payload.orp:.1f} mV, pH: {payload.ph:.2f}, 溫度: {payload.temp:.1f} °C")
     try:
+        get_pressure_prediction, _ = _inference()
         result = get_pressure_prediction({
             'orp':      payload.orp,
             'ph':       payload.ph,
@@ -124,7 +112,7 @@ def upload_sensor_data(payload: SensorDataPayload):
         prediction = None
     return {
         "status":     "success",
-        "message":    "感測器數據已成功寫入 Jetson 邊緣節點",
+        "message":    "感測器數據已寫入",
         "prediction": prediction,
     }
 
@@ -162,7 +150,7 @@ def get_report_stats():
         "counts": p_cnt.tolist(),
     }
 
-    # 3. 相關係數熱力圖（6×6）
+    # 3. 相關係數熱力圖（6×6）``
     matrix   = np.array([orp, ph, temp, pressure, ch4, co2])
     labels   = ['ORP', 'pH', '溫度', '壓力', 'CH4', 'CO2']
     corr_raw = np.corrcoef(matrix)
@@ -370,6 +358,38 @@ def ch4_prediction():
 # ==========================================
 # 通道 7：共變數關聯分析（點一下即分析當前每循環資料）
 # ==========================================
+def _why_no_cycles() -> str:
+    """兩個分析都吃 exp.all_cycles()，空的時候要講清楚缺的是哪一段。
+
+    ⚠ 這裡有一個很容易踩的坑：系統有**兩條互不相通的 CSV 路徑**——
+      · POST /api/ingest_folder → SQLite cycle 表 → 速率頁（/rate、/cycles）
+      · POST /api/import_csv    → 記憶體 sensor_records → 監控頁與本組分析
+      用資料夾匯入了幾百個循環，這兩個分析仍然是空的，而舊訊息只說
+      「尚無完整循環」，看不出是路徑不對還是資料不夠。
+    """
+    n_rec = len(sensor_records)
+    n_run = len(exp.experiment_runs)
+    if n_rec == 0 and n_run == 0:
+        return ("尚無資料。這兩個分析吃的是 sensor_records，"
+                "請用「上傳 CSV」（POST /api/import_csv，單檔）匯入，"
+                "再建立一個批次並把開始時間設到該段資料的起點。"
+                "⚠ 資料夾匯入（/api/ingest_folder）寫的是另一個資料表，"
+                "只餵速率頁，不會餵到這裡。")
+    if n_rec == 0:
+        return (f"已有 {n_run} 個批次，但 sensor_records 是空的——"
+                "批次只是時間窗，訊號要另外匯入。"
+                "請用「上傳 CSV」（單檔）匯入涵蓋該批次時間範圍的資料。")
+    if n_run == 0:
+        first = sensor_records[0].get("timestamp", "")
+        last = sensor_records[-1].get("timestamp", "")
+        return (f"已有 {n_rec} 筆感測資料（{first[:16]} → {last[:16]}），"
+                "但還沒有批次。請新增一個批次，並把開始時間設到 "
+                f"{first[:16]}，分析才知道要取哪一段。")
+    return (f"已有 {n_rec} 筆資料、{n_run} 個批次，但切不出**完整**循環"
+            "（完整＝頭尾都在批次時間窗內、且中間沒有記錄斷點）。"
+            "多半是批次的起訖時間沒有涵蓋到資料，或該段沒有補氣循環。")
+
+
 @router.get("/covariate_analysis")
 def covariate_analysis():
     """對目前所有批次的每循環特徵，即時跑「進氣前 ORP → 下降速率／平緩化」關聯分析，
@@ -389,7 +409,7 @@ def covariate_analysis():
     rows = [r for r in rows if r.get("complete")]
     if not rows:
         return {"status": "insufficient", "n_cycles": 0, "n_batches": 0,
-                "message": "尚無完整循環可分析（需先有進行中/完成的批次並累積補氣循環）。"}
+                "message": _why_no_cycles()}
     try:
         return compute(pd.DataFrame(rows))
     except Exception as e:
@@ -418,7 +438,7 @@ def greybox_analysis():
         return {"status": "error", "message": f"取軌跡失敗：{type(e).__name__}: {e}"}
     if not cycles:
         return {"status": "insufficient", "n_cycles": 0,
-                "message": "尚無完整循環可分析（需先累積補氣循環）。"}
+                "message": _why_no_cycles()}
     try:
         return analyze_real(cycles)
     except Exception as e:
@@ -549,6 +569,7 @@ def _import_csv_btp_daily(text: str, detected_date: str) -> dict:
     直接沿用 orp/orp_raw/orp_cleaned/is_anomaly 等既有結果寫入 sensor_records，
     不重跑 ORPSignalProcessor（避免對已處理過的訊號二次處理）。
     """
+    from data_pipeline.loader import read_btp_daily
     df = read_btp_daily(io.StringIO(text))
     if df.empty:
         return {
@@ -598,11 +619,16 @@ def _import_csv_btp_daily(text: str, detected_date: str) -> dict:
         ema_values.append(row['orp'])
 
     # 預熱 LSTM buffer：前 N-1 筆直接 append，最後一筆透過正式介面傳入
-    for row in rows[-35:-1]:
-        _lstm_buffer.append([row['orp_raw'], row['ph'], row['temp'], row['pressure']])
+    if _LSTM_ON:
+        for row in rows[-35:-1]:
+            _, _lstm_buffer = _inference()
+            _lstm_buffer.append([row['orp_raw'], row['ph'], row['temp'], row['pressure']])
 
     try:
+        if not _LSTM_ON:
+            raise RuntimeError('LSTM 預測已停用（省 286 MB）；前端未使用此欄位')
         last = rows[-1]
+        get_pressure_prediction, _ = _inference()
         pred = get_pressure_prediction({
             'orp':      last['orp_raw'],
             'ph':       last['ph'],
@@ -644,6 +670,23 @@ def list_experiment_runs():
     return exp.list_runs()
 
 
+@router.get("/experiment/scheduler")
+def experiment_scheduler_status():
+    """排程器狀態：活著沒、下一件自動動作是什麼、最近做過什麼。
+
+    ⚠ 回傳的 note 欄請直接顯示在面板上：自動停止只結束紀錄，不會關閥或停機。
+    """
+    from core import scheduler
+    return scheduler.status()
+
+
+@router.post("/experiment/scheduler/tick")
+def experiment_scheduler_tick():
+    """立刻檢查一輪（不必等 30 秒）。給測試與「我不想等」用。"""
+    from core import scheduler
+    return {"applied": scheduler.tick()}
+
+
 @router.post("/experiment/runs")
 def create_experiment_run(payload: ExperimentRunCreate):
     """新增一個批次（status=planned，可帶基準值與排定開始時間）。"""
@@ -654,6 +697,8 @@ def create_experiment_run(payload: ExperimentRunCreate):
             baseline_ch4=payload.baseline_ch4, baseline_co2=payload.baseline_co2,
             baseline_pressure=payload.baseline_pressure, target_hours=payload.target_hours,
             scheduled_start=payload.scheduled_start, note=payload.note or "",
+            auto_start=bool(payload.auto_start), auto_stop=bool(payload.auto_stop),
+            scheduled_end=payload.scheduled_end,
         )
     except ValueError as e:
         raise HTTPException(status_code=409, detail=str(e))
@@ -792,6 +837,7 @@ async def import_csv(file: UploadFile = File(...)):
     text = content.decode('utf-8-sig', errors='ignore')
 
     first_line = text.splitlines()[0] if text.strip() else ''
+    from data_pipeline.loader import _detect_schema
     if _detect_schema(first_line) == 'btp_daily':
         return _import_csv_btp_daily(text, detected_date)
 
@@ -856,11 +902,16 @@ async def import_csv(file: UploadFile = File(...)):
 
     # ── 預熱 LSTM buffer：前 29 筆直接 append，最後一筆透過正式介面傳入
     #    這樣 latest_actual_pressure 也能被正確更新
-    for row in parsed_rows[-35:-1]:
-        _lstm_buffer.append([row['orp_raw'], row['ph'], row['temp'], row['pressure']])
+    if _LSTM_ON:
+        for row in parsed_rows[-35:-1]:
+            _, _lstm_buffer = _inference()
+            _lstm_buffer.append([row['orp_raw'], row['ph'], row['temp'], row['pressure']])
 
     try:
+        if not _LSTM_ON:
+            raise RuntimeError('LSTM 預測已停用（省 286 MB）；前端未使用此欄位')
         last = parsed_rows[-1]
+        get_pressure_prediction, _ = _inference()
         pred = get_pressure_prediction({
             'orp':      last['orp_raw'],
             'ph':       last['ph'],
@@ -891,3 +942,178 @@ async def import_csv(file: UploadFile = File(...)):
             'avg': round(sum(ema_values) / len(ema_values), 1) if ema_values else 0,
         },
     }
+
+
+# ==========================================
+# 循環速率：論文 Algorithm 1 的線上結果
+# ==========================================
+# ⚠ 只依賴 core.cycle_store（numpy + sqlite3）。不得在此引入 pandas
+#   等重量級套件——常駐核心的記憶體預算是 60 MB，見
+#   docs/系統重構架構_2026-08-31.md。
+
+@router.get("/cycles")
+def api_cycles(limit: int = Query(500, ge=1, le=5000),
+               screened_only: bool = False):
+    """逐段的估計結果：k̂、r̂_b、曲率、振幅、時長。"""
+    from core import cycle_store as cs
+    return cs.list_cycles(limit=limit, screened_only=screened_only)
+
+
+@router.post("/import_csv_batch")
+async def import_csv_batch(files: list[UploadFile] = File(...)):
+    """一次匯入多個 CSV。逐檔沿用 /import_csv 的解析（它已能認三種格式）。
+
+    ⚠ 檔案先依檔名排序再匯入。BTP_Sensor_log 是一天一檔，順序錯了雖然
+      sensor_records 最後仍會依 timestamp 排序，但逐檔的匯入摘要看起來
+      會亂跳，難以核對哪一天缺資料。
+
+    單檔失敗不中斷整批——回報哪幾個失敗，其餘照常匯入。整批中止會讓人
+    以為「一個壞檔＝整批不能用」，而實際上壞的常常只是某天的截斷檔。
+    """
+    ordered = sorted(files, key=lambda f: (f.filename or ''))
+    results, total, ok_n = [], 0, 0
+    for f in ordered:
+        try:
+            r = await import_csv(f)
+            n = int(r.get('imported') or 0)
+            total += n
+            ok_n += 1
+            results.append({'file': f.filename, 'ok': True, 'imported': n,
+                            'date': r.get('date'),
+                            'anomalies': r.get('anomalies_detected', 0)})
+        except Exception as e:                               # noqa: BLE001
+            results.append({'file': f.filename, 'ok': False,
+                            'error': '%s: %s' % (type(e).__name__, e)})
+    return {'status': 'success', 'n_files': len(ordered), 'n_ok': ok_n,
+            'n_failed': len(ordered) - ok_n, 'imported_total': total,
+            'record_count': len(sensor_records), 'files': results}
+
+
+def _envelope(xs, ys, max_points):
+    """降採樣成 max_points 個點，但**保留每個區間的極值**。
+
+    ⚠ 不能用「每 n 筆取一筆」。這個訊號是鋸齒波——補氣是幾分鐘內的陡升，
+      等距抽樣很容易整個跳過那一瞬間，畫出來的波形會少掉補氣尖峰，看起來
+      像平滑下降。取每桶的 min 與 max 才能保證尖峰不被抹掉。
+    """
+    n = len(ys)
+    if n <= max_points:
+        return [{'t': xs[i], 'v': ys[i]} for i in range(n)]
+    bucket = max(1, n // (max_points // 2))
+    out = []
+    for a in range(0, n, bucket):
+        seg = ys[a:a + bucket]
+        if not len(seg):
+            continue
+        i_lo = a + int(np.argmin(seg))
+        i_hi = a + int(np.argmax(seg))
+        for i in sorted((i_lo, i_hi)):
+            out.append({'t': xs[i], 'v': float(ys[i])})
+    return out
+
+
+@router.get("/waveform")
+def api_waveform(signal: str = Query('pressure', pattern='^(pressure|orp|ph)$'),
+                 max_points: int = Query(1500, ge=200, le=6000)):
+    """匯入資料的波形，附上切段位置與每段的估計值。
+
+    這是「匯入完想馬上看看資料長怎樣」的端點：一次拿到降採樣後的曲線、
+    Algorithm 1 切出來的循環邊界、以及每段的 k̂／r̂_b／曲率。
+
+    ⚠ 只用 numpy（cycle_estimator 是純 numpy）。不得引入 pandas。
+    """
+    recs = _sorted_records()
+    if len(recs) < 60:
+        return {'status': 'insufficient', 'n': len(recs),
+                'message': '資料不足（至少 60 筆）。請先匯入 CSV。'}
+
+    key = {'pressure': 'pressure', 'orp': 'orp', 'ph': 'ph'}[signal]
+    ts = [r['timestamp'] for r in recs]
+    ys = np.array([float(r.get(key) or 0.0) for r in recs], dtype=float)
+    pres = np.array([float(r.get('pressure') or 0.0) for r in recs], dtype=float)
+
+    t0 = datetime.strptime(ts[0], '%Y-%m-%d %H:%M:%S')
+    hours = np.array([(datetime.strptime(t, '%Y-%m-%d %H:%M:%S')
+                       - t0).total_seconds() / 3600.0 for t in ts])
+
+    # 切段一律用**壓力**（Algorithm 1 的定義），即使畫的是 ORP／pH，
+    # 這樣三個訊號疊在同一組循環邊界上才能對照。
+    from core import cycle_estimator as ce
+    cycles = []
+    for a, b in ce.segment(hours, pres):
+        row = ce.estimate_cycle(hours[a:b + 1], pres[a:b + 1])
+        cycles.append({
+            'start': ts[a], 'end': ts[b],
+            'duration_hr': round(float(hours[b] - hours[a]), 2),
+            'screened': bool(row and row['screened']),
+            'curvature': round(row['curvature'], 3) if row else None,
+            'k': round(row['k'], 4) if row and row.get('k') else None,
+            'rb': round(row['rb'], 5) if row and row.get('rb') else None,
+        })
+    scr = [c for c in cycles if c['screened'] and c['rb'] is not None]
+    return {
+        'status': 'ok',
+        'signal': signal,
+        'n_records': len(recs),
+        'from': ts[0], 'to': ts[-1],
+        'series': _envelope(ts, ys, max_points),
+        'cycles': cycles,
+        'n_cycles': len(cycles),
+        'n_screened': len(scr),
+        # ⚠ 這裡的中位數只是「這批匯入資料」的，不是系統定版值（那個在
+        #   /api/rate，走 cycle 表、且已套校準）。
+        #
+        # ⚠ 而且段數少時它**根本不可用**：單一循環有近兩成算出負的 r_b，
+        #   十來段的中位數精度是 ±50% 以上，很容易連正負號都是錯的。
+        #   所以一律連 usability 一起回傳，前端據此決定要不要顯示數字——
+        #   只給一個數字，看的人會當成結果。判定與 /api/rate 同一套。
+        **_rb_here(scr),
+    }
+
+
+def _rb_here(scr):
+    """這批資料的 r_b 中位數與可用性。段數不足時明講不可用。"""
+    from core.cycle_store import median_ci
+    if not scr:
+        return {'median_rb_here': None, 'rb_usability': 'unusable',
+                'rb_note': '沒有通過曲率預篩的循環，算不出速率。'}
+    vals = [c['rb'] for c in scr]
+    med = float(np.median(vals))
+    lo, hi = median_ci(vals)
+    prec = ((hi - lo) / 2.0 / abs(med) * 100.0) if (med and lo is not None) else None
+    use = ('unusable' if prec is None or prec > 30 else
+           'indicative' if prec > 15 else 'usable')
+    note = {
+        'unusable': '段數太少，這個數字不可用（單段近兩成為負，'
+                    '十來段時連正負號都可能是錯的）。要 50 段以上才進得了 ±15%。',
+        'indicative': '只能當趨勢看，不要引用數值。',
+        'usable': '段數足夠，可引用。',
+    }[use]
+    return {'median_rb_here': round(med, 5), 'n_rb': len(vals),
+            'rb_ci': [round(lo, 5), round(hi, 5)] if lo is not None else None,
+            'rb_precision_pct': round(prec, 1) if prec is not None else None,
+            'rb_usability': use, 'rb_note': note}
+
+
+@router.get("/rate")
+def api_rate():
+    """目前的聚合速率與其校準來源。
+
+    論文報的是**中位數**，不是平均——逐段估計有兩成為負（簡併在單一
+    循環上的表現），平均數不可用。
+    """
+    from core import cycle_store as cs
+    return cs.summary()
+
+
+@router.post("/ingest_folder")
+def api_ingest_folder(folder: str = Query(..., description="CSV 資料夾路徑")):
+    """把一個資料夾（＝一個期間）的 CSV 切段、估計、寫入 cycle 表。
+
+    ⚠ 必須以資料夾為單位。BTP_Sensor_log 是一天一檔，而循環中位長
+      10.2 小時、大多跨過午夜；逐檔處理會把跨日的一段攔腰砍斷。
+    """
+    from core import cycle_store as cs
+    if not os.path.isdir(folder):
+        raise HTTPException(status_code=400, detail="資料夾不存在: %s" % folder)
+    return cs.ingest_folder(folder)

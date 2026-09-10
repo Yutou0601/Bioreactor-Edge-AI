@@ -5,7 +5,8 @@ import vue from '@vitejs/plugin-vue'
 export default defineConfig({
   plugins: [vue()],
   server: {
-    // 允許外部裝置 (你的筆電) 連線到 Jetson 的前端伺服器
+    // 允許同網段的其他裝置連進開發伺服器（在別台機器上開網頁看畫面）。
+    // 僅影響 npm run dev；正式是由後端直接供應 dist/。
     host: '0.0.0.0', 
     // 固定前端的 Port 為 5173
     port: 5173,

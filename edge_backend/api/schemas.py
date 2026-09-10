@@ -9,11 +9,6 @@ class SensorDataPayload(BaseModel):
     pressure: Optional[float] = None   # 反應器壓力，有傳才更新
 
 
-class PressurePredictionResponse(BaseModel):
-    device: str
-    current_pressure_kg_cm2: float
-    predicted_pressure_5min: float
-    status: str
     message: str
 
 
@@ -44,6 +39,11 @@ class ExperimentRunCreate(BaseModel):
     baseline_pressure: Optional[float] = 1.185  # 基準壓力 kg/cm²
     target_hours:      Optional[float] = 48.0   # 預計實驗時長 hr
     scheduled_start:   Optional[str]   = None   # 排定開始時間 YYYY-MM-DD HH:MM:SS
+    scheduled_end:     Optional[str]   = None   # 排定結束時間；有填則優先於 target_hours
+    # ⚠ 兩個自動旗標預設關閉，不開就是原本的手動流程。開啟後只是自動開始／
+    #   結束**紀錄**——系統只讀不控，不會關閥或停機，現場仍須有人實際排氣。
+    auto_start:        Optional[bool]  = False  # 到 scheduled_start 自動開始
+    auto_stop:         Optional[bool]  = False  # 到應結束時刻自動結束紀錄
     note:              Optional[str]   = ""
 
 
@@ -57,6 +57,9 @@ class ExperimentRunUpdate(BaseModel):
     baseline_pressure: Optional[float] = None
     target_hours:      Optional[float] = None
     scheduled_start:   Optional[str]   = None
+    scheduled_end:     Optional[str]   = None
+    auto_start:        Optional[bool]  = None
+    auto_stop:         Optional[bool]  = None
     start_time:        Optional[str]   = None
     end_time:          Optional[str]   = None
     status:            Optional[str]   = None

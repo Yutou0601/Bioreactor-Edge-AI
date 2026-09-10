@@ -79,8 +79,25 @@ print('\n1. 記憶體守門（常駐核心的相依）')
 HEAVY = ('torch', 'pandas', 'sklearn', 'scipy', 'xgboost', 'onnxruntime')
 import main                                                  # noqa: E402
 loaded = [m for m in HEAVY if m in sys.modules]
-check('啟動不載入重量級套件', not loaded,
+check('匯入 main 不載入重量級套件', not loaded,
       ('★ 載入了 ' + ', '.join(loaded)) if loaded else 'numpy only')
+
+# ⚠ 上面那一項只執行了 main.py 的**模組層級**程式碼。lifespan 是伺服器
+#   啟動時才跑的，所以它擋不住「在 lifespan 裡 import 重量級套件」。
+#
+#   這個洞真的被踩過：main.py 的 lifespan 無條件呼叫
+#   load_model_and_scalers()，而 core/inference.py 第 2 行是模組層級的
+#   `import torch`。正式啟動時 RSS 54.1 → 313.8 MB（預算 60 MB），而這一
+#   組測試從頭到尾是綠的——因為測試從來沒有跑過 lifespan。
+#
+#   TestClient 只有當成 context manager 用才會觸發 startup/shutdown。
+from fastapi.testclient import TestClient as _TC                # noqa: E402
+with _TC(main.app):
+    pass
+after_start = [m for m in HEAVY if m in sys.modules]
+check('走完啟動流程（lifespan）也不載入', not after_start,
+      ('★ lifespan 載入了 ' + ', '.join(after_start)) if after_start
+      else 'lifespan 跑完仍是 numpy only')
 
 # ── 2 估計器與離線腳本一致 ──────────────────────────────────
 print('\n2. 估計器一致性（線上 vs 離線）')

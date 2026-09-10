@@ -241,8 +241,9 @@ def _ga_select(X: np.ndarray, y: np.ndarray, seed: int = 42):
 
 
 # ── XGBoost + TreeSHAP 特徵歸因（有裝 xgboost 才走，否則自動退回 GA+Ridge）──
-# 部署現實：後端在 Jetson（ARM/資源受限），不強制安裝 xgboost。開發機/監控 PC
-# 裝了就用它做更好的特徵歸因（處理非線性、原生 TreeSHAP），Jetson 沒裝也照跑。
+# 部署現實：監控電腦的常駐預算是 60 MB，xgboost 光磁碟就 97 MB，所以不列為
+# 必要相依。裝了就用它做更好的特徵歸因（非線性、原生 TreeSHAP），沒裝自動
+# 退回 GA+Ridge。（2026-09-01 之前這裡寫的理由是「後端在 Jetson」，Jetson 已退場。）
 def _xgb():
     try:
         import xgboost as xgb
