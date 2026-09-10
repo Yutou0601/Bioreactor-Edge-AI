@@ -3,7 +3,6 @@
 # =========================
 __pycache__/
 *.pyc
-.env
 venv/
 env/
 
@@ -21,6 +20,8 @@ env/
 edge_backend/data/
 
 # 洪博的真實實驗資料（99MB，未經同意不上傳 GitHub）
+research/Testing_data/
+# 2026-09-10 之前放在 edge_backend/ 底下；舊 clone 可能還有，一併擋著。
 edge_backend/Testing_data/
 
 # =========================
@@ -33,17 +34,35 @@ edge_backend/generate_report.py
 # Node.js & 前端
 # =========================
 node_modules/
-dist/
 .DS_Store
 
-# 實驗批次落地儲存（機器本地執行期資料，不上傳）
+# ⚠ dist/ 刻意**不** ignore（2026-09-03）。監控電腦是用 git pull 更新的，
+#   它沒有裝 node/npm，前端必須以建置好的形式進版控，否則拉下去只有後端、
+#   打開網頁是 404。體積約 1.3 MB，只在前端有改時才變動。
+#   發布流程見 docs/開發與部署流程.md。
+
+# =========================
+# ⚠ 現場執行期資料——絕對不可進版控，也不可被 git clean 刪掉
+# =========================
+# 這幾個檔在監控電腦上是**正式資料**。它們原本既沒被追蹤也沒被 ignore，
+# 意思是：git status 會一直顯示它們、有人 `git add .` 就會把現場資料傳上
+# GitHub、而 `git clean -fdx` 會直接刪掉整個資料庫。2026-09-03 補上。
+edge_backend/reactor.db
+edge_backend/reactor.db-journal
+edge_backend/reactor.db-wal
+edge_backend/reactor.db-shm
 edge_backend/experiment_runs.json
+edge_backend/experiment_runs.json.tmp
+edge_backend/server.log
+*.log
 
-# 控制台的本機設定（各台機器的 CSV 路徑不同，不上傳）
-control_panel.json
+# 站台設定：每台機器不同（資料夾路徑、埠號），不進版控。
+# 範本是 .env.example，部署時複製成 .env 再改。
+.env
+.env.local
+edge_backend/.env
 
-# 開發測試伺服器（筆電本機測試用，不進版控）
-dev_test_server.py
-
-# 控制台安裝公鑰的暫存批次檔（用完即刪，防意外殘留被誤 commit）
-_install_pubkey.bat
+# ⚠ calibration.json 是**例外，要進版控**：它是離線校準模組產出的常數，
+#   決定 rb 欄位的值，必須與程式碼一起版本化，否則同一份資料在兩台機器
+#   會算出不同結果、而且查不出是哪一版校準。
+!edge_backend/calibration.json
