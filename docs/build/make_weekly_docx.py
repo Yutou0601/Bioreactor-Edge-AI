@@ -72,19 +72,25 @@ def cell_text(c, text, size=12, bold=False, center=True):
         p.alignment = WD_ALIGN_PARAGRAPH.CENTER
 
 
-def header_table(doc):
+def header_table(doc, period='2026/08/06 – 2026/08/12',
+                 place='金屬中心（歷史資料分析、方法驗證與論文撰寫）'):
+    """報表抬頭。
+
+    ⚠ 2026-09-11 把期間與地點改成參數（預設值＝原本寫死的值，既有的
+      build_weekly.py 行為不變）。原本是寫死的，每週都要複製一份版式函式
+      才能改日期——而複製品會漂移，本週已經在別處踩過一次同樣的問題。
+    """
     t = doc.add_table(rows=4, cols=4)
     t.alignment = WD_TABLE_ALIGNMENT.CENTER
     borders(t)
     a = t.cell(0, 0).merge(t.cell(0, 3))
     cell_text(a, '國立高雄科技大學_金屬中心_週報', 14, True)
     cell_text(t.cell(1, 0), '時間')
-    cell_text(t.cell(1, 1), '2026/08/06 – 2026/08/12')
+    cell_text(t.cell(1, 1), period)
     cell_text(t.cell(1, 2), '學生')
     cell_text(t.cell(1, 3), '李承育')
     cell_text(t.cell(2, 0), '地點')
-    cell_text(t.cell(2, 1).merge(t.cell(2, 3)),
-              '金屬中心（歷史資料分析、方法驗證與論文撰寫）')
+    cell_text(t.cell(2, 1).merge(t.cell(2, 3)), place)
     cell_text(t.cell(3, 0).merge(t.cell(3, 3)), '內容與過程註記')
     for r in t.rows:
         r.cells[0].width = Mm(22)
