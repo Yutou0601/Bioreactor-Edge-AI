@@ -33,6 +33,14 @@ VHEAD = 1.00          # 頭空體積 L（總容積 1.99 L 的約一半，由兩�
 R_GAS = 8.314462618
 KGF_PA = 98066.5
 
+# ⚠ 所有標註文字一律加白底框。圖上線條密（壓力每分鐘一筆、二十天），
+#   文字只要落在資料上就讀不出來，而且是「看起來有字但看不清楚」這種
+#   不會被發現的壞法。白底框讓文字不論背後是什麼都清楚。
+def box(color):
+    return dict(boxstyle='round,pad=0.34', fc='white', ec=color,
+                alpha=0.93, lw=0.8)
+
+
 # 三個階段（由資料與現場照片共同認定）
 PHASES = [
     ('建立期', dt.date(2026, 8, 11), dt.date(2026, 8, 23), '#2E7D32'),
@@ -123,23 +131,23 @@ def fig1_daily(ts, p, ch4, co2):
     # 關鍵標註
     ax.annotate('甲烷由 0.7% 升到 39.6%\n日增幅遞減（+10.2 → +0.3）\n＝接近飽和',
                 xy=(dt.date(2026, 8, 17), 34.6),
-                xytext=(dt.date(2026, 8, 12), 12),
-                fontsize=9, color='#1565C0',
+                xytext=(dt.date(2026, 8, 12), 11),
+                fontsize=9, color='#1565C0', bbox=box('#1565C0'),
                 arrowprops=dict(arrowstyle='->', color='#1565C0', lw=1.1))
     ax.annotate('二氧化碳歸零\n（8/23 起 0.0%）',
                 xy=(dt.date(2026, 8, 23), 0.3),
-                xytext=(dt.date(2026, 8, 18), 5.5),
-                fontsize=9, color='#C62828', fontweight='bold',
+                xytext=(dt.date(2026, 8, 16, ), 8.5),
+                fontsize=9, color='#C62828', fontweight='bold', bbox=box('#C62828'),
                 arrowprops=dict(arrowstyle='->', color='#C62828', lw=1.2))
     ax.annotate('8/24 氫氣耗盡',
                 xy=(dt.date(2026, 8, 24), 23.0),
-                xytext=(dt.date(2026, 8, 25, ), 14),
-                fontsize=9, color='#C62828',
+                xytext=(dt.date(2026, 8, 25, ), 13),
+                fontsize=9, color='#C62828', bbox=box('#C62828'),
                 arrowprops=dict(arrowstyle='->', color='#C62828', lw=1.0))
     ax.annotate('甲烷反轉下降\n42.8% → 31.3%\n＝已無轉換',
                 xy=(dt.date(2026, 8, 29), 37.6),
-                xytext=(dt.date(2026, 8, 25), 44.5),
-                fontsize=9, color='#EF6C00', fontweight='bold',
+                xytext=(dt.date(2026, 8, 24), 45.5),
+                fontsize=9, color='#EF6C00', fontweight='bold', bbox=box('#EF6C00'),
                 arrowprops=dict(arrowstyle='->', color='#EF6C00', lw=1.2))
     for nm, a0, b0, col in PHASES:
         ax.text(a0 + (b0 - a0) / 2, -1.6, nm, ha='center', va='top',
@@ -160,11 +168,11 @@ def fig2_pressure(ts, h, p):
     ax.axhspan(1.11, 1.20, color='#2E7D32', alpha=0.10, zorder=0)
     ax.text(ts[len(ts) // 6], 1.235,
             '正常運轉帶 1.11 ~ 1.20（僅 9 個感測器刻度）',
-            fontsize=9, color='#2E7D32')
+            fontsize=9, color='#2E7D32', bbox=box('#2E7D32'))
     ax.annotate('8/24 氫氣耗盡\n當日僅補氣 1 次\n壓力掉到 0.69',
                 xy=(dt.datetime(2026, 8, 24, 20), 0.70),
-                xytext=(dt.datetime(2026, 8, 15), 0.60),
-                fontsize=9, color='#C62828', fontweight='bold',
+                xytext=(dt.datetime(2026, 8, 14), 0.60),
+                fontsize=9, color='#C62828', fontweight='bold', bbox=box('#C62828'),
                 arrowprops=dict(arrowstyle='->', color='#C62828', lw=1.2))
     ax.set_title('圖 2　反應器壓力軌跡（每分鐘一筆）')
     fig.autofmt_xdate(rotation=45)
@@ -193,7 +201,7 @@ def fig3_share(ts, h, p, ch4):
     ax.axhline(0.25, color='#1565C0', ls='--', lw=1.6)
     ax.text(len(rows) - 0.45, 0.256,
             '化學計量上限 0.25\n（CO2 + 4H2 → CH4：5 進 1 出）',
-            fontsize=9, color='#1565C0', ha='right')
+            fontsize=9, color='#1565C0', ha='right', bbox=box('#1565C0'))
     ax.axhline(0, color='#555', lw=1.0)
     ax.set_xticks(xs)
     ax.set_xticklabels(['%s\n%s' % (r[0], lbl) for r, lbl in
@@ -210,7 +218,7 @@ def fig3_share(ts, h, p, ch4):
     #   改放左側空白處，用箭頭指過去。
     ax.annotate('負值在物理上不可能\n＝該期間沒有甲烷在產生，\n    現有的正被補進來的氣體稀釋',
                 xy=(1.70, -0.050), xytext=(-0.44, -0.083),
-                ha='left', fontsize=9.5, color='#C62828', fontweight='bold',
+                ha='left', fontsize=9.5, color='#C62828', fontweight='bold', bbox=box('#C62828'),
                 arrowprops=dict(arrowstyle='->', color='#C62828', lw=1.3))
     ax.set_title('圖 3　各階段的生物轉換份額')
     fig.tight_layout()
@@ -243,18 +251,18 @@ def fig4_window(ts, h, p):
     ax.set_ylabel('壓力完全沒有變化的比例（%）')
     ax.set_ylim(-4, 100)
     ax.annotate('10 分鐘：六成的區間\n壓力一個數字都沒動',
-                xy=(10, frac[0]), xytext=(55, 78), fontsize=9,
-                color='#C62828', fontweight='bold',
+                xy=(10, frac[0]), xytext=(52, 76), fontsize=9,
+                color='#C62828', fontweight='bold', bbox=box('#C62828'),
                 arrowprops=dict(arrowstyle='->', color='#C62828', lw=1.2))
-    ax.annotate('3 小時：可用', xy=(180, frac[5]), xytext=(120, 22),
-                fontsize=9, color='#2E7D32', fontweight='bold',
+    ax.annotate('3 小時：可用', xy=(180, frac[5]), xytext=(112, 24),
+                fontsize=9, color='#2E7D32', fontweight='bold', bbox=box('#2E7D32'),
                 arrowprops=dict(arrowstyle='->', color='#2E7D32', lw=1.2))
     ax.set_title('（a）量不到的比例')
 
     ax2.plot(widths, med, 'o-', color='#1565C0', lw=2, ms=6)
     ax2.axhline(0.01, color='#C62828', ls='--', lw=1.5)
-    ax2.text(240, 0.0115, '感測器最小刻度 0.01', fontsize=9,
-             color='#C62828', ha='right')
+    ax2.text(238, 0.0185, '感測器最小刻度 0.01', fontsize=9,
+             color='#C62828', ha='right', bbox=box('#C62828'))
     ax2.set_xlabel('區間長度（分鐘）')
     ax2.set_ylabel('該區間壓力下降中位數（kg/cm²）')
     ax2.set_title('（b）實際掉多少')
@@ -289,9 +297,17 @@ def fig5_balance(ts, h, p, ch4):
     ax.set_xticks(np.arange(4))
     ax.set_xticklabels(labels)
     ax.set_ylim(0, cons * 1.22)
-    ax.text(3, gap * 0.45,
-            '佔上限的 %.0f%%\n最可能是二氧化碳\n直接溶進液體' % (gap / ch4_max * 100),
-            ha='center', fontsize=9, color='white', fontweight='bold')
+    # ⚠ 這段說明原本畫在紅色長條**內部**（白字），與長條上方的數值標籤
+    #   疊在一起，「(2349 mL)」與「佔上限的 80%」互相蓋掉（已踩過）。
+    #   長條只有 2.70 高而字有三行，放得下是錯覺。改放右上空白處並拉線。
+    ax.annotate('對不上的部分佔上限的 %.0f%%\n最可能是二氧化碳直接溶進液體\n'
+                '（消耗氣體，但不產生甲烷）' % (gap / ch4_max * 100),
+                # ⚠ 箭頭指長條**左緣偏下**，不要指正上方——正上方是該長條的
+                #   數值標籤，箭頭會從字上穿過去。
+                xy=(2.76, gap * 0.45), xytext=(2.16, cons * 0.60),
+                ha='center', fontsize=9.5, color='#C62828', fontweight='bold',
+                bbox=box('#C62828'),
+                arrowprops=dict(arrowstyle='->', color='#C62828', lw=1.3))
     ax.set_title('圖 5　20.4 天的氣體總帳（體積以頭空 1.0 L、30 °C 換算）')
     fig.tight_layout()
     return fig, 'fig5_氣體總帳'
