@@ -118,11 +118,37 @@ def wrate(t, y, half=1.5):
     return np.trapezoid(dph*y[ins], t[ins])/w if w > 0 else np.nan
 
 
+# τ 三批的實際結束日。202607至08最新循環研究 的最後一筆是 2026-08-03。
+TAU_END = dt.date(2026, 8, 4)
+
+# ⚠ 2026-09-11 移入 Testing_data 的自動化測試資料夾。它們是**完全不同的
+#   運轉條件**（每約 2 小時自動補氣、振幅 0.05、期間還氫氣耗盡），不屬於
+#   τ 三批的任何一批。
+AUTO_PREFIXES = ('0813_', '0817_', '0825-0831_')
+
+
 def cond_of(tag, d):
+    """循環的實驗條件標籤。
+
+    ⚠ 2026-09-11 修正兩個會靜默污染結果的問題：
+
+      1. 原本 `if d >= 2026-07-30: return 'tau10'` **沒有上界**——任何
+         日期在那之後的資料都會被標成 tau10。2026-09-11 把三個自動化測試
+         資料夾移進 Testing_data 之後，實測有 3 個循環（tau10 的 17%）
+         就是這樣混進去的，而且不會有任何錯誤訊息。
+
+      2. 依「日期」判定條件本身就脆弱。條件是由**資料夾**（實驗批次）決定
+         的，不是由日期決定的。所以先看資料夾，日期只用來切同一個資料夾
+         內的不同階段。
+    """
+    if tag.startswith(AUTO_PREFIXES):
+        return 'auto', 0.2                      # 自動化測試，不併入任何 τ 批
     if tag.startswith('0109-0123'):
         return '1:1', 0.5
     if '0301-0416' in tag:
         return ('pump_off' if d < dt.date(2026, 4, 7) else 'pump_on5'), 0.2
+    if d >= TAU_END:
+        return 'other', 0.2                     # 超出 τ 三批的期間
     if d >= dt.date(2026, 7, 30):
         return 'tau10', 0.2
     if d >= dt.date(2026, 7, 27):

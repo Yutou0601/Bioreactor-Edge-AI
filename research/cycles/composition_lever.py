@@ -71,19 +71,17 @@ def weak_pairs(t, y, nw=5):
 
 
 def cond_of(tag, ts):
-    """循環條件標籤。"""
-    d = ts.date()
-    if tag.startswith(FCO2_11):
-        return '1:1'
-    if '0301-0416' in tag:
-        return 'pump_off' if d < dt.date(2026, 4, 7) else 'pump_on5'
-    if d >= dt.date(2026, 7, 30):
-        return 'tau10'
-    if d >= dt.date(2026, 7, 27):
-        return 'tau5'
-    if d >= dt.date(2026, 7, 22):
-        return 'tau1'
-    return 'other'
+    """循環條件標籤。
+
+    ⚠ 2026-09-11 改為委派給 multivariate_increments.cond_of。此處原本是一份
+      **複製品**，而兩份已經漂移：共用那份加了期間上界與自動化資料夾的排除，
+      這份沒有——同一批循環在不同腳本裡會被歸到不同條件，而且不會報錯。
+
+      漂移的代價實測過：2026-09-11 把自動化測試資料夾移進 Testing_data 後，
+      舊版會把 3 個循環（tau10 的 17%）誤併進 tau10，終點值從 −62.3 被拉到 −53.0。
+    """
+    from multivariate_increments import cond_of as _shared
+    return _shared(tag, ts.date())[0]
 
 
 def gather():
