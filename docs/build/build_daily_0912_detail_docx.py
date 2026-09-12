@@ -48,6 +48,30 @@ COLW = {
 }
 LANDSCAPE = ('A', 'B')
 
+# 各表之後要插的圖（先跑 fig_daily_0912_detail.py 產生）。
+# ⚠ 圖檔不存在時直接失敗，不要略過——沒有圖的報告外觀完全正常，
+#   不會有人發現少了東西。
+FIGDIR = os.path.join(REPO, 'docs', 'reports', 'fig_daily_0912')
+FIGS = {
+    'B': [('fig1_泵節奏三批對照.png',
+           '圖 1　循環泵的節奏。三批的泵窗位置不同（第 50、25、13 分），'
+           '但長度分別是 1、5、10 分鐘，與各批宣稱的 τ 完全一致。'
+           '陰影為泵運轉區間；泵窗以外壓力幾乎不動。')],
+    'C': [('fig3_循環一致性與內部剖面.png',
+           '圖 3　左：13 個自動循環疊合，形狀高度一致（降幅 0.252 ± 0.009、'
+           '時長 6.83 ± 0.76 hr）。右：循環內的相對速率高低交替，'
+           '含泵窗的半小時速率高——下降並非等速。')],
+    'E': [('fig4_估計量比較.png',
+           '圖 4　同一段資料、四種估計量的差異。建立期四者相近（29 ~ 38%）；'
+           '氫氣耗盡期只有 2 天，差異極大不應引用；衰退期皆為負值，'
+           '代表該期間沒有甲烷在產生。')],
+    'F': [('fig2_tau槓桿.png',
+           '圖 2　左：實測泵窗長度與宣稱的 τ 完全落在 y = x 上。'
+           '右：壓力下降速率隨 τ 單調上升。兩者說明 τ 這個槓桿的機制'
+           '——泵運轉時間直接決定氣液接觸時間。')],
+}
+FIGW_PORTRAIT, FIGW_LANDSCAPE = Mm(155), Mm(215)
+
 INTRO = {
     'A': ('期間 2026-07-30 至 08-03。本表列出切出的**每一段**，不做篩選。'
           '「判定」欄由時長與降幅自動分類，不是人工標註。'),
@@ -174,6 +198,25 @@ def add_table(doc, d, key, fs=7.5):
     return t
 
 
+def add_figure(doc, fname, caption, landscape):
+    """插圖 + 圖說。圖不存在就直接失敗。"""
+    path = os.path.join(FIGDIR, fname)
+    if not os.path.isfile(path):
+        raise SystemExit('找不到圖檔：%s\n請先執行 fig_daily_0912_detail.py'
+                         % path)
+    p = doc.add_paragraph()
+    p.alignment = WD_ALIGN_PARAGRAPH.CENTER
+    p.add_run().add_picture(path,
+                            width=FIGW_LANDSCAPE if landscape
+                            else FIGW_PORTRAIT)
+    p.paragraph_format.space_before = Pt(8)
+    p.paragraph_format.space_after = Pt(2)
+    c = doc.add_paragraph()
+    c.alignment = WD_ALIGN_PARAGRAPH.CENTER
+    style_run(c.add_run(caption), 9.5, False)
+    c.paragraph_format.space_after = Pt(8)
+
+
 def new_section(doc, landscape):
     s = doc.add_section(WD_SECTION.NEW_PAGE)
     if landscape:
@@ -271,6 +314,8 @@ def main():
         para(doc, '怎麼看這張表', 10.5, True, before=6, after=3, indent=2)
         for ln in READ[key]:
             para(doc, '・' + ln, 10, indent=6, after=3)
+        for fname, cap in FIGS.get(key, []):
+            add_figure(doc, fname, cap, key in LANDSCAPE)
 
     # ── 綜合判讀與待辦 ────────────────────────────────
     new_section(doc, False)
