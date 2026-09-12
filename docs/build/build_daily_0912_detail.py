@@ -13,23 +13,17 @@ import sys
 REPO = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 OUT = os.path.join(REPO, 'docs', 'reports', '日報_2026-09-12_明細表.md')
 
-# 表格由 research/cycles/detail_tables.py 產生。
-# ⚠ 直接在這裡跑它，不要讀先前存下來的暫存檔——暫存檔會過期，而報表看起來
-#   完全正常，不會有人發現數字是舊的。
-import subprocess                                              # noqa: E402
-_SCRIPT = os.path.join(REPO, 'research', 'cycles', 'detail_tables.py')
-_r = subprocess.run([sys.executable, _SCRIPT], cwd=os.path.dirname(_SCRIPT),
-                    capture_output=True, text=True,
-                    encoding='utf-8', errors='replace')
-if _r.returncode != 0:
-    raise SystemExit('detail_tables.py 失敗：\n' + (_r.stderr or '')[-2000:])
-tabs = '\n'.join(l for l in _r.stdout.splitlines()
-                 if 'Warning' not in l and 'warn' not in l)
-T = {}
-for p in [x.strip('\n') for x in tabs.split('=' * 106) if x.strip()]:
-    m = re.search(r'【表 ([A-F])】', p)
-    if m:
-        T[m.group(1)] = p.rstrip()
+# 表格直接取自 detail_tables 的結構化資料。
+#
+# ⚠ 原本是「跑 detail_tables.py、再用正規式從文字輸出裡切出各表」。那個做法
+#   在 2026-09-12 重構（資料／呈現分離）後當場壞掉——標題由「表 A」變成
+#   「表 A　τ=10 批次：…」，`【表 ([A-F])】` 就比對不到了。
+#   解析自己程式的文字輸出是脆弱的，改成 import 同一份資料。
+#   Word 版（build_daily_0912_detail_docx.py）也走同一份。
+sys.path.insert(0, os.path.join(REPO, 'research', 'cycles'))
+from detail_tables import DATA, render_text                    # noqa: E402
+
+T = {k: render_text(DATA[k]()) for k in 'ABCDEF'}
 assert sorted(T) == list('ABCDEF'), sorted(T)
 
 
