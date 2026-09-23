@@ -1,0 +1,34 @@
+# 重運算節點（Jetson Orin NX 16 GB）專用相依
+#
+#     pip install -r requirements-compute.txt
+#
+# ⚠ 這一份**不是**給監控電腦用的。那台是 4 GB 的 Windows 機器，常駐核心的
+#   預算是 60 MB，裝了這裡面的東西等於把整個記憶體隔離作廢。
+#   監控電腦請用 requirements.txt。
+#
+# ⚠ torch 不在這份清單裡，要另外裝。Jetson 上**不可以** pip install torch：
+#   PyPI 的 aarch64 wheel 沒有 CUDA，裝起來會是純 CPU 版，而且不會有任何
+#   錯誤訊息——GPU 就這樣安靜地沒被用到。要用 NVIDIA 為該版 JetPack 發布的
+#   wheel（developer.nvidia.com 的 Jetson PyTorch 頁面，或 nvcr.io 的
+#   l4t-pytorch 容器）。裝完以下列指令確認：
+#       python -c "import torch; print(torch.__version__, torch.cuda.is_available())"
+#   印出 True 才算裝對。
+#   ⚠ 目前三個分析模組都用不到 torch（只有 core/inference.py 的 LSTM 要，
+#     而那支預設是關的）。所以「torch 還沒裝好」不會擋住重運算節點上線。
+
+# Web 服務
+fastapi>=0.110.0
+uvicorn>=0.27.1
+pydantic>=2.6.3
+
+# 三個分析模組實際用到的
+numpy>=1.24.4
+pandas>=2.2.1           # covariate
+scipy>=1.11             # covariate、greybox
+scikit-learn>=1.4.1
+joblib>=1.3.2
+
+# ch4_attribution 的 XGBoost 路線。沒裝會自動退回 GA+Ridge（結果較差但能跑）。
+# ⚠ aarch64 沒有官方預編譯 wheel 的話會退回原始碼編譯，要先有 cmake 與
+#   足夠的 swap，否則會在編譯中途因記憶體不足被 OOM killer 砍掉。
+xgboost>=2.0.0

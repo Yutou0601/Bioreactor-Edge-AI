@@ -6,6 +6,14 @@
   "entry": "run.py",
   "input": "complete_cycles",
   "writes": "mod_covariate",
+  "result_columns": [
+    ["computed_at", "TEXT"],
+    ["module_version", "TEXT"],
+    ["n_cycles", "INTEGER"],
+    ["n_batches", "INTEGER"],
+    ["status", "TEXT"],
+    ["payload", "TEXT"]
+  ],
   "trigger": { "type": "schedule", "every_minutes": 60 },
   "timeout_s": 120,
   "requires": ["numpy>=1.24", "pandas>=2.2", "scipy>=1.11"]

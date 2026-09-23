@@ -171,6 +171,7 @@ def run(csv_path: Path, interval: float):
             time.sleep(interval)
 
         # flush 末尾突波緩衝
+        # Let pt -> flush() 
         for pt in processor.flush():
             src = row_by_ts.get(pt.timestamp, rows[-1])
             post_record(session, {

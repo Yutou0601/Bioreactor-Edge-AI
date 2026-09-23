@@ -105,6 +105,36 @@ def connect(path=None):
     return con
 
 
+def _compute_url():
+    """重運算節點位址；沒設就回 None（＝模組在本機開子行程跑）。
+
+    ⚠ 刻意直接讀環境變數、config 讀不到時才退回——本模組要能在最精簡的
+      情境下使用（例如只是列出模組清單），不該因為 config 出問題就整個掛掉。
+    """
+    v = os.environ.get('REACTOR_COMPUTE_URL')
+    if v is None:
+        try:
+            from core import config
+            v = config.get('REACTOR_COMPUTE_URL')
+        except Exception:
+            v = None
+    return (v or '').strip().rstrip('/') or None
+
+
+def _compute_timeout():
+    v = os.environ.get('REACTOR_COMPUTE_TIMEOUT')
+    if v is None:
+        try:
+            from core import config
+            v = config.get('REACTOR_COMPUTE_TIMEOUT')
+        except Exception:
+            v = None
+    try:
+        return float(v)
+    except (TypeError, ValueError):
+        return 600.0
+
+
 def discover():
     """掃 modules/ 底下所有 module.json。壞掉的個別跳過並記下原因。
 
@@ -200,12 +230,11 @@ _INPUT_PROVIDERS = {
 }
 
 
-def _write_input(m):
-    """把模組宣告的輸入寫成暫存 JSON，回傳路徑；沒宣告就回 None。
+def _build_input(m):
+    """取得模組宣告的輸入物件；沒宣告就回 None。
 
-    ⚠ 用 json.dump 前先讓 datetime 之類的物件轉成字串。提供者回傳的內容
-      來自記憶體結構，混進不可序列化的值時要當場失敗，不要寫出半個檔案
-      讓模組讀到截斷的 JSON。
+    本機模式接著寫成暫存檔給子行程；遠端模式直接把它塞進 HTTP 請求。
+    兩條路徑餵給模組的東西因此保證一樣。
     """
     key = m.get('input')
     if not key:
@@ -214,13 +243,125 @@ def _write_input(m):
     if fn is None:
         raise ValueError('module.json 的 input 不是核心認得的鍵：%r（可用：%s）'
                          % (key, ', '.join(sorted(_INPUT_PROVIDERS))))
-    data = fn()
+    return fn()
+
+
+def _write_input(m):
+    """把模組宣告的輸入寫成暫存 JSON，回傳路徑；沒宣告就回 None。
+
+    ⚠ 用 json.dump 前先讓 datetime 之類的物件轉成字串。提供者回傳的內容
+      來自記憶體結構，混進不可序列化的值時要當場失敗，不要寫出半個檔案
+      讓模組讀到截斷的 JSON。
+    """
+    data = _build_input(m)
+    if data is None:
+        return None
     path = os.path.join(m['dir'], '_input.json')
     tmp = path + '.tmp'
     with open(tmp, 'w', encoding='utf-8') as fh:
         json.dump(data, fh, ensure_ascii=False, default=str)
     os.replace(tmp, path)          # 原子替換：模組不會讀到寫到一半的檔
     return path
+
+
+# ── 結果回寫（只有遠端模式用得到）────────────────────────────────────
+# 本機模式是模組自己寫自己的表（run.py 裡的 SCHEMA）。遠端模式模組跑在
+# 另一台機器上，結果得由核心寫進**這台**的資料庫，所以核心要知道表長怎樣。
+#
+# ⚠ 欄位宣告在 module.json 的 result_columns，與 run.py 的 SCHEMA 是同一
+#   份東西的兩個副本。會漂移，所以 system_test 第 10 項會比對兩邊；
+#   不一致就紅。不比對的話，遠端模式建出來的表會少欄位，而介面只會顯示
+#   「結果是舊的」，沒有人查得到原因。
+#
+# ⚠ 這裡仍然沒有 import 任何模組的程式碼——讀的是 module.json 這份宣告，
+#   不是 run.py。紅線不變。
+def _result_columns(m):
+    cols = m.get('result_columns')
+    if not cols:
+        return None
+    out = []
+    for c in cols:
+        if not (isinstance(c, (list, tuple)) and len(c) == 2):
+            raise ValueError('result_columns 每一項要是 [欄名, 型別]，讀到 %r' % (c,))
+        name, typ = str(c[0]), str(c[1]).upper()
+        if not name.replace('_', '').isalnum():
+            raise ValueError('result_columns 欄名只接受英數與底線：%r' % name)
+        if typ not in ('TEXT', 'INTEGER', 'REAL'):
+            raise ValueError('result_columns 型別只接受 TEXT/INTEGER/REAL：%r' % typ)
+        out.append((name, typ))
+    return out
+
+
+def _write_result(m, row, con=None):
+    """把遠端算回來的一列寫進這台的 mod_* 表。回傳寫入的欄位數。"""
+    cols = _result_columns(m)
+    if not cols:
+        raise ValueError('module.json 沒有 result_columns，遠端模式無法回寫結果')
+    table = m.get('writes') or ('mod_' + m['name'])
+    if not table.replace('_', '').isalnum():
+        raise ValueError('writes 不是合法表名：%r' % table)
+
+    use = [(n, t) for n, t in cols if n in row]
+    if not use:
+        raise ValueError('遠端回來的列沒有任何 result_columns 宣告的欄位')
+
+    own = con is None
+    con = con or connect()
+    try:
+        con.execute(
+            'CREATE TABLE IF NOT EXISTS "%s" (id INTEGER PRIMARY KEY '
+            'AUTOINCREMENT, %s)'
+            % (table, ', '.join('"%s" %s' % (n, t) for n, t in cols)))
+        con.execute(
+            'INSERT INTO "%s" (%s) VALUES (%s)'
+            % (table, ','.join('"%s"' % n for n, _ in use),
+               ','.join('?' * len(use))),
+            tuple(row[n] for n, _ in use))
+        con.commit()
+    finally:
+        if own:
+            con.close()
+    return len(use)
+
+
+def _exec_remote(m, url, timeout):
+    """把模組丟給重運算節點跑，結果寫回本機。回傳 (exit_code, log)。
+
+    ⚠ 用 urllib 不用 requests。這裡是常駐核心，而 requests 會連帶拉進
+      urllib3／certifi／charset_normalizer。config.py 為了同一個理由沒用
+      python-dotenv。標準庫做得到的事不要為它加相依。
+    """
+    import urllib.error
+    import urllib.request
+
+    body = json.dumps({'input': _build_input(m)},
+                      ensure_ascii=False, default=str).encode('utf-8')
+    req = urllib.request.Request(
+        '%s/run/%s' % (url, m['name']), data=body,
+        headers={'Content-Type': 'application/json'}, method='POST')
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            got = json.loads(resp.read().decode('utf-8'))
+    except urllib.error.HTTPError as e:
+        detail = e.read().decode('utf-8', 'replace')[:2000]
+        return -3, '重運算節點回 HTTP %s：%s' % (e.code, detail)
+    except Exception as e:
+        # ⚠ 連不到要講清楚是「連不到 Orin」，不要只丟一個 timeout 上去。
+        #   現場看到的訊息如果只寫 timeout，會去查模組而不是查網路。
+        return -3, ('連不到重運算節點 %s（%s: %s）。模組沒有跑。'
+                    % (url, type(e).__name__, e))
+
+    if not got.get('ok'):
+        return -4, '重運算節點回報失敗：%s' % (got.get('error') or '（沒有說明）')
+    row = got.get('row')
+    if not isinstance(row, dict):
+        return -4, '重運算節點沒有回傳結果列（row）'
+    try:
+        n = _write_result(m, row)
+    except Exception as e:
+        return -5, '結果寫回本機資料庫失敗：%s: %s' % (type(e).__name__, e)
+    return 0, ('在重運算節點 %s 跑完，寫回 %d 個欄位。\n%s'
+               % (url, n, got.get('log') or ''))
 
 
 def run_module(name, con=None):
@@ -240,19 +381,25 @@ def run_module(name, con=None):
 
     started = datetime.now()
     timeout = float(m.get('timeout_s') or 300)
+    remote = _compute_url()
     try:
-        argv = [sys.executable, m['entry'], _db_path()]
-        inp = _write_input(m)                    # 沒宣告 input 就回 None
-        if inp:
-            argv.append(inp)
-        # ⚠ 用 sys.executable 而不是 'python'：監控電腦上服務可能跑在 venv
-        #   裡，而 PATH 上的 python 是另一套，模組宣告的相依會對不上。
-        proc = subprocess.run(
-            argv, cwd=m['dir'], timeout=timeout,
-            capture_output=True, text=True,
-            encoding='utf-8', errors='replace',
-        )
-        code, log = proc.returncode, (proc.stdout or '') + (proc.stderr or '')
+        if remote:
+            # 遠端：丟給 Orin 的常駐重運算核心。監控電腦這邊連子行程都不開，
+            # 那 200 MB 的瞬時峰值也省掉了。
+            code, log = _exec_remote(m, remote, _compute_timeout())
+        else:
+            argv = [sys.executable, m['entry'], _db_path()]
+            inp = _write_input(m)                # 沒宣告 input 就回 None
+            if inp:
+                argv.append(inp)
+            # ⚠ 用 sys.executable 而不是 'python'：監控電腦上服務可能跑在 venv
+            #   裡，而 PATH 上的 python 是另一套，模組宣告的相依會對不上。
+            proc = subprocess.run(
+                argv, cwd=m['dir'], timeout=timeout,
+                capture_output=True, text=True,
+                encoding='utf-8', errors='replace',
+            )
+            code, log = proc.returncode, (proc.stdout or '') + (proc.stderr or '')
     except subprocess.TimeoutExpired:
         code, log = -1, '逾時：超過 %.0f 秒仍未結束，已強制終止' % timeout
     except Exception as e:                       # 準備輸入失敗、找不到直譯器等

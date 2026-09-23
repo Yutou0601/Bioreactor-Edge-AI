@@ -506,13 +506,33 @@ def get_analysis():
 
 
 @router.get("/records")
-def get_records(limit: int = Query(4320, ge=0, description="0 = 不限制，回傳全部；預設 4320 ≈ 3 天（每分鐘一筆）")):
+def get_records(
+    limit: int = Query(4320, ge=0, description="0 = 不限制，回傳全部；預設 4320 ≈ 3 天（每分鐘一筆）"),
+    points: int = Query(0, ge=0, le=20000, description="0 = 不降採樣；給了就用 LTTB 挑約這麼多點（畫圖用）"),
+):
     """預設只回傳最近 limit 筆（依時間排序後取尾端），避免長時間運行後資料量
     過大拖慢前端渲染與每次輪詢的傳輸量。完整歷史仍完整保存在 sensor_records
-    與 CSV 備份中，不受此限制影響，/analysis 等其他端點也不經過這裡。"""
+    與 CSV 備份中，不受此限制影響，/analysis 等其他端點也不經過這裡。
+
+    `points` 是給畫圖用的：**前端就跑在這台監控電腦上**（4 GB，瀏覽器跟後端
+    搶同一份記憶體），而圖表只有約 1200 px 寬。實測 limit=4320 回應 975 KB，
+    每 60 秒一輪；降到 1200 點約 270 KB。
+
+    ⚠ 降採樣用 LTTB 不是等間隔抽樣——等間隔會跳過泵開那一分鐘的驟降與排氣的
+      幾筆急跌，圖上看不到而且沒有任何跡象。異常點與頭尾一律保留。
+
+    ⚠ `points` 只影響**這個回應**，不影響記憶體裡的資料、分析、或資料庫。
+      需要精確逐筆的地方（局部分析、資料表）不要用它。
+    """
     recs = _sorted_records()
     if limit > 0:
         recs = recs[-limit:]
+    if points > 0 and len(recs) > points:
+        from core import downsample
+        # 監控頁畫的是 ORP 四條線與 CH4／CO2；壓力給下降段看。四個都列進去，
+        # 各自的轉折點才不會被對方磨掉。
+        recs = downsample.pick(recs, points,
+                               keys=('orp', 'pressure', 'ch4_pct', 'co2_pct'))
     return recs
 
 
@@ -1205,7 +1225,16 @@ def api_modules():
         hist = mr.history(m.get("name"), limit=1)
         item["last_run"] = hist[0] if hist else None
         out.append(item)
-    return {"modules": out, "scheduler": mr.status()}
+    # ⚠ 要看得出模組到底跑在哪台。兩種後端的結果長得一模一樣（system_test
+    #   第 14 項就是在驗這件事），所以光看結果分不出來——Orin 掛了而系統
+    #   靜默退回本機子行程的話，現場只會覺得「怎麼變慢了」。
+    remote = mr._compute_url()
+    return {"modules": out, "scheduler": mr.status(),
+            "backend": {
+                "mode": "remote" if remote else "local",
+                "url": remote,
+                "note": ("模組送到重運算節點跑（套件常駐熱著）" if remote
+                         else "模組在本機開短命子行程跑")}}
 
 
 @router.get("/modules/{name}/result")

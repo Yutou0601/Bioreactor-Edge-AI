@@ -43,15 +43,15 @@ CREATE TABLE IF NOT EXISTS mod_ch4_attribution (
 MIN_TRAIN = 3
 
 
-def main():
-    if len(sys.argv) < 3:
-        print('用法：python run.py <db_path> <input.json>', file=sys.stderr)
-        return 2
-    db_path, input_path = sys.argv[1], sys.argv[2]
+TABLE = 'mod_ch4_attribution'
 
-    with open(input_path, encoding='utf-8') as fh:
-        data = json.load(fh)
 
+def compute_row(data):
+    """純運算：吃訓練集、回「要寫進 mod_ch4_attribution 的那一列」。不碰資料庫。
+
+    本機模式由 main() 寫 SQLite；遠端模式由 compute_node 直接呼叫。
+    xgboost 在 Orin 上是常駐熱著的，不必每次重付 +119.5 MB 的 import。
+    """
     X_raw = data.get('X') or []
     y_raw = data.get('y') or []
     fingerprint = data.get('fingerprint') or ''
@@ -77,22 +77,42 @@ def main():
 
     result['fingerprint'] = fingerprint
 
+    return {
+        'computed_at': datetime.now().isoformat(sep=' '),
+        'module_version': VERSION,
+        'fingerprint': fingerprint,
+        'n_train': n,
+        'method': method,
+        'status': result.get('status'),
+        'payload': json.dumps(result, ensure_ascii=False, default=str),
+    }
+
+
+def main():
+    if len(sys.argv) < 3:
+        print('用法：python run.py <db_path> <input.json>', file=sys.stderr)
+        return 2
+    db_path, input_path = sys.argv[1], sys.argv[2]
+
+    with open(input_path, encoding='utf-8') as fh:
+        data = json.load(fh)
+
+    row = compute_row(data)
+
     con = sqlite3.connect(db_path)
     try:
         con.executescript(SCHEMA)
+        cols = [c for c in row]
         con.execute(
-            'INSERT INTO mod_ch4_attribution (computed_at, module_version,'
-            ' fingerprint, n_train, method, status, payload)'
-            ' VALUES (?,?,?,?,?,?,?)',
-            (datetime.now().isoformat(sep=' '), VERSION, fingerprint, n,
-             method, result.get('status'),
-             json.dumps(result, ensure_ascii=False, default=str)))
+            'INSERT INTO %s (%s) VALUES (%s)'
+            % (TABLE, ','.join(cols), ','.join('?' * len(cols))),
+            tuple(row[c] for c in cols))
         con.commit()
     finally:
         con.close()
 
     print('mod_ch4_attribution 已寫入：n_train=%d method=%s status=%s'
-          % (n, method, result.get('status')))
+          % (row['n_train'], row['method'], row['status']))
     return 0
 
 

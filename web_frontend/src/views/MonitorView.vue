@@ -1,5 +1,5 @@
 <script setup>
-import { ref, computed, onMounted, onUnmounted } from 'vue'
+import { ref, shallowRef, computed, onMounted, onUnmounted } from 'vue'
 import * as echarts from 'echarts'
 import apiClient from '../services/apiClient'
 
@@ -22,12 +22,33 @@ const systemStatus = computed(() => {
 // ==========================================
 // 記錄資料 + 排序
 // ==========================================
-const records  = ref([])
+// ⚠ 這一頁是在**監控電腦本機**上看的——4 GB，瀏覽器跟後端搶同一份記憶體。
+//   所以「圖」和「表」拆成兩份資料，各取所需，不要共用一大包：
+//
+//     records       圖用。伺服器端已 LTTB 降採樣（見 CHART_POINTS），
+//                   只保形狀，不保證逐筆。實測 3 天由 975 KB → 190 KB。
+//     tableRecords  表用。逐筆精確，但只取最近 TABLE_ROWS 筆。
+//
+//   ⚠ 改動前是**整包 4320 筆同時餵給圖和表**。表格 11 欄全部渲染成 DOM，
+//     4320 列 ≈ 5 萬個節點，而且每 60 秒輪詢重建一次——那才是卡頓的主因，
+//     傳輸量反而是其次。
+//
+// ⚠ 用 shallowRef 不用 ref：這兩個陣列只整包替換、不會去改某一筆的某個欄位。
+//   ref 會把每一筆、每個欄位都包成深層響應式代理，幾千筆下來純屬浪費。
+//   代價是**就地修改不會觸發更新**，所以下面一律整包重新指派。
+const records      = shallowRef([])
+const tableRecords = shallowRef([])
+const totalCount   = ref(0)        // 後端記憶體裡的真實總筆數（非畫面上的筆數）
+
+// 圖寬大概 1200 px，要到 1500 個點已經綽綽有餘；表格只有最近的才有人看。
+const CHART_POINTS = 1500
+const TABLE_ROWS   = 200
+
 const sortKey  = ref('id')
 const sortDesc = ref(true)
 
 const sortedRecords = computed(() => {
-  const arr = [...records.value]
+  const arr = [...tableRecords.value]
   arr.sort((a, b) => {
     const va = a[sortKey.value]
     const vb = b[sortKey.value]
@@ -133,6 +154,10 @@ const fetchAnalysis = async () => {
   try {
     const res = await apiClient.get('/analysis')
     analysis.value = res.data
+    // 真實總筆數要由後端給——畫面上那兩份都是取樣過的，數它們會低報。
+    if (typeof res.data?.record_count === 'number') {
+      totalCount.value = res.data.record_count
+    }
   } catch (e) {
     console.error('分析取得失敗:', e)
   }
@@ -146,10 +171,18 @@ const fetchRecords = async () => {
   _fetchPending = true
   isLoadingRecords.value = true
   try {
-    // 只抓選定時間範圍的資料：視窗越小，傳輸/記憶體/運算越省（LTTB 已處理渲染）
-    const res = await apiClient.get('/records', { params: { limit: timeRange.value } })
+    // 圖：伺服器端先 LTTB 降採樣再送過來。
+    // ⚠ points 是**伺服器端**降採樣，跟 ECharts 的 sampling:'lttb' 不是同
+    //   一件事——後者只減少「畫幾個點」，傳輸量與瀏覽器持有的物件一點都沒少。
+    //   極值、頭尾、異常點在伺服器端都保住了（core/downsample.py）。
+    const res = await apiClient.get('/records', {
+      params: { limit: timeRange.value, points: CHART_POINTS },
+    })
     isBackendOnline.value = true
     records.value = res.data
+    // 表：逐筆精確，但只要最近幾百筆。整包 4320 列渲染成 DOM 是卡頓的主因。
+    const tbl = await apiClient.get('/records', { params: { limit: TABLE_ROWS } })
+    tableRecords.value = tbl.data
     updateChart()
     lastUpdateTime.value = new Date().toLocaleTimeString('zh-TW', { hour12: false })
     await fetchAnalysis()
@@ -166,7 +199,10 @@ const submitRecord = async () => {
   isSubmitting.value = true
   try {
     const res = await apiClient.post('/records', formData.value)
-    records.value.push(res.data)
+    // ⚠ shallowRef 不追蹤就地修改，push 進去畫面不會動。整包重新指派。
+    records.value = [...records.value, res.data]
+    tableRecords.value = [...tableRecords.value, res.data].slice(-TABLE_ROWS)
+    totalCount.value += 1
     updateChart()
     lastUpdateTime.value = new Date().toLocaleTimeString('zh-TW', { hour12: false })
   } catch (e) {
@@ -181,6 +217,8 @@ const deleteRecord = async (id) => {
   try {
     await apiClient.delete(`/records/${id}`)
     records.value = records.value.filter(r => r.id !== id)
+    tableRecords.value = tableRecords.value.filter(r => r.id !== id)
+    totalCount.value = Math.max(0, totalCount.value - 1)
     updateChart()
   } catch (e) { console.error('刪除失敗:', e) }
 }
@@ -838,11 +876,11 @@ onUnmounted(() => {
                   class="range-btn" :class="{ 'range-on': timeRange === r.value }"
                   @click="changeTimeRange(r.value)">{{ r.label }}</button>
               </div>
-              <span class="record-count">{{ records.length }} 筆</span>
+              <span class="record-count">圖上 {{ records.length }} 點 / 共 {{ totalCount }} 筆</span>
               <span class="click-hint">點擊曲線上的點查看局部分析</span>
               <button class="btn clear-btn"
                 @click="clearRecords"
-                :disabled="isClearing || records.length === 0"
+                :disabled="isClearing || totalCount === 0"
                 title="清除所有記錄（無法還原）">
                 {{ isClearing ? '清除中...' : '清除資料' }}
               </button>
@@ -918,7 +956,7 @@ onUnmounted(() => {
           <div class="panel-header">
             <h2 class="panel-title">
               感測器記錄列表
-              <span class="badge">{{ records.length }} 筆</span>
+              <span class="badge">最近 {{ sortedRecords.length }} 筆 / 共 {{ totalCount }} 筆</span>
             </h2>
           </div>
 

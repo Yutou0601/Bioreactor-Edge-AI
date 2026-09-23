@@ -33,6 +33,22 @@ _DEFAULTS = {
     'REACTOR_ENABLE_LSTM': '0',
     # csv_watcher 檢查間隔（秒）
     'REACTOR_POLL_SECONDS': '60',
+    # ── 兩台機器的角色 ────────────────────────────────────────
+    # 'monitor'：4 GB 的 Windows 監控電腦。收記錄程式的 CSV、跑前端與 API。
+    #            常駐核心的預算仍是 60 MB，重量級套件一律不得進來。
+    # 'compute'：Jetson Orin NX 16 GB。重運算常駐在這台，scipy／xgboost／
+    #            torch 直接 import 並且熱著不卸載，吃得到 GPU。
+    # ⚠ 這個值只改變「守門怎麼驗」與「模組去哪裡跑」，不改變計算結果。
+    #   兩台跑同一份程式碼，差別全在設定。
+    'REACTOR_PROFILE': 'monitor',
+    # 重運算節點的位址。留空＝沒有這台，模組照舊在本機開短命子行程
+    #   （單機部署、開發筆電、以及 Orin 還沒到之前都走這條）。
+    #   設了值＝監控電腦把模組丟給 Orin 跑，連子行程都不用開。
+    #   例：http://192.168.1.50:8100
+    'REACTOR_COMPUTE_URL': '',
+    # 等重運算節點回覆的上限（秒）。要比模組自己的 timeout_s 寬，
+    # 否則慢的模組（greybox 300 秒）每次都會被這裡先砍掉。
+    'REACTOR_COMPUTE_TIMEOUT': '600',
     # 啟動時從 sample 表還原回記憶體的筆數上限。留空＝用內建預設 20000
     # （約 10 MB、約當 14 天的一分鐘取樣）。實測每筆 517 bytes，一年份
     # 525,600 筆＝259 MB，遠超這台 60 MB 的預算，所以不能設成「全部」。
@@ -81,6 +97,26 @@ def data_dir():
 
 def api_base():
     return 'http://%s:%s' % (get('REACTOR_HOST'), get('REACTOR_PORT'))
+
+
+def profile():
+    """這台機器的角色：'monitor' 或 'compute'。
+
+    ⚠ 打錯字要當場失敗，不要默默當成 monitor。把 Orin 的 .env 拼成
+      'compude' 而系統照樣啟動的話，重運算會安靜地退回子行程模式，
+      而那台 16 GB 的機器看起來一切正常。
+    """
+    v = (get('REACTOR_PROFILE') or 'monitor').strip().lower()
+    if v not in ('monitor', 'compute'):
+        raise SystemExit(
+            'REACTOR_PROFILE 只能是 monitor 或 compute，讀到的是 %r' % v)
+    return v
+
+
+def compute_url():
+    """重運算節點的位址；沒設就回 None（＝模組在本機跑子行程）。"""
+    u = (get('REACTOR_COMPUTE_URL') or '').strip().rstrip('/')
+    return u or None
 
 
 def describe():

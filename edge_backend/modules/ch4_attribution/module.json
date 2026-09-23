@@ -6,6 +6,15 @@
   "entry": "run.py",
   "input": "ch4_training_set",
   "writes": "mod_ch4_attribution",
+  "result_columns": [
+    ["computed_at", "TEXT"],
+    ["module_version", "TEXT"],
+    ["fingerprint", "TEXT"],
+    ["n_train", "INTEGER"],
+    ["method", "TEXT"],
+    ["status", "TEXT"],
+    ["payload", "TEXT"]
+  ],
   "trigger": { "type": "schedule", "every_minutes": 60 },
   "timeout_s": 240,
   "requires": ["numpy>=1.24", "xgboost>=2.0（選配，沒裝自動退回 GA+Ridge）"]

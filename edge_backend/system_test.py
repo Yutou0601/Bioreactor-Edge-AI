@@ -4,7 +4,7 @@
 
     python system_test.py
 
-十三項檢查，由內而外：
+十五項檢查，由內而外：
 
   1 記憶體守門  常駐核心不得載入 torch/pandas/sklearn/scipy/xgboost
   2 估計器一致  線上實作 vs 離線腳本，逐段比對 (曲率, k, r_b)
@@ -19,6 +19,8 @@
  11 sample 表   重啟不掉資料；還原有上限（不然一年份吃 259 MB）
  12 CH4 即時路徑 不得拉進 scipy／xgboost；find_peaks 與 scipy 逐點一致
  13 下降報表    化學計量與 batch_rates 相同；短視窗與不可能份額要示警
+ 14 重運算節點  遠端後端與本機逐欄相同；欄位宣告不得漂移；連不到要失敗
+ 15 降採樣      /records?points=N 不得磨掉任何繪圖欄位的極值
 
 ⚠ 第 1 項是最容易悄悄回歸的。torch 曾經因為 routes.py 一行模組層級
   import 而在每次啟動時載入 496 MB，而且沒有任何錯誤訊息。
@@ -467,6 +469,16 @@ if os.path.exists(_sdb):
 _prev_sdb = os.environ.get('REACTOR_DB')
 os.environ['REACTOR_DB'] = _sdb
 try:
+    # ⚠ 先清掉記憶體裡的感測資料，這一組才是密封的。
+    #   匯入會依時間戳去重，所以只要 sensor_records 裡**已經有**這幾個 CSV
+    #   的時間戳，整批就會被當成重複、一筆都不寫，這一項就紅——而原因在
+    #   這支測試之外（開發機的 reactor.db 裡還留著先前跑出來的資料，
+    #   lifespan 會把它還原進記憶體）。
+    #   實際踩過：某次量測腳本往 reactor.db 灌了 33,955 筆，之後這一項就
+    #   一直紅，看起來像 sample_store 壞了，其實是環境髒了。
+    from core.data_store import clear_all as _clear_mem        # noqa: E402
+    _clear_mem()
+
     _csvs = sorted(glob.glob(os.path.join(folder, '*.csv')))[:2]
     _n_imported = 0
     for _f in _csvs:
@@ -686,6 +698,251 @@ try:
           'HTTP %d' % _r.status_code)
 except Exception as _e:                                      # noqa: BLE001
     check('每段下降報表', False, '%s: %s' % (type(_e).__name__, _e))
+
+# ── 14 重運算節點（Jetson Orin NX）──────────────────────────
+print('')
+print('14. 重運算節點（遠端後端）')
+# 監控電腦（4 GB）把模組丟給 Orin（16 GB）跑，結果寫回這台的 mod_* 表。
+#
+# ⚠ 這一組要守住兩件會靜默出錯的事：
+#   1 欄位漂移。表的欄位宣告在兩個地方——run.py 的 SCHEMA（本機模式用）
+#     與 module.json 的 result_columns（遠端模式核心據此建表）。漂掉的話
+#     遠端建出來的表會少欄位，介面只會顯示「結果是舊的」，查不到原因。
+#   2 遠端模式也不准把重套件拉進常駐核心。遠端反而更該乾淨——連子行程
+#     都不用開了。
+import json as _json                                          # noqa: E402
+import re as _re                                              # noqa: E402
+import threading as _threading                                # noqa: E402
+import time as _time                                          # noqa: E402
+
+try:
+    # ---- 14a 欄位宣告不得漂移 ----
+    _drift = []
+    for _m in mr.discover():
+        if not _m.get('ok'):
+            continue
+        _declared = _m.get('result_columns')
+        if not _declared:
+            _drift.append('%s: module.json 沒有 result_columns' % _m['name'])
+            continue
+        _src = io.open(os.path.join(_m['dir'], _m['entry']),
+                       encoding='utf-8').read()
+        _mm = _re.search(r'CREATE TABLE IF NOT EXISTS\s+\w+\s*\((.*?)\)\s*;',
+                         _src, _re.S)
+        if not _mm:
+            _drift.append('%s: run.py 裡找不到 CREATE TABLE' % _m['name'])
+            continue
+        _schema_cols = []
+        for _line in _mm.group(1).split(','):
+            _parts = _line.strip().split()
+            if len(_parts) >= 2 and _parts[0].lower() != 'id':
+                _schema_cols.append((_parts[0], _parts[1].upper()))
+        _json_cols = [(c[0], str(c[1]).upper()) for c in _declared]
+        if _schema_cols != _json_cols:
+            _drift.append('%s: run.py=%s ≠ module.json=%s'
+                          % (_m['name'], _schema_cols, _json_cols))
+    check('★ result_columns 與 run.py 的 SCHEMA 一致', not _drift,
+          ('★ ' + '; '.join(_drift)) if _drift
+          else '三個模組的欄位宣告兩邊相同')
+
+    # ---- 14b 節點載得起三個模組，且各自的 analysis 不互相汙染 ----
+    # ⚠ 三個模組的分析檔都叫 analysis.py。常駐 import 時第二個之後會拿到
+    #   sys.modules 的快取——greybox 會用 covariate 的程式算，不報錯。
+    #   子行程模式沒這問題，是搬成常駐才出現的。
+    from compute_node import server as _cn                    # noqa: E402
+    _cn._loaded = _cn.load_all()
+    _bad = {k: v['error'] for k, v in _cn._loaded.items() if v['error']}
+    check('節點載得起全部模組', not _bad,
+          ('★ ' + '; '.join('%s: %s' % kv for kv in _bad.items())) if _bad
+          else '%d 個模組已熱載入' % len(_cn._loaded))
+
+    _files = {}
+    for _n, _e in _cn._loaded.items():
+        if _e['analysis'] is None:
+            continue
+        with _cn._swap_analysis(_e['analysis']):
+            _files[_n] = __import__('analysis').__file__
+    _wrong = [n for n, f in _files.items()
+              if os.path.basename(os.path.dirname(f)) != n]
+    check('★ 各模組拿到的是自己的 analysis.py', not _wrong,
+          ('★ 拿錯的：' + ', '.join(_wrong)) if _wrong
+          else '%d 個模組各自獨立' % len(_files))
+    check('呼叫後沒有殘留 analysis', 'analysis' not in sys.modules,
+          'sys.modules 乾淨')
+
+    # ---- 14c 端對端：遠端跑出來的結果要和本機一致 ----
+    _app = _cn.build_app()
+    import uvicorn as _uvicorn                                # noqa: E402
+    _cfg = _uvicorn.Config(_app, host='127.0.0.1', port=8129,
+                           log_level='error')
+    _srv = _uvicorn.Server(_cfg)
+    _threading.Thread(target=_srv.run, daemon=True).start()
+    for _ in range(100):
+        if _srv.started:
+            break
+        _time.sleep(0.1)
+    check('節點起得來', _srv.started, 'http://127.0.0.1:8129')
+
+    def _last(_table):
+        _con = mr.connect()
+        try:
+            _r = _con.execute('SELECT * FROM "%s" ORDER BY id DESC LIMIT 1'
+                              % _table).fetchone()
+            return dict(_r) if _r else None
+        finally:
+            _con.close()
+
+    os.environ.pop('REACTOR_COMPUTE_URL', None)
+    mr.run_module('covariate')
+    _local_row = _last('mod_covariate')
+
+    os.environ['REACTOR_COMPUTE_URL'] = 'http://127.0.0.1:8129'
+    _b4 = set(sys.modules)
+    _rr = mr.run_module('covariate')
+    _gained = [m for m in ('pandas', 'scipy', 'xgboost', 'torch', 'sklearn')
+               if m not in _b4 and m in sys.modules]
+    _remote_row = _last('mod_covariate')
+    os.environ.pop('REACTOR_COMPUTE_URL', None)
+
+    check('遠端執行成功', _rr.get('ok'),
+          'exit=%s %s' % (_rr.get('exit_code'),
+                          (_rr.get('log') or _rr.get('error') or '')
+                          .strip().replace('\n', ' ')[:80]))
+    check('★ 遠端模式不會把相依帶進常駐核心', not _gained,
+          ('★ 多出了 ' + ', '.join(_gained)) if _gained
+          else '核心的 sys.modules 沒有變動')
+
+    if _local_row and _remote_row:
+        check('遠端寫出的欄位與本機相同',
+              set(_local_row) == set(_remote_row),
+              '本機 %d 欄、遠端 %d 欄' % (len(_local_row), len(_remote_row)))
+        # computed_at 必然不同（兩次執行）；其餘必須逐欄相同，payload 也是。
+        _diff = [k for k in _local_row
+                 if k not in ('id', 'computed_at')
+                 and _local_row.get(k) != _remote_row.get(k)]
+        check('★ 遠端與本機算出來的結果逐欄相同', not _diff,
+              ('★ 不同的欄位：' + ', '.join(_diff)) if _diff
+              else '含 payload 在內全部相同（n_cycles=%s status=%s）'
+                   % (_local_row.get('n_cycles'), _local_row.get('status')))
+    else:
+        check('兩種模式都有寫進表', False,
+              '本機=%s 遠端=%s' % (bool(_local_row), bool(_remote_row)))
+
+    # ---- 14d 用合成資料逼出真正的運算路徑 ----
+    # ⚠ 14c 比對時現場資料是 0 個完整循環，兩邊都走 insufficient 那條早退
+    #   分支——pandas 與 scipy 一行都沒跑到。那種綠燈證明不了重運算搬過去
+    #   之後算得對。這裡餵一組一定會進到迴歸的合成循環，逐位元比 payload。
+    _syn = [{'run_id': 1 + (i // 4),
+             'drop_rate': 0.0170 + 0.0004 * i,
+             'flattening': 0.30 - 0.006 * i,
+             'pre_injection_orp': -320.0 - 7.0 * i,
+             'n_minutes': 60 + (i % 5)} for i in range(12)]
+
+    # ⚠ 一定要走 run_one()，不可以直接抓 _loaded[...]['run'].compute_row()。
+    #   三個模組的目錄都被各自的 run.py 插進了 sys.path，最後載入的 greybox
+    #   排在 sys.path[0]，所以裸的 `import analysis` 會拿到 greybox 的那份。
+    #   第一版這裡就是這樣寫的，當場 ImportError——換成函式名剛好對得上的
+    #   兩個模組，就會變成不報錯但算錯。run_one() 裡的 _swap_analysis 才是
+    #   正確入口。
+    _local_json = _json.dumps(
+        _cn.run_one('covariate', _syn)['payload'], sort_keys=True)
+
+    import urllib.request as _urq                             # noqa: E402
+    _req = _urq.Request(
+        'http://127.0.0.1:8129/run/covariate',
+        data=_json.dumps({'input': _syn}).encode('utf-8'),
+        headers={'Content-Type': 'application/json'}, method='POST')
+    with _urq.urlopen(_req, timeout=120) as _resp:
+        _got = _json.loads(_resp.read().decode('utf-8'))
+    _remote_json = _json.dumps(_got.get('row', {}).get('payload'),
+                              sort_keys=True)
+
+    _pl = _json.loads(_got['row']['payload']) if _got.get('ok') else {}
+    check('合成資料真的走到迴歸（不是早退）',
+          _pl.get('status') == 'ok',
+          'status=%s n_cycles=%s' % (_pl.get('status'), _pl.get('n_cycles')))
+    check('★ 遠端算出的 payload 與本機逐位元相同',
+          _local_json == _remote_json,
+          '%d 字元完全一致' % len(_remote_json) if _local_json == _remote_json
+          else '★ 不一致')
+    check('★ 這條路徑確實用到了 pandas／scipy',
+          'pandas' in sys.modules and 'scipy' in sys.modules,
+          '節點行程內 pandas=%s scipy=%s'
+          % (bool(sys.modules.get('pandas')), bool(sys.modules.get('scipy'))))
+
+    # ---- 14e 節點連不到時要講清楚，而且不可以假裝成功 ----
+    os.environ['REACTOR_COMPUTE_URL'] = 'http://127.0.0.1:9'
+    _dead = mr.run_module('covariate')
+    os.environ.pop('REACTOR_COMPUTE_URL', None)
+    check('★ 連不到節點要失敗而不是靜默跳過', not _dead.get('ok'),
+          'exit=%s' % _dead.get('exit_code'))
+    check('連不到節點的訊息說得出是連線問題',
+          '連不到重運算節點' in (_dead.get('log') or ''),
+          (_dead.get('log') or '').strip()[:90])
+except Exception as _e:                                      # noqa: BLE001
+    check('重運算節點', False, '%s: %s' % (type(_e).__name__, _e))
+finally:
+    os.environ.pop('REACTOR_COMPUTE_URL', None)
+
+# ── 15 伺服器端降採樣（監控電腦省記憶體用）──────────────────
+print('')
+print('15. 伺服器端降採樣')
+# 前端就跑在這台 4 GB 的監控電腦上，瀏覽器跟後端搶同一份記憶體。
+# /api/records?points=N 在送出去之前先把點數砍掉。
+#
+# ⚠ 這裡守的是「圖看起來還是對的，但極值被磨掉了」這種不會有人發現的壞法。
+#   等間隔抽樣就會這樣：泵開那一分鐘的驟降、排氣的那幾筆急跌被抽掉，
+#   曲線依然平滑漂亮，只是峰不見了。
+try:
+    from core import downsample                                # noqa: E402
+
+    _recs = c.get('/api/records', params={'limit': 4320}).json()
+    if len(_recs) < 200:
+        check('有足夠的資料可測降採樣', False, '只有 %d 筆' % len(_recs))
+    else:
+        _ds = c.get('/api/records',
+                    params={'limit': 4320, 'points': 1000}).json()
+        check('降採樣確實減少了筆數', 0 < len(_ds) < len(_recs),
+              '%d 筆 → %d 筆' % (len(_recs), len(_ds)))
+        check('頭尾兩筆不得改變',
+              _recs[0]['timestamp'] == _ds[0]['timestamp']
+              and _recs[-1]['timestamp'] == _ds[-1]['timestamp'],
+              '%s … %s' % (_ds[0]['timestamp'], _ds[-1]['timestamp']))
+        _ts = [r['timestamp'] for r in _ds]
+        check('時間仍然遞增', _ts == sorted(_ts), '%d 筆' % len(_ts))
+
+        _lost = []
+        for _k in ('orp', 'pressure', 'ch4_pct', 'co2_pct'):
+            _a = [r.get(_k) for r in _recs if r.get(_k) is not None]
+            _b = [r.get(_k) for r in _ds if r.get(_k) is not None]
+            if not _a:
+                continue
+            if min(_a) != min(_b) or max(_a) != max(_b):
+                _lost.append('%s [%.3f,%.3f]→[%.3f,%.3f]'
+                             % (_k, min(_a), max(_a), min(_b), max(_b)))
+        check('★ 四個繪圖欄位的極值都不得被磨掉', not _lost,
+              ('★ ' + '; '.join(_lost)) if _lost
+              else 'orp／pressure／ch4／co2 的最大最小值與原始完全相同')
+
+        # ⚠ 這裡曾經放過一項「只用單一欄位會磨掉其他欄位的極值」當佐證，
+        #   已移除：那斷言的是**這批資料的性質**，不是程式的性質。換一段
+        #   資料（pressure 與 ORP 的轉折剛好落在同一批點上）它就會紅，
+        #   而程式一點問題都沒有。測試只能斷言程式保證得了的事。
+        #   單欄位不夠用這件事，記在 core/downsample.py 的註解裡。
+
+        check('points=0 等於不降採樣',
+              len(c.get('/api/records',
+                        params={'limit': 4320, 'points': 0}).json())
+              == len(_recs), '維持 %d 筆' % len(_recs))
+
+        _b4 = set(sys.modules)
+        c.get('/api/records', params={'limit': 4320, 'points': 800})
+        _g = [m for m in ('scipy', 'pandas', 'sklearn')
+              if m not in _b4 and m in sys.modules]
+        check('★ 降採樣只用 numpy', not _g,
+              ('★ 多了 ' + ', '.join(_g)) if _g else '沒有新增重量級套件')
+except Exception as _e:                                      # noqa: BLE001
+    check('伺服器端降採樣', False, '%s: %s' % (type(_e).__name__, _e))
 
 # ── 總結 ────────────────────────────────────────────────────
 print('\n' + '=' * 64)

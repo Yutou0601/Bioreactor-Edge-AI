@@ -38,6 +38,33 @@ CREATE TABLE IF NOT EXISTS mod_greybox (
 """
 
 
+TABLE = 'mod_greybox'
+
+
+def compute_row(cycles):
+    """純運算：吃軌跡、回「要寫進 mod_greybox 的那一列」。不碰資料庫。
+
+    本機模式由 main() 寫 SQLite；遠端模式由 compute_node 直接呼叫，
+    結果 JSON 回給監控電腦的核心寫。兩條路徑跑同一段程式。
+    """
+    if not cycles:
+        result = {'status': 'insufficient', 'n_cycles': 0,
+                  'message': '沒有完整循環軌跡可擬合。'}
+    else:
+        # ⚠ scipy 留在函式裡 import。遠端模式會在啟動時 import 本檔，
+        #   頂層 import 會讓「列出模組」也把 scipy 拉進來。
+        from analysis import analyze_real
+        result = analyze_real(cycles)
+
+    return {
+        'computed_at': datetime.now().isoformat(sep=' '),
+        'module_version': VERSION,
+        'n_cycles': len(cycles),
+        'status': result.get('status', 'ok'),
+        'payload': json.dumps(result, ensure_ascii=False, default=str),
+    }
+
+
 def main():
     if len(sys.argv) < 3:
         print('用法：python run.py <db_path> <input.json>', file=sys.stderr)
@@ -47,28 +74,22 @@ def main():
     with open(input_path, encoding='utf-8') as fh:
         cycles = json.load(fh)
 
-    if not cycles:
-        result = {'status': 'insufficient', 'n_cycles': 0,
-                  'message': '沒有完整循環軌跡可擬合。'}
-    else:
-        from analysis import analyze_real
-        result = analyze_real(cycles)
+    row = compute_row(cycles)
 
     con = sqlite3.connect(db_path)
     try:
         con.executescript(SCHEMA)
+        cols = [c for c in row]
         con.execute(
-            'INSERT INTO mod_greybox (computed_at, module_version,'
-            ' n_cycles, status, payload) VALUES (?,?,?,?,?)',
-            (datetime.now().isoformat(sep=' '), VERSION, len(cycles),
-             result.get('status', 'ok'),
-             json.dumps(result, ensure_ascii=False, default=str)))
+            'INSERT INTO %s (%s) VALUES (%s)'
+            % (TABLE, ','.join(cols), ','.join('?' * len(cols))),
+            tuple(row[c] for c in cols))
         con.commit()
     finally:
         con.close()
 
     print('mod_greybox 已寫入：%d 條軌跡、status=%s'
-          % (len(cycles), result.get('status', 'ok')))
+          % (row['n_cycles'], row['status']))
     return 0
 
 
