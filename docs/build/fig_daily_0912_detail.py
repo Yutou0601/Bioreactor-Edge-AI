@@ -1,19 +1,23 @@
 
 # -*- coding: utf-8 -*-
-"""2026-09-12 明細版日報的圖（對應表 A~F）。
+"""2026-09-12 明細版日報的圖。
 
-⚠ 資料一律取自 research/cycles/detail_tables.py 的計算函式，與表格
-  **共用同一份計算**。圖與表對不上是最糟的狀況——讀的人會兩邊都不信。
+⚠ 圖說一律用白話，直接回答會議問的問題，不用行話。
+  被明確要求拿掉的說法：「單調上升」「相干疊加」「泵窗」「估計量」
+  「訊噪比」「包絡線」「τ 槓桿」。這些是分析過程的詞，不是設備方要看的答案。
 
-⚠ 中文字型（微軟正黑體）沒有下標字元（₂ ₄）與負號，圖上一律寫 CH4／CO2，
-  並設 axes.unicode_minus=False。（fig_weekly_0911.py 踩過。）
+  會議問的是：
+    · 一段時間能轉換多少氣體（1hr / 2hr / 3hr）
+    · 1.2 掉到 1.1 這段，用掉多少 CO2
+    · 3–4 小時排一次氣可不可行
+    · 排 0.16 才看得到 CH4 最高濃度
 
-⚠ 標註一律加白底框。圖上線條密，文字落在資料上就讀不出來——而且是
-  「看起來有字但看不清楚」這種不會被回報的壞法。
+⚠ 資料取自 research/cycles/detail_tables.py，與表格共用同一份計算。
+⚠ 中文字型沒有下標字元與負號，一律寫 CH4／CO2 並設 unicode_minus=False。
+⚠ 標註一律加白底框，否則落在線上就讀不出來。
 
 輸出 → docs/reports/fig_daily_0912/
 """
-import datetime as dt
 import os
 import sys
 
@@ -34,8 +38,12 @@ sys.path.insert(0, os.path.join(REPO, 'edge_backend'))
 import detail_tables as DT                                         # noqa: E402
 
 COL = {'tau1': '#2E7D32', 'tau5': '#EF6C00', 'tau10': '#1565C0'}
+VHEAD, R_GAS, KGF_PA = 1.00, 8.314462618, 98066.5
 
 
+# ⚠ y 軸標籤裡不可出現「體」字。matplotlib 把字串轉 90 度時，
+#   這個字會被畫成約六成大小並偏移，看起來像兩字疊在一起（已踩過）。
+#   橫排正常，所以標題、圖例、標註照用無妨；只有 set_ylabel / supylabel 要避。
 def style():
     plt.rcParams.update({
         'font.sans-serif': ['Microsoft JhengHei', 'Microsoft YaHei',
@@ -53,184 +61,203 @@ def box(c):
     return dict(boxstyle='round,pad=0.34', fc='white', ec=c, alpha=0.93, lw=0.8)
 
 
-# ── 圖 1（表 B）循環泵的逐分鐘節奏，三批對照 ──────────────────
-def fig_pump():
-    ts, h, p, co2, ch4 = DT.load(DT.TAU_DIR)
-    fig, axes = plt.subplots(3, 1, figsize=(9.2, 7.4), sharex=True)
-    for ax, (nm, tau, d0, d1) in zip(axes, DT.BATCHES):
-        t2, h2, p2, _, _ = DT.sub(ts, h, p, co2, ch4, d0, d1)
-        mu, se, n = DT.minute_profile(t2, h2, p2)
-        on, off, gap = DT.pump_window(mu)
-        x = np.arange(60)
-        ax.axvspan(on, off, color=COL[nm], alpha=0.13, zorder=0)
-        ax.errorbar(x, mu, yerr=se, fmt='o-', color=COL[nm], lw=1.3, ms=3.2,
-                    capsize=2, elinewidth=0.8)
-        ax.axhline(0, color='#888', lw=0.8)
-        ax.set_ylabel('每分鐘壓降\n(kg/cm²)')
-        ax.set_title('%s　宣稱 τ = %d 分／小時　→　實測泵窗 第 %d–%d 分（%d 分鐘）'
-                     % (nm, tau, on, off, gap), loc='left', fontsize=10.5)
-        ax.annotate('泵開', xy=(on, mu[on]), xytext=(on + 6, mu[on] * 0.92),
-                    fontsize=9, color=COL[nm], fontweight='bold',
-                    bbox=box(COL[nm]),
-                    arrowprops=dict(arrowstyle='->', color=COL[nm], lw=1.1))
-        ax.annotate('泵停', xy=(off, mu[off]), xytext=(off + 6, mu[off] * 1.6),
-                    fontsize=9, color='#C62828', fontweight='bold',
-                    bbox=box('#C62828'),
-                    arrowprops=dict(arrowstyle='->', color='#C62828', lw=1.1))
-    axes[-1].set_xlabel('小時內的第幾分鐘')
-    axes[-1].set_xlim(-1, 60)
-    fig.suptitle('圖 1　循環泵的節奏：泵運轉時間＝該批的 τ（對應表 B）',
-                 fontsize=12, y=0.995)
-    fig.tight_layout()
-    return fig, 'fig1_泵節奏三批對照'
+def ml(dp):
+    return dp * KGF_PA * VHEAD * 1e-3 / (R_GAS * 303.15) * 22400
 
 
-# ── 圖 2（表 F）τ 槓桿 ────────────────────────────────────────
-def fig_tau():
-    ts, h, p, co2, ch4 = DT.load(DT.TAU_DIR)
-    taus, gaps, rates = [], [], []
-    for nm, tau, d0, d1 in DT.BATCHES:
-        t2, h2, p2, _, _ = DT.sub(ts, h, p, co2, ch4, d0, d1)
-        segs = DT.descents(h2, p2)
-        amp = np.array([p2[s] - p2[e] for s, e in segs])
-        dur = np.array([h2[e] - h2[s] for s, e in segs])
-        mu, _, _ = DT.minute_profile(t2, h2, p2)
-        on, off, gap = DT.pump_window(mu)
-        taus.append(tau)
-        gaps.append(gap)
-        rates.append(np.median(amp / dur))
-
-    fig, (a1, a2) = plt.subplots(1, 2, figsize=(9.4, 3.9))
-    a1.plot([0, 11], [0, 11], '--', color='#999', lw=1.2, zorder=0)
-    for t_, g_, nm in zip(taus, gaps, [b[0] for b in DT.BATCHES]):
-        a1.plot(t_, g_, 'o', color=COL[nm], ms=11)
-        a1.annotate(nm, xy=(t_, g_), xytext=(t_ + 0.5, g_ - 1.1), fontsize=9.5,
-                    color=COL[nm], fontweight='bold', bbox=box(COL[nm]))
-    a1.set_xlabel('宣稱的 τ（分鐘／小時）')
-    a1.set_ylabel('實測泵窗長度（分鐘）')
-    a1.set_xlim(0, 11.5)
-    a1.set_ylim(0, 11.5)
-    a1.set_title('（a）泵窗長度＝τ　相關 1.000', fontsize=10.5)
-    a1.text(5.6, 2.0, '虛線為 y = x\n三點完全落在線上', fontsize=9,
-            color='#555', bbox=box('#999'))
-
-    for t_, r_, nm in zip(taus, rates, [b[0] for b in DT.BATCHES]):
-        a2.plot(t_, r_, 'o', color=COL[nm], ms=11)
-        a2.annotate('%s\n%.4f' % (nm, r_), xy=(t_, r_),
-                    xytext=(t_ + 0.4, r_ - 0.004), fontsize=9.5,
-                    color=COL[nm], fontweight='bold', bbox=box(COL[nm]))
-    a2.set_xlabel('宣稱的 τ（分鐘／小時）')
-    a2.set_ylabel('壓力下降速率中位數\n(kg/cm²/hr)')
-    a2.set_xlim(0, 12.5)
-    a2.set_ylim(0.012, 0.045)
-    a2.set_title('（b）下降速率隨 τ 單調上升', fontsize=10.5)
-    fig.suptitle('圖 2　τ 槓桿：泵運轉時間直接決定氣液接觸時間（對應表 F）',
-                 fontsize=12, y=1.00)
-    fig.tight_layout()
-    return fig, 'fig2_tau槓桿'
-
-
-# ── 圖 3（表 A+C）13 個自動循環：一致性與內部剖面 ──────────────
-def fig_cycles():
+def stacked_profile():
+    """13 個循環對齊後的平均壓降曲線（每 30 分一格）。"""
     ts, h, p, co2, ch4 = DT.load(DT.TAU_DIR)
     t2, h2, p2, _, _ = DT.sub(ts, h, p, co2, ch4, *DT.BATCHES[2][2:])
     segs = DT.descents(h2, p2)
     reg = [(s, e) for s, e in segs
            if 5.0 <= h2[e] - h2[s] <= 8.5 and 0.20 <= p2[s] - p2[e] <= 0.30]
-    fig, (a1, a2) = plt.subplots(1, 2, figsize=(9.4, 4.0))
-    for s, e in reg:
-        a1.plot(h2[s:e + 1] - h2[s], p2[s:e + 1] - p2[s], '-',
-                color='#1565C0', alpha=0.35, lw=1.0)
     G = np.arange(0, 6.01, 0.5)
     M = np.array([np.interp(G, h2[s:e + 1] - h2[s], p2[s:e + 1] - p2[s])
                   for s, e in reg])
-    mu = M.mean(axis=0)
-    se = M.std(axis=0, ddof=1) / np.sqrt(len(M))
-    a1.errorbar(G, mu, yerr=se * 3, fmt='o-', color='#C62828', lw=2.2, ms=5,
-                capsize=3, label='疊加平均（誤差棒 ×3）', zorder=5)
-    a1.set_xlabel('循環內經過時間（小時）')
-    a1.set_ylabel('累計壓降（kg/cm²）')
-    a1.legend(loc='lower left')
-    a1.set_title('（a）13 個自動循環疊合', fontsize=10.5)
-    a1.text(3.4, -0.03, '降幅 0.252 ± 0.009\n時長 6.83 ± 0.76 hr',
-            fontsize=9, color='#1565C0', bbox=box('#1565C0'))
+    return G, -M.mean(axis=0), M.std(axis=0, ddof=1) / np.sqrt(len(M)), reg, h2, p2
 
-    d1 = np.diff(mu) / np.diff(G)
-    base = -d1.mean()
-    ctr = (G[:-1] + G[1:]) / 2
-    rel = -d1 / base
-    a2.bar(ctr, rel, width=0.42,
-           color=['#C62828' if v > 1 else '#90A4AE' for v in rel])
-    a2.axhline(1.0, color='#333', lw=1.2, ls='--')
-    a2.set_xlabel('循環內經過時間（小時）')
-    a2.set_ylabel('相對速率（1.0 = 全段平均）')
-    a2.set_title('（b）循環內速率並非等速', fontsize=10.5)
-    a2.text(2.6, 1.55, '高低交替＝泵的節奏\n含泵窗的半小時速率高',
-            fontsize=9, color='#C62828', bbox=box('#C62828'))
-    a2.set_ylim(0, 2.0)
-    fig.suptitle('圖 3　自動循環的一致性與內部結構（對應表 A、C）',
-                 fontsize=12, y=1.00)
+
+# ── 圖 1　放著不動，幾小時會掉多少、換算成多少氣體 ────────────────
+def fig_howmuch():
+    G, mu, se, reg, h2, p2 = stacked_profile()
+    P0 = 1.17
+    fig, (a1, a2) = plt.subplots(1, 2, figsize=(9.6, 4.3))
+
+    a1.errorbar(G, P0 - mu, yerr=se, fmt='o-', color='#1565C0', lw=2.2, ms=5,
+                capsize=3)
+    a1.axhline(1.10, color='#C62828', ls='--', lw=1.5)
+    t10 = float(np.interp(0.10, mu, G))
+    a1.plot([t10], [1.10], 'o', color='#C62828', ms=10, zorder=5)
+    a1.annotate('會議說的「掉到 1.1」\n實際約 %.1f 小時就到' % t10,
+                xy=(t10, 1.10), xytext=(2.5, 1.135), fontsize=9.5,
+                color='#C62828', fontweight='bold', bbox=box('#C62828'),
+                arrowprops=dict(arrowstyle='->', color='#C62828', lw=1.2))
+    a1.set_xlabel('放著不動，經過幾小時')
+    a1.set_ylabel('反應器壓力（kg/cm²）')
+    a1.set_title('（a）壓力掉到哪裡', fontsize=10.5)
+    a1.set_ylim(0.90, 1.20)
+
+    hrs = [1, 2, 3, 4, 5, 6]
+    used = [ml(mu[int(x / 0.5)]) for x in hrs]
+    co2u = [ml(mu[int(x / 0.5)] * 0.25) for x in hrs]
+    w = 0.38
+    xs = np.arange(len(hrs))
+    a2.bar(xs - w / 2, used, w, color='#546E7A', label='總共用掉的氣體')
+    a2.bar(xs + w / 2, co2u, w, color='#2E7D32', label='其中的 CO2（最多）')
+    for i, (u, c) in enumerate(zip(used, co2u)):
+        a2.text(i - w / 2, u + 4, '%.0f' % u, ha='center', fontsize=9)
+        a2.text(i + w / 2, c + 4, '%.0f' % c, ha='center', fontsize=9,
+                color='#2E7D32')
+    a2.set_xticks(xs)
+    a2.set_xticklabels(['%d hr' % x for x in hrs])
+    a2.set_xlabel('放著不動的時間')
+    a2.set_ylabel('用掉多少（mL）')          # 不可寫「氣體」，見檔頭 style() 上方的警語
+    a2.set_title('（b）這段時間用掉多少氣體', fontsize=10.5)
+    a2.legend(loc='upper left', framealpha=0.95)
+    a2.set_ylim(0, 268)
+    # ⚠ 說明框不可放右上——那裡是最高的兩根長條與它們的數字標籤（第一版
+    #   就壓住了「177」）。放左側，長條較矮的地方。
+    a2.text(-0.42, 148,
+            'CO2 + 4H2 → CH4：\n每 4 分氣體只換到 1 分甲烷，\n'
+            '所以 CO2 最多是總量的四分之一',
+            fontsize=9, color='#2E7D32', ha='left', bbox=box('#2E7D32'))
+    fig.suptitle('圖 1　反應器放著不動時，多久會用掉多少氣體'
+                 '（10 分鐘循環那一批，13 個循環的平均）', fontsize=12, y=1.00)
     fig.tight_layout()
-    return fig, 'fig3_循環一致性與內部剖面'
+    return fig, 'fig1_多久用掉多少氣體'
 
 
-# ── 圖 4（表 E）估計量比較 ────────────────────────────────────
+# ── 圖 2　壓力不是平均往下掉，是泵一開才掉 ───────────────────────
+def fig_when():
+    ts, h, p, co2, ch4 = DT.load(DT.TAU_DIR)
+    fig, axes = plt.subplots(3, 1, figsize=(9.2, 7.2), sharex=True)
+    for ax, (nm, tau, d0, d1) in zip(axes, DT.BATCHES):
+        t2, h2, p2, _, _ = DT.sub(ts, h, p, co2, ch4, d0, d1)
+        mu, se, n = DT.minute_profile(t2, h2, p2)
+        on, off, gap = DT.pump_window(mu)
+        ax.axvspan(on, off, color=COL[nm], alpha=0.14, zorder=0)
+        ax.errorbar(np.arange(60), mu, yerr=se, fmt='o-', color=COL[nm],
+                    lw=1.3, ms=3.2, capsize=2, elinewidth=0.8)
+        ax.axhline(0, color='#888', lw=0.8)
+        # ⚠ 這裡不要放三行的 y 軸標籤。旋轉 90° 後三行會互相壓在一起
+        #   （已踩過，「這一分鐘／掉了多少／(kg/cm²)」糊成一團）。
+        #   三個子圖的單位相同，改用整張圖共用的 supylabel，一行寫完。
+        ax.set_title('設定為每小時循環 %d 分鐘　→　資料上看到的就是 %d 分鐘'
+                     '（第 %d 分到第 %d 分）' % (tau, gap, on, off),
+                     loc='left', fontsize=10.5)
+        ax.annotate('循環泵開始跑', xy=(on, mu[on]),
+                    xytext=(on + 6, mu[on] * 0.9), fontsize=9,
+                    color=COL[nm], fontweight='bold', bbox=box(COL[nm]),
+                    arrowprops=dict(arrowstyle='->', color=COL[nm], lw=1.1))
+        ax.annotate('泵停了，壓力回彈', xy=(off, mu[off]),
+                    xytext=(off + 6, mu[off] * 1.7), fontsize=9,
+                    color='#C62828', fontweight='bold', bbox=box('#C62828'),
+                    arrowprops=dict(arrowstyle='->', color='#C62828', lw=1.1))
+    axes[0].text(30, axes[0].get_ylim()[1] * 0.55,
+                 '陰影以外的時間，壓力幾乎不動',
+                 fontsize=9.5, color='#555', bbox=box('#999'))
+    axes[-1].set_xlabel('一個小時裡的第幾分鐘')
+    axes[-1].set_xlim(-1, 60)
+    fig.supylabel('這一分鐘壓力掉了多少（kg/cm²）', fontsize=10.5)
+    fig.suptitle('圖 2　壓力不是慢慢平均往下掉——是循環泵一開才掉',
+                 fontsize=12, y=0.995)
+    fig.tight_layout()
+    return fig, 'fig2_壓力什麼時候掉'
+
+
+# ── 圖 3　循環開得越久，氣體用得越快 ─────────────────────────────
+def fig_tau():
+    ts, h, p, co2, ch4 = DT.load(DT.TAU_DIR)
+    taus, rates, names = [], [], []
+    for nm, tau, d0, d1 in DT.BATCHES:
+        t2, h2, p2, _, _ = DT.sub(ts, h, p, co2, ch4, d0, d1)
+        segs = DT.descents(h2, p2)
+        amp = np.array([p2[s] - p2[e] for s, e in segs])
+        dur = np.array([h2[e] - h2[s] for s, e in segs])
+        taus.append(tau)
+        rates.append(float(np.median(amp / dur)))
+        names.append(nm)
+    fig, ax = plt.subplots(figsize=(8.2, 4.2))
+    perday = [ml(r) * 24 for r in rates]
+    bars = ax.bar([str(t) for t in taus], perday,
+                  color=[COL[n] for n in names], width=0.5)
+    for b, v, r in zip(bars, perday, rates):
+        ax.text(b.get_x() + b.get_width() / 2, v + 8,
+                '%.0f mL/天\n(%.4f kg/cm²/hr)' % (v, r),
+                ha='center', fontsize=9.5, fontweight='bold')
+    ax.set_xlabel('設定：每小時循環幾分鐘')
+    ax.set_ylabel('一天用掉多少（mL）')
+    ax.set_ylim(0, max(perday) * 1.38)
+    ax.set_title('圖 3　循環泵開得越久，氣體用得越快')
+    ax.text(0.06, max(perday) * 1.13,
+            '循環 10 分鐘比循環 1 分鐘多用掉一倍以上的氣體。\n'
+            '泵在跑的時候氣體才會進到水裡，所以泵開多久直接決定用掉多少。',
+            fontsize=9.5, color='#333', bbox=box('#999'))
+    fig.tight_layout()
+    return fig, 'fig3_循環時間與用氣量'
+
+
+# ── 圖 4　用掉多少 CO2：四種算法的差別 ───────────────────────────
 def fig_est():
     d = DT.data_E()
-    ph = {}
-    cur = None
+    ph, cur = {}, None
     for r in d['rows']:
         if r[0]:
             cur = r[0]
             ph[cur] = []
         v = r[6].split('±')
-        val = float(v[0].strip().rstrip('%'))
-        err = float(v[1].strip().rstrip('%')) if len(v) > 1 else 0.0
-        ph[cur].append((r[4], val, err))
-    fig, ax = plt.subplots(figsize=(9.0, 4.2))
+        ph[cur].append((r[4], float(v[0].strip().rstrip('%')),
+                        float(v[1].strip().rstrip('%')) if len(v) > 1 else 0.0))
+    fig, ax = plt.subplots(figsize=(9.2, 4.3))
     labels = ['單筆端點', '兩端各 6 hr', '兩端各 12 hr', '兩端各 24 hr']
+    show = ['只取頭尾各一筆', '頭尾各平均 6 小時', '頭尾各平均 12 小時',
+            '頭尾各平均 24 小時']
     cols = ['#90A4AE', '#2E7D32', '#EF6C00', '#C62828']
     xs = np.arange(len(ph))
     w = 0.2
-    for j, lab in enumerate(labels):
+    for j, (lab, sh) in enumerate(zip(labels, show)):
         vals, errs = [], []
         for k in ph:
             m = [x for x in ph[k] if x[0] == lab]
             vals.append(m[0][1] if m else np.nan)
             errs.append(m[0][2] if m else 0.0)
         ax.bar(xs + (j - 1.5) * w, vals, w, yerr=errs, capsize=3,
-               color=cols[j], alpha=0.88, label=lab)
+               color=cols[j], alpha=0.88, label=sh)
     ax.axhline(0, color='#333', lw=1.0)
     ax.axhline(100, color='#1565C0', ls='--', lw=1.4)
-    ax.text(2.45, 104, '化學計量上限 100%', fontsize=9, color='#1565C0',
+    ax.text(2.45, 104, '理論上最多就是 100%', fontsize=9, color='#1565C0',
             ha='right', bbox=box('#1565C0'))
     ax.set_xticks(xs)
-    ax.set_xticklabels(list(ph))
-    ax.set_ylabel('生物份額（%）')
-    # ⚠ 圖例不可放 lower left——那裡正好是負值長條下方，會與紅色標註疊在
-    #   一起（第一版就是這樣，兩段字互相蓋掉）。改放左上的空白區。
+    ax.set_xticklabels(['菌長起來\n8/11–8/23', '氫氣用完\n8/24–8/25',
+                        '沒有 CO2 可用\n8/26–8/30'])
+    ax.set_ylabel('壓力下降裡有多少是菌吃掉的（%）')
     ax.legend(ncol=2, loc='upper left', fontsize=8.8, framealpha=0.95)
     ax.set_ylim(-64, 128)
-    ax.annotate('負值＝該期間沒有甲烷在產生，\n現有的正被補進來的氣體稀釋',
-                xy=(2.16, -30), xytext=(1.30, -56), fontsize=9,
+    ax.annotate('算出負的＝這段時間根本沒有在產甲烷，\n'
+                '現有的甲烷正被補進來的新氣體稀釋',
+                xy=(2.16, -30), xytext=(1.26, -57), fontsize=9,
                 color='#C62828', fontweight='bold', bbox=box('#C62828'),
                 arrowprops=dict(arrowstyle='->', color='#C62828', lw=1.2))
-    ax.annotate('只有 2 天，估計量之間差異極大\n不應引用',
-                xy=(1.19, 70), xytext=(1.30, 104), fontsize=9,
+    ax.annotate('這段只有 2 天，四種算法差很多，\n不能當數字用',
+                xy=(1.19, 70), xytext=(1.28, 103), fontsize=9,
                 color='#EF6C00', fontweight='bold', bbox=box('#EF6C00'),
                 arrowprops=dict(arrowstyle='->', color='#EF6C00', lw=1.2))
-    ax.set_title('圖 4　同一段資料、四種估計量的差異（對應表 E）')
+    ax.set_title('圖 4　壓力掉下來的部分，有多少是菌吃掉的')
     fig.tight_layout()
-    return fig, 'fig4_估計量比較'
+    return fig, 'fig4_多少是菌吃掉的'
 
 
 def main():
     style()
     os.makedirs(OUT, exist_ok=True)
-    for fn in (fig_pump, fig_tau, fig_cycles, fig_est):
+    for old in os.listdir(OUT):
+        if old.endswith('.png'):
+            os.remove(os.path.join(OUT, old))
+    for fn in (fig_howmuch, fig_when, fig_tau, fig_est):
         fig, name = fn()
-        path = os.path.join(OUT, name + '.png')
-        fig.savefig(path, dpi=200, bbox_inches='tight')
+        fig.savefig(os.path.join(OUT, name + '.png'), dpi=200,
+                    bbox_inches='tight')
         plt.close(fig)
         print('   ✓', name)
     print('輸出 →', OUT)
