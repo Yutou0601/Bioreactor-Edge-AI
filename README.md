@@ -19,6 +19,7 @@
 ## 📋 目錄
 
 - [專案簡介](#-專案簡介)
+- [研究進展與已修正的認知](#-研究進展與已修正的認知2026-09)
 - [計畫背景](#-計畫背景)
 - [系統架構](#-系統架構)
 - [核心演算法](#-核心演算法)
@@ -42,7 +43,8 @@
 **即時監控與預測（前端呈現）**
 
 1. **即時 ORP 訊號去雜訊**：在 Jetson 邊緣裝置上每分鐘完成突波排除與雙軌濾波
-2. **自適應生物三相位偵測**：自動識別底物利用期（Phase 1）、活躍產甲烷期（Phase 2）、底物耗盡期（Phase 3）
+2. **ORP 相位標籤**：以 ORP 斜率的 60 分鐘滾動平均切三段並加上標籤。
+   ⚠ **2026-09 查核後已降級為「操作狀態標籤」，不可讀作生物相位**，理由見下節
 3. **LSTM 即時監控**：以過去 30 分鐘訊號預測未來壓力走勢
 4. **CH₄ 峰值預測與特徵歸因**：per-cycle 峰值預測（Ridge + 外插防護），特徵歸因採
    **XGBoost + TreeSHAP**（未安裝時自動退回 GA + Ridge）
@@ -65,8 +67,69 @@ CO₂ + 4H₂ → CH₄ + 2H₂O
 ```
 
 > **誠實聲明**：本平台對「不可信訊號」與「小樣本」不做美化。CH₄／CO₂ 感測器僅在排氣瞬間短暫
-> 有效（其餘為取樣管路拖尾），系統一律標為參考級；分離研究則以機理模型釐清「在穩態下結構性
-> 不可分離」，並提供對應的實驗設計補救。詳見各章的限制說明。
+> 有效（其餘為取樣管路拖尾），系統一律標為參考級。
+> **2026-09 的全資料庫分析推翻了本專案先前的兩項核心認知**（ORP 的意義、壓降的歸因），
+> 已於下節據實記錄，未加掩飾亦未刪除原始結論。
+
+---
+
+## 🔄 研究進展與已修正的認知（2026-09）
+
+2026-09 將全資料庫（2025-08 ~ 2026-08，去重後 341,013 筆）重跑一遍，**推翻了本專案先前的兩項核心認知**。
+原始結論保留在下方各章節未刪除，但引用時請以本節為準。
+
+完整報告：[`docs/reports/分析報告_2026-09-21_氫氣流失與壓降歸因.md`](docs/reports/分析報告_2026-09-21_氫氣流失與壓降歸因.md)
+（含 7 張圖、9 支可重跑程式；另有 Word 版與 14 頁簡報，見 `docs/build/build_report_0921_docx.py`、`docs/build/build_deck_0921.py`）
+
+### 修正一：壓力下降的主因是氫氣流失，不是溶解也不是產甲烷
+
+進料為 CO₂:H₂ = 1:4，**與產甲烷反應的化學計量完全相同**（CO₂ + 4H₂）。
+因此若系統內只有產甲烷反應，殘餘氣體的 CO₂:H₂ 必然永遠是 0.25，與轉換率無關。
+這個檢定不需要任何校準常數，也不依賴壓力模型。
+
+| 項目 | 數值 |
+|---|---:|
+| 排氣當下量到的 CO₂ ÷ H₂（中位） | **0.699** |
+| 相對進料比 | **2.79 倍** |
+| 高於進料比的次數 | **34 / 35** |
+| 置換檢定 | **p < 0.0001** |
+
+此發現一次解釋了先前三項互相矛盾的觀察：切斷碳源後壓降速率不變（p = 0.21，而在 0.0125 下檢定力 100%）、
+氣體收支長期對不起來、以及 91% 的壓降曲線接近直線（定速移除才是直線，而洩漏正是定速）。
+
+> ⚠ 本分析只能推斷「氫氣被額外移除」，**無法區分洩漏、穿透、或其他耗氫生化反應**。
+> 最優先的處置是**無菌條件下以氮氣與氫氣分別靜態保壓 24 小時比較衰減**；此項完成前，其餘分析方向都無法定案。
+
+### 修正二：ORP 在循環尺度上是操作訊號，不是活性計
+
+| 檢定 | 結果 |
+|---|---|
+| ORP 絕對水準 | −357 mV vs 標準氫電極，**落在文獻所報產甲烷最適區間內**（−335.6 ± 29.0 mV） |
+| 補氣當下（814 次疊加） | 10 分鐘內上升 **+37 mV**，60 分鐘回落 |
+| 氣泵運轉 vs 停止 | 運轉 **+3.5 ~ +10.8 mV/分**；停止 −0.25 ~ −0.94 mV/分 |
+| **碳源中斷後** | 每循環位移由 −125.5 變為 **−158.8 mV（走更多）**，p = 0.089 |
+
+產甲烷必須停止的時段，ORP 照常變化甚至幅度更大。**水準健康與變化有意義是兩回事**：
+文獻把 ORP 當活性指標，其對象是未外加氫氣的消化系統；本反應器的氫氣為外部輸入，會直接鉗制電位。
+
+**連帶影響 `/phase` 端點的三相位標籤。** 實測（自動化批 20 天）：
+
+- 「底物耗盡期」在補氣後 ±30 分鐘內佔 **39%**，其他時段只佔 **6%** —— 剛補完料卻標成耗盡
+- 20 天內相位轉換 **1,625 次**，平均每 **18 分鐘**翻一次，這不可能是生物相位
+
+該端點與前端面板予以保留（對泵與補氣極為靈敏，作為**操作異常監測**仍有價值），
+但標籤語意已改註為操作狀態，不可讀作菌群狀態。
+
+### 同時查核的其他方法（結論：不採用）
+
+| 方法 | 結果 |
+|---|---|
+| 以「曲率」分離生物與物理 | **作廢**。前提是生物速率為定值；合成資料驗證顯示真實物理份額 0% 時會報出 **101%** |
+| PINN 反推時變生物速率 | **不可辨識**。交叉驗證會系統性選到誤差 87% 的設定（真正最佳者誤差 36%）；唯一穩定的輸出是 kLa ≈ 0.13 /hr |
+| 以 ORP 校準為連續轉換指標 | **未通過**。留一交叉驗證 R² 0.110，低於「直接用壓力」的 0.151；且 ORP 通量與補氣頻率共線 −0.88，偏相關僅 −0.10 |
+| 以 pH 符號判別 | 方向性證據。pH 於循環內淨升 +0.0014（p = 0.037），排除「CO₂ 溶解主導」，但**無法區分生物與洩漏** |
+
+> 這些是**負面結果**，列出的目的是避免後續重複投入。方法失敗的原因一律是資訊不足，不是演算法不夠好。
 
 ---
 
@@ -115,7 +178,7 @@ CO₂ + 4H₂ → CH₄ + 2H₂O
 │   ├ ReportView     歷史分析（訊號 / 統計）                     │
 │   ├ ExperimentView 實驗批次 + 即時面板 + CH₄ 預測             │
 │   │                 + 特徵歸因 + 共變數關聯 + 灰箱機理分析     │
-│   └ control_panel.pyw  啟動 / 更新 / 健康度監看（不依賴後端） │
+│   └ launcher.pyw       啟動 / 更新 / 健康度監看（不依賴後端） │
 └──────────────────────────────────────────────────────────────┘
 ```
 
@@ -138,7 +201,7 @@ ema[t] = α · x[t] + (1 - α) · ema[t-1],   α = 2 / (N + 1),  N = 10
 
 **Savitzky-Golay（W=11, d=2）— 歷史報表**：視窗內二次多項式最小平方擬合，中心點無相位滯後、保留峰形。
 
-### 2. 狀態層：自適應生物三相位偵測
+### 2. 狀態層：ORP 相位標籤（⚠ 已降級，見「研究進展」一節）
 
 以「當前區段斜率的統計量 μ、σ」作動態閾值（非固定常數），適應不同批次條件。
 
@@ -192,10 +255,15 @@ Jetson（ARM／資源受限），不強制安裝 xgboost——**裝了就用、�
 歷史資料上 12 種分離方法均未通過決定性檢定。本專案不迴避這個結果，而是用機理模型
 **釐清「為什麼難」**，並提供可執行的分析與實驗補救。
 
+> ⚠ **2026-09 更新：這個二分法本身不完整。** 全資料庫的氣體組成分析顯示，壓降的主成分
+> 是**第三條途徑——氫氣的超量流失**，既不是溶解也不是產甲烷（見
+> [研究進展](#-研究進展與已修正的認知2026-09)）。本節以下的分析與結論在其各自的前提下
+> 仍然成立，但「壓降 = 溶解 + 生物」這個總前提已不足以描述本系統。
+
 ### 關鍵結論：分離的困難是「結構性」的，與演算法無關
 
 以兩狀態機理模型（物理項 kLa·驅動力 + 生物項 Monod）＋合成資料＋profile likelihood
-做可辨識性測試（`co2_greybox_identifiability.py`）：
+做可辨識性測試（`edge_backend/modules/greybox/`）：
 
 - **穩態下兩通量相等**（溶解通量 ≡ 生物消耗通量，是同一個數），從壓力下降無從分辨。
   物理速率 kLa 在穩態資料下信賴區間 **±160%**，含**暫態**的資料下收斂到 **±0%**。
@@ -207,7 +275,7 @@ Jetson（ARM／資源受限），不強制安裝 xgboost——**裝了就用、�
 | | 關聯分析 | 灰箱機理分析 |
 |---|---|---|
 | 回答 | 平緩化**是不是**生物造成 | 溶解 vs 消耗可分離了嗎、各多少 |
-| 程式 | `co2_covariate_association.py` | `co2_greybox_identifiability.py` |
+| 程式 | `edge_backend/modules/covariate/` | `edge_backend/modules/greybox/` |
 | 端點 | `/covariate_analysis` | `/greybox_analysis` |
 | 統計 | 批次分群叢集穩健標準誤（處理偽重複） | 暫態偵測 + 殘差法 |
 | 現況 | 合成資料雙向驗證（生物/物理各判對） | 穩態→尚不可分離；暫態→給分離比例 |
@@ -234,7 +302,7 @@ Jetson（ARM／資源受限），不強制安裝 xgboost——**裝了就用、�
 - **兩層報表匯出**：批次彙整（含離散度 IQR）與每循環特徵（餵模型用）。
 - **共變數關聯 / 灰箱機理分析**：點按鈕即對當前資料分析（見上一章）。
 
-### 桌面控制台（`control_panel.pyw`）
+### 桌面控制台（`launcher.pyw` / `控制台.bat`）
 
 純 Python 標準函式庫（tkinter），雙擊即開，現場不需開終端機：啟動／停止／重啟後端
 （本機或遠端 Jetson via SSH 金鑰）、檢查更新、資料新鮮度監看、開機自動啟動。
@@ -311,7 +379,7 @@ npm run build && npm run preview   # 正式建置 :4173（API 打 Jetson）
 
 ### 建議：用桌面控制台（免記指令）
 
-雙擊 `控制台.bat`（或 `control_panel.pyw`）：一鍵啟動後端／CSV 監看／前端、檢查更新、
+雙擊 `控制台.bat`（或 `launcher.pyw`）：一鍵啟動後端／CSV 監看／前端、檢查更新、
 監看資料新鮮度、設定 Jetson 免密碼登入（SSH 金鑰）與開機自動啟動。詳見 `docs/system/控制台使用說明.md`。
 
 ### 開發者：單機測試
@@ -320,8 +388,8 @@ npm run build && npm run preview   # 正式建置 :4173（API 打 Jetson）
 python dev_test_server.py --flattening --vent-every 1440    # 真後端 + 合成資料
 ```
 
-> 舊版 `start_all.bat` / `sync_jetson.bat` 保留為後備。系統以 `.env` 與命令列參數設定，
-> 無需 `config.yaml`。
+> 一鍵啟動用 `START.bat`、更新用 `update.bat`、打包發版用 `pack.bat` / `release.bat`。
+> 系統以 `.env` 與命令列參數設定，無需 `config.yaml`。
 
 ---
 
@@ -340,11 +408,22 @@ LSTM 壓力預測、反應狀態摘要與基準漂移率。
 - **灰箱機理分析**（點按鈕）：可分離度就緒指標 + 分離比例
 - 兩層報表匯出
 
-**離線分析**（研究用，吃匯出的每循環 CSV 或跑決定性測試）：
+**分析模組**（由核心以獨立短命行程排程執行，重相依不進常駐核心）：
+
 ```bash
-python co2_covariate_association.py --demo bio      # 關聯分析（合成驗證）
-python co2_greybox_identifiability.py               # 可辨識性決定性測試
-python ch4_peak_analysis.py --granularity both      # CH₄ cycle/minute-level 分析
+# 手動跑單一模組：python run.py <db_path> <input.json>
+cd edge_backend/modules/greybox   && python run.py ../../data/app.db _input.json
+cd edge_backend/modules/covariate && python run.py ../../data/app.db _input.json
+```
+
+**離線研究腳本**（`research/`，不進部署；需 `edge_backend/venv`）：
+
+```bash
+python research/cycles/feed_ratio_drift.py        # 氫氣流失檢定（2026-09 核心發現）
+python research/cycles/co2_exhaustion_test.py     # 碳源中斷天然實驗 + 檢定力
+python research/cycles/shape_clustering.py        # 壓降曲線形狀分群
+python research/cycles/orp_substrate_vs_activity.py   # ORP 是操作訊號還是活性計
+python research/cycles/pinn_rb_recovery.py        # PINN 可行性判定（回收檢定）
 ```
 
 ---
@@ -372,7 +451,21 @@ python ch4_peak_analysis.py --granularity both      # CH₄ cycle/minute-level �
 - **共變數關聯**：同批次循環為偽重複，已用批次分群叢集穩健標準誤折算檢定力；批次少時
   「無顯著」讀為「證據不足」而非「無關」。**找到關聯 ≠ 分離了機制**。
 
+### 2026-09 新增的限制
+
+- **壓降不可當產甲烷速率的代理量**。壓降的主成分是氫氣流失（見
+  [研究進展](#-研究進展與已修正的認知2026-09)）。甲烷確實在累積、ORP 水準也落在文獻最適區間，
+  但以壓降推算的轉換效率會嚴重高估。
+- **`/phase` 的相位標籤不可讀作菌群狀態**。實測「底物耗盡期」在補氣後 ±30 分鐘內佔 39%、
+  其他時段僅 6%；20 天內轉換 1,625 次（平均每 18 分鐘一次）。保留為操作異常監測。
+- **氣體濃度只有排氣當下可用**。補氣稀釋檢定實測斜率 +0.008 ± 0.225，距「真頂空」應有的
+  −1 有 4.5 個標準差；分析儀以數十分鐘的時間常數滯後追蹤。全資料庫可用者僅 35 筆。
+- **後續分析被氣密性擋住**。在無菌條件下的氮氣／氫氣保壓對照完成前，
+  轉換效率與菌群活性的定量都無法定案。
+
 > 上述限制均反映在前端面板與程式輸出中，非事後補述。相關方法學與實驗設計文件見 `docs/`。
+> 2026-09 的完整查核（含負面結果與已修正的計算錯誤）見
+> [`docs/reports/分析報告_2026-09-21_氫氣流失與壓降歸因.md`](docs/reports/分析報告_2026-09-21_氫氣流失與壓降歸因.md)。
 
 ---
 
@@ -381,50 +474,64 @@ python ch4_peak_analysis.py --granularity both      # CH₄ cycle/minute-level �
 ```
 Bioreactor-Edge-AI/
 │
-├── control_panel.pyw                # 桌面控制台（啟動/更新/健康度監看，tkinter）
-├── 控制台.bat                        # 控制台啟動器（避開 .pyw 關聯失效）
+├── launcher.pyw / 控制台.bat        # 桌面控制台（啟動/更新/健康度監看，tkinter）
+├── START.bat / update.bat           # 一鍵啟動 / 更新
+├── pack.bat / release.bat           # 打包與發版
 ├── dev_test_server.py               # 開發測試伺服器（真實後端+合成資料，不需 Jetson）
-├── start_all.bat / sync_jetson.bat  # 舊版一鍵啟動/同步（保留為後備）
 │
-├── edge_backend/
+├── edge_backend/                    # 常駐核心（部署到監控電腦／Jetson）
 │   ├── main.py                      # FastAPI 入口（:8000）
-│   ├── requirements.txt
+│   ├── requirements.txt             # 常駐核心相依（刻意維持精簡，見下）
+│   ├── requirements-compute.txt     # 運算節點相依（scipy 等重相依只在這裡）
+│   ├── selfcheck.py / system_test.py
 │   │
-│   ├── api/
-│   │   ├── routes.py                # 所有 API 端點（/ch4_prediction /phase /health
-│   │   │                            #   /covariate_analysis /greybox_analysis /experiment/*）
-│   │   └── schemas.py
-│   │
-│   ├── core/                        # 即時後端核心（部署到 Jetson）
+│   ├── api/routes.py                # 所有 API 端點（/ch4_prediction /phase /health
+│   │                                #   /experiment/* /import_csv /module/*）
+│   ├── core/
 │   │   ├── data_store.py            # 共用記憶體感測資料倉儲
 │   │   ├── signal_processor.py      # 突波排除 + EMA/SG 濾波
 │   │   ├── feature_extractor.py     # 穩態/相位特徵萃取
 │   │   ├── inference.py / model.py  # LSTM 壓力預測
-│   │   ├── ch4_realtime.py          # CH4 峰值預測 + XGBoost/SHAP 歸因（退回 GA+Ridge）
+│   │   ├── ch4_realtime.py          # CH₄ 峰值預測 + 特徵歸因
+│   │   ├── cycle_store.py           # CSV 讀取與**時間戳去重**（資料夾會重疊，必須去重）
+│   │   ├── descent_report.py        # 丟 CSV → 切段 → 總下降/平均速率/斜率 + 化學計量
 │   │   ├── experiment_store.py      # 實驗批次資料模型（循環偵測/斷點/共變數/軌跡）
 │   │   ├── experiment_report.py     # 兩層報表匯出（批次彙整/每循環）
-│   │   └── mqtt_client.py
+│   │   └── module_runner.py         # 以獨立短命行程跑分析模組（支援遠端運算節點）
 │   │
-│   ├── co2_greybox_identifiability.py  # 機理分離：決定性測試(離線) + 前端可分離度指標
-│   ├── co2_covariate_association.py    # 共變數關聯分析（平緩化成因；離線+API）
-│   ├── co2_separation_analysis.py      # 分離分析工具集（離線）
-│   ├── co2_relaxation_analysis.py      # 弛豫振盪器分析（含證偽死路；離線）
-│   ├── ch4_peak_analysis.py            # CH4 峰值 cycle/minute-level 分析（離線）
-│   ├── batch_import_csv.py / csv_watcher.py / usb_receiver.py  # 資料匯入/監看/接收
-│   └── sensor_simulator.py / train.py / export_onnx.py
+│   ├── modules/                     # 分析模組（重相依隔離在此，不污染常駐核心）
+│   │   ├── greybox/                 # 灰箱機理分析（scipy；profile likelihood）
+│   │   ├── covariate/               # 共變數關聯分析
+│   │   └── ch4_attribution/         # CH₄ 特徵歸因
+│   │
+│   ├── compute_node/server.py       # 遠端運算節點（Orin NX；與本機模式結果逐位元相同）
+│   └── batch_import_csv.py / csv_watcher.py / sensor_simulator.py
 │
 ├── web_frontend/                    # Vue3 + Vite（部署到監控電腦）
 │   └── src/views/
-│       ├── MonitorView.vue          # 即時監控（ORP/相位/LSTM）
+│       ├── MonitorView.vue          # 即時監控（ORP／相位標籤／LSTM）
 │       ├── ReportView.vue           # 歷史分析
-│       └── ExperimentView.vue       # 實驗批次 + 即時面板 + CH4 預測 + 特徵歸因
-│                                    #   + 共變數關聯 + 灰箱機理分析（點按鈕即分析）
+│       └── ExperimentView.vue       # 實驗批次 + 即時面板 + CH₄ 預測 + 分析模組
 │
-├── docs/                            # 日報、實驗設計、技術備忘、證據鏈、簡報
+├── research/                        # 離線研究腳本（不進部署）
+│   ├── cycles/                      # 循環層級分析（36 支；2026-09 的發現都在這裡）
+│   ├── co2/ orp_ch4/ rb_estimation/ ml/ figures/
+│   ├── dead_ends/                   # 已證偽的路線，保留以免重複投入
+│   └── Testing_data/                # ⚠ 洪博的實驗資料，已 gitignore，不上傳
 │
-├── docs/system/控制台使用說明.md
+├── docs/
+│   ├── reports/                     # 日報、週報、分析報告（含 2026-09-21 定版報告）
+│   ├── analysis_charts_3batch/      # 分析圖與逐項明細 CSV
+│   ├── build/                       # 報告與簡報的產生程式（Word / PowerPoint）
+│   ├── decks/ paper/ experiments/ system/ analysis/
+│   └── system/控制台使用說明.md
+│
 └── README.md
 ```
+
+> **為什麼要把模組隔離**：監控電腦只有 4 GB 記憶體，常駐核心的預算是 60 MB。
+> scipy（磁碟 109 MB）等重相依一律放在 `modules/`，由 `module_runner` 起獨立短命行程執行，
+> 跑完隨行程消失。2026-09 起另有 Orin NX 16 GB 作為遠端運算節點，兩種模式結果逐位元相同。
 
 ---
 
