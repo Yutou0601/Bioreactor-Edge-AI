@@ -43,6 +43,10 @@ import os
 import sys
 
 import numpy as np
+import matplotlib
+matplotlib.use('Agg')
+import matplotlib.pyplot as plt                        # noqa: E402
+from matplotlib import rcParams                        # noqa: E402
 
 HERE = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 REPO = os.path.dirname(HERE)
@@ -53,6 +57,13 @@ if sys.platform == 'win32':
     sys.stdout.reconfigure(encoding='utf-8', errors='replace')
 
 from pinn_rb_recovery import QUANT, NOISE              # noqa: E402
+from analyze_three_batches import (                    # noqa: E402
+    BLUE, RED, AQUA, INK, INK2, MUTED, BASELINE, OUT)
+
+rcParams.update({
+    'font.size': 13, 'axes.titlesize': 16, 'axes.labelsize': 14,
+    'xtick.labelsize': 12, 'ytick.labelsize': 12, 'legend.fontsize': 12,
+})
 
 PEQ_TRUE = 0.75
 RB_TRUE = 0.0125            # 論文定版
@@ -71,19 +82,30 @@ def simulate(k, peq, rb, p0=P0, T=T_CYC, n=NPTS, rng=None):
     return t, P
 
 
-def fit_kA(t, P):
+def fit_kA(t, P, rounds=4, npts=160):
     """由單一循環估 (k, A)。三參數指數擬合：P = A + (P0−A)e^(−kt)。
 
-    用網格搜 k、對每個 k 以線性最小平方解 A 與振幅 —— 比直接非線性
-    最佳化穩健，且不需要初始猜值。
+    對每個候選 k 以線性最小平方解 A 與振幅 —— 比直接非線性最佳化穩健，
+    且不需要初始猜值。
+
+    ⚠ 2026-09-23 修正：原本只掃一層 600 點的固定網格（步長 0.005），
+      k 被**量化到網格點上**，A 與 r_b 的估計跟著離散化，
+      重抽分布會出現假的梳狀多峰，精度也因而失真。
+      改為逐層細化：每一輪把搜尋範圍縮到上一輪最佳點附近，
+      四輪後解析度約 10⁻⁶，遠細於雜訊所能決定的程度。
     """
+    lo, hi = 0.02, 3.0
     best = None
-    for k in np.linspace(0.02, 3.0, 600):
-        X = np.column_stack([np.ones_like(t), np.exp(-k * t)])
-        coef, *_ = np.linalg.lstsq(X, P, rcond=None)
-        resid = float(((X @ coef - P) ** 2).sum())
-        if best is None or resid < best[0]:
-            best = (resid, k, float(coef[0]))
+    for _ in range(rounds):
+        ks = np.linspace(lo, hi, npts)
+        for k in ks:
+            X = np.column_stack([np.ones_like(t), np.exp(-k * t)])
+            coef, *_ = np.linalg.lstsq(X, P, rcond=None)
+            resid = float(((X @ coef - P) ** 2).sum())
+            if best is None or resid < best[0]:
+                best = (resid, k, float(coef[0]))
+        step = ks[1] - ks[0]
+        lo, hi = max(1e-4, best[1] - step), best[1] + step
     return best[1], best[2]          # k, A
 
 
@@ -218,5 +240,129 @@ def main():
     print('    ⟹ 仍須先做無菌對照定出洩漏項，(★) 才能解讀為生物速率。')
 
 
+def style(ax, title=None, xlabel=None, ylabel=None):
+    if title:
+        ax.set_title(title, color=INK, fontweight='bold', loc='left', pad=10)
+    if xlabel:
+        ax.set_xlabel(xlabel)
+    if ylabel:
+        ax.set_ylabel(ylabel)
+    ax.grid(True, linewidth=0.8, alpha=0.9)
+    ax.set_axisbelow(True)
+    for s_ in ('top', 'right'):
+        ax.spines[s_].set_visible(False)
+    return ax
+
+
+def headroom(ax, top=0.0, bottom=0.0):
+    """★先留白再放字。"""
+    lo, hi = ax.get_ylim()
+    sp = hi - lo
+    ax.set_ylim(lo - sp * bottom, hi + sp * top)
+
+
+def make_figure(k1=0.15, k2=0.63, nrep=200):
+    """三張面板：為什麼可行 / 撈不撈得回來 / 要跑幾天。"""
+    rng = np.random.default_rng(1)
+    fig, (a1, a2, a3) = plt.subplots(1, 3, figsize=(15.0, 4.8),
+                                     gridspec_kw={'wspace': 0.30})
+
+    # ── a：兩種 τ 的曲線與各自的漸近線 ─────────────────
+    t = np.linspace(0, T_CYC, 400)
+    for k, col, lab in ((k1, BLUE, 'τ 小（氣泵少開）'),
+                        (k2, AQUA, 'τ 大（氣泵多開）')):
+        A = PEQ_TRUE - RB_TRUE / k
+        P = A + (P0 - A) * np.exp(-k * t)
+        a1.plot(t, P, color=col, lw=3.0, label=lab)
+        a1.axhline(A, color=col, lw=1.8, ls=':')
+    A1 = PEQ_TRUE - RB_TRUE / k1
+    A2 = PEQ_TRUE - RB_TRUE / k2
+    # 箭頭貼右緣，文字放其左側並留出間距，避免壓線
+    a1.annotate('', xy=(T_CYC * 0.985, A1), xytext=(T_CYC * 0.985, A2),
+                arrowprops=dict(arrowstyle='<->', color=RED, lw=2.4))
+    a1.text(T_CYC * 0.94, (A1 + A2) / 2, 'A₁−A₂',
+            color=RED, fontsize=14, fontweight='bold', ha='right', va='center')
+    a1.legend(loc='upper right', frameon=False)
+    headroom(a1, bottom=0.34)
+    a1.text(0.03, 0.03,
+            '兩條曲線停在不同高度。\n'
+            '這段高度差只由生物速率決定，\n'
+            '量它就等於量到答案。',
+            transform=a1.transAxes, fontsize=12, color=INK2,
+            ha='left', va='bottom')
+    style(a1, 'a　為什麼兩種 τ 就夠', '小時', '壓力 (kgf/cm²)')
+
+    # ── b：回收檢定的分布 ─────────────────────────────
+    est = []
+    tt = np.linspace(0, T_CYC, NPTS)
+    for _ in range(nrep):
+        _, Pa = simulate(k1, PEQ_TRUE, RB_TRUE, rng=rng)
+        _, Pb = simulate(k2, PEQ_TRUE, RB_TRUE, rng=rng)
+        ka, Aa = fit_kA(tt, Pa)
+        kb, Ab = fit_kA(tt, Pb)
+        est.append(estimate_rb(ka, Aa, kb, Ab))
+    est = np.array(est) * 1000
+    a2.hist(est, bins=26, color=BLUE, edgecolor='white')
+    a2.axvline(RB_TRUE * 1000, color=RED, lw=2.8, ls='--')
+    # ★先留白再放字；「真正的答案」擺在紅線正上方的空白區，不壓柱子
+    headroom(a2, top=0.62)
+    _, hi = a2.get_ylim()
+    a2.text(RB_TRUE * 1000, hi * 0.76, '真正的答案', color=RED, fontsize=13,
+            fontweight='bold', ha='center', va='bottom')
+    # 分兩行，免得單行太寬而被中央的紅虛線穿過
+    a2.text(0.02, 0.985,
+            '%d 次重抽\n偏誤 %+.1f%%' %
+            (nrep, (np.median(est) / (RB_TRUE * 1000) - 1) * 100),
+            transform=a2.transAxes, fontsize=12.5, color=INK,
+            fontweight='bold', ha='left', va='top')
+    style(a2, 'b　撈得回來嗎（已知答案的檢定）',
+          '推得的生物速率 (×10⁻³)', '次數')
+
+    # ── c：要跑幾天 ───────────────────────────────────
+    pairs = (1, 3, 10, 30)
+    prec = []
+    for npair in pairs:
+        meds = []
+        for _ in range(90):
+            vals = []
+            for _ in range(npair):
+                _, Pa = simulate(k1, PEQ_TRUE, RB_TRUE, rng=rng)
+                _, Pb = simulate(k2, PEQ_TRUE, RB_TRUE, rng=rng)
+                ka, Aa = fit_kA(tt, Pa)
+                kb, Ab = fit_kA(tt, Pb)
+                vals.append(estimate_rb(ka, Aa, kb, Ab))
+            meds.append(np.median(vals))
+        q = np.percentile(meds, [2.5, 97.5])
+        prec.append((q[1] - q[0]) / 2 / RB_TRUE * 100)
+    days = [n / 1.1 for n in pairs]
+    a3.plot(days, prec, marker='o', ms=12, lw=3.0, color=BLUE)
+    a3.axhline(11.0, color=RED, lw=2.4, ls='--')
+    a3.set_xscale('log')
+    a3.set_xticks(days)
+    a3.set_xticklabels(['%.0f' % d if d >= 1 else '%.1f' % d for d in days])
+    a3.minorticks_off()
+    headroom(a3, top=0.42)
+    a3.text(days[-1], 11.0, '現行方法 ±11% ', color=RED, fontsize=12.5,
+            ha='right', va='bottom')
+    for d, p_ in zip(days, prec):
+        a3.annotate('±%.0f%%' % p_, xy=(d, p_), xytext=(0, 11),
+                    textcoords='offset points', ha='center',
+                    fontsize=12, color=INK)
+    a3.text(0.03, 0.97,
+            '約 9 天就追平並超越現行方法，\n而且不依賴模擬器校準。',
+            transform=a3.transAxes, fontsize=12.5, color=INK2,
+            ha='left', va='top')
+    style(a3, 'c　要跑幾天', '實驗天數（每天約 1.1 對循環）', '相對精度 (±%)')
+
+    out = os.path.join(OUT, 'fig46_tau_crossover.png')
+    fig.savefig(out)
+    plt.close(fig)
+    print('\n圖 -> %s' % os.path.relpath(out, REPO))
+
+
 if __name__ == '__main__':
-    main()
+    if '--fig' in sys.argv:
+        make_figure()
+    else:
+        main()
+        make_figure()
