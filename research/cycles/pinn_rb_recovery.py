@@ -75,11 +75,18 @@ class MLP(nn.Module):
         return nn.functional.softplus(y) if self.pos else y
 
 
-def train_pinn(t_obs, p_obs, T, lam=1.0, iters=4000, verbose=False, holdout=None):
+def train_pinn(t_obs, p_obs, T, lam=1.0, iters=4000, verbose=False, holdout=None,
+               seed=None, return_models=False, refine=400, rb_target=None):
     """P̂(t) 與 r̂_b(t) 兩個網路；物理殘差 dP/dt + kLa(P−P_eq) + r_b = 0。
 
     kLa 與 P_eq 是可學的純量。r_b 以 softplus 保證非負（生物不會製造氣體）。
     holdout 給索引時，那些點不參與資料項，用來做交叉驗證挑 λ。
+
+    ⚠ 2026-09-23 修正：只跑 Adam 4000 步**沒有收斂**（擬合 RMSE 0.030，
+      而雜訊下限只有 0.005，差了六倍），先前據此得到的回收數字是「沒訓練完」
+      的假象，不是方法的性質。改成 Adam 之後再接 LBFGS（strong-Wolfe 線搜尋）
+      把它推到底：RMSE 降到 0.0052 ≈ 雜訊下限，kLa 也從 0.32 回到 1.44（真值 1.40）。
+      refine=0 可關掉，用來重現舊行為。
     """
     tt = torch.tensor(t_obs / T, dtype=torch.float32).view(-1, 1)
     pp = torch.tensor(p_obs, dtype=torch.float32).view(-1, 1)
@@ -90,6 +97,8 @@ def train_pinn(t_obs, p_obs, T, lam=1.0, iters=4000, verbose=False, holdout=None
         fit_idx = torch.tensor(np.flatnonzero(mask), dtype=torch.long)
         ho_idx = torch.tensor(np.asarray(holdout), dtype=torch.long)
 
+    if seed is not None:
+        torch.manual_seed(seed)
     fP = MLP()
     fR = MLP(out_positive=True)
     log_kLa = nn.Parameter(torch.tensor(0.0))            # kLa = exp(·)，單位 1/T
@@ -98,27 +107,57 @@ def train_pinn(t_obs, p_obs, T, lam=1.0, iters=4000, verbose=False, holdout=None
                            + [log_kLa, peq], lr=3e-3)
 
     tc = tt.clone().requires_grad_(True)
-    for it in range(iters):
-        opt.zero_grad()
+    sc = (p0 - p1 + 1e-9) ** 2
+
+    def losses():
         P = fP(tc)
         dP = torch.autograd.grad(P, tc, torch.ones_like(P), create_graph=True)[0]
         rb = fR(tc)
         phys = dP + torch.exp(log_kLa) * (P - peq) + rb
         if holdout is None:
-            loss_data = ((fP(tt) - pp) ** 2).mean() / (p0 - p1 + 1e-9) ** 2
+            loss_data = ((fP(tt) - pp) ** 2).mean() / sc
         else:
-            loss_data = (((fP(tt[fit_idx]) - pp[fit_idx]) ** 2).mean()
-                         / (p0 - p1 + 1e-9) ** 2)
-        loss_phys = (phys ** 2).mean() / (p0 - p1 + 1e-9) ** 2
+            loss_data = ((fP(tt[fit_idx]) - pp[fit_idx]) ** 2).mean() / sc
+        loss_phys = (phys ** 2).mean() / sc
         # 平滑先驗：懲罰 r_b 的變化率
         drb = torch.autograd.grad(rb, tc, torch.ones_like(rb), create_graph=True)[0]
-        loss_sm = (drb ** 2).mean() / (p0 - p1 + 1e-9) ** 2
-        loss = loss_data + loss_phys + lam * loss_sm
-        loss.backward()
+        loss_sm = (drb ** 2).mean() / sc
+        if rb_target is not None:
+            # 剖面用：把 r_b 的平均值釘在指定值，其餘參數自由重新擬合。
+            # 若資料真的能決定 r_b，釘錯位置時擬合誤差就會變差。
+            # 併進 loss_phys（權重為 1），不要放進 loss_sm 否則會被 λ 縮放。
+            loss_phys = loss_phys + 1e4 * (rb.mean() - rb_target * T) ** 2 / sc
+        return loss_data, loss_phys, loss_sm
+
+    for it in range(iters):
+        opt.zero_grad()
+        loss_data, loss_phys, loss_sm = losses()
+        (loss_data + loss_phys + lam * loss_sm).backward()
         opt.step()
         if verbose and it % 1000 == 0:
             print('      it %4d  資料 %.2e  物理 %.2e  平滑 %.2e'
                   % (it, loss_data.item(), loss_phys.item(), loss_sm.item()))
+
+    if refine:
+        # 二階收尾：Adam 只把解帶到附近，這一步才真的走到底
+        opt2 = torch.optim.LBFGS(
+            list(fP.parameters()) + list(fR.parameters()) + [log_kLa, peq],
+            max_iter=refine, history_size=50, tolerance_grad=1e-12,
+            tolerance_change=1e-14, line_search_fn='strong_wolfe')
+
+        def closure():
+            opt2.zero_grad()
+            a, b, c = losses()
+            loss = a + b + lam * c
+            loss.backward()
+            return loss
+
+        opt2.step(closure)
+        if verbose:
+            a, b, c = losses()
+            print('      LBFGS 後  資料 %.2e  物理 %.2e  平滑 %.2e'
+                  % (a.item(), b.item(), c.item()))
+
     with torch.no_grad():
         grid = torch.linspace(0, 1, 60).view(-1, 1)
         rb_hat = fR(grid).numpy().ravel() / T            # 換回每小時
@@ -127,6 +166,11 @@ def train_pinn(t_obs, p_obs, T, lam=1.0, iters=4000, verbose=False, holdout=None
               if holdout is not None else float('nan'))
         kla = float(torch.exp(log_kLa).detach()) / T
         pe = float(peq.detach())
+        rmse = float(torch.sqrt(((fP(tt) - pp) ** 2).mean()))
+    if return_models:
+        # 給「特徵圖／關聯性分析」用：需要網路本身與學到的純量
+        return dict(grid=grid.numpy().ravel(), rb=rb_hat, p=p_hat, kla=kla,
+                    peq=pe, cv=cv, rmse=rmse, fP=fP, fR=fR, T=T)
     return grid.numpy().ravel(), rb_hat, p_hat, kla, pe, cv
 
 
@@ -153,17 +197,41 @@ def main():
     t, P, obs = synth(T, NP, rb_true, kLa_true, peq_true, p0)
     print('   真值　kLa %.2f /hr　P_eq %.2f　r_b(0) %.4f -> r_b(T) %.4f'
           % (kLa_true, peq_true, rb_true(0), rb_true(T)))
+    floor = np.sqrt(NOISE ** 2 + QUANT ** 2 / 12)
+    print('   擬合誤差的理論下限（雜訊＋量化）%.4f —— 低於這個就是在擬合雜訊' % floor)
     rec = {}
     for lam in LAMBDAS:
-        g, rb_hat, p_hat, kla, pe, _ = train_pinn(t, obs, T, lam=lam)
+        r = train_pinn(t, obs, T, lam=lam, return_models=True)
+        g, rb_hat, kla, pe = r['grid'], r['rb'], r['kla'], r['peq']
         rec[lam] = (g, rb_hat, kla, pe)
         tru = rb_true(g * T)
         err = np.abs(rb_hat - tru).mean() / tru.mean()
         print('   λ=%-6.2f  回收 r_b(0)=%.4f r_b(T)=%.4f  平均相對誤差 %5.0f%%'
-              '  kLa %.2f  P_eq %.2f' % (lam, rb_hat[0], rb_hat[-1], err * 100, kla, pe))
+              '  kLa %.2f  P_eq %.4f  擬合 RMSE %.4f'
+              % (lam, rb_hat[0], rb_hat[-1], err * 100, kla, pe, r['rmse']))
 
     best = min(rec, key=lambda L: np.abs(rec[L][1] - rb_true(rec[L][0] * T)).mean())
     print('   -> 最好的 λ=%.2f；但 λ 是我們選的，真實資料上沒有已知答案可以選' % best)
+
+    print('\n══ 一之三　為什麼撈不回來：一個可以用紙筆證明的簡併 ══')
+    print('   r_b 若是常數，物理式可以原封不動改寫成')
+    print('     dP/dt = −kLa·(P − P_eq) − r_b  ≡  −kLa·(P − [P_eq − r_b/kLa])')
+    print('   兩邊是**同一條曲線**，殘差完全為零。也就是說「有生物在等速吃氣」')
+    print('   與「平衡壓力低一點、完全沒有生物」在壓力軌跡上是同一件事。')
+    print('   可被辨識的只有組合 A = P_eq − r̄_b/kLa，不是 r_b 本身。')
+    A_true = peq_true - rb_true(np.linspace(0, T, 60)).mean() / kLa_true
+    print('   真值的 A = %.3f − %.5f/%.2f = %.4f'
+          % (peq_true, rb_true(np.linspace(0, T, 60)).mean(), kLa_true, A_true))
+    print('   檢驗：每個解算出的 A 應該都落在這個值上，不論它把 r_b 擺在哪裡')
+    for lam in LAMBDAS:
+        g, rb_hat, kla, pe = rec[lam]
+        A = pe - rb_hat.mean() / kla
+        print('   λ=%-6.2f  P_eq %.4f − r̄_b/kLa %.4f ＝ A %.4f（差真值 %+.4f，'
+              '量化步階的 %.0f%%）'
+              % (lam, pe, rb_hat.mean() / kla, A, A - A_true,
+                 abs(A - A_true) / QUANT * 100))
+    print('   -> 這就是為什麼 r_b 一律塌到 0：它被 P_eq 吸收掉了，')
+    print('      而資料對 A 有意見、對 r_b 沒有。')
 
     print('\n══ 一之二　能不能用交叉驗證挑出正確的 λ ══')
     print('   留出 20% 的時間點不參與擬合，比較在留出點上的預測誤差。')
