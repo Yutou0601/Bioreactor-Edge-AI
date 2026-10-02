@@ -28,8 +28,8 @@ from pptx import Presentation
 from pptx.enum.text import PP_ALIGN
 from pptx.util import Cm, Pt
 
-from build_deck import (BLUE, GREY, H, INK, RED, W, bullets, caption, note,
-                        page, put, table, textbox)
+from build_deck import (BLUE, GREY, H, INK, PAGE_NO, RED, W, bullets, caption,
+                        note, page, put, table, textbox)
 
 REPO = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 FIGDIR = os.path.join(REPO, 'docs', 'analysis_charts_3batch')
@@ -64,6 +64,10 @@ def body(slide, x=Cm(1.6), y=None, w=None, h=Cm(13.5)):
 
 
 def build():
+    # ⚠ build_deck.PAGE_NO 的初值是 1，前提是「封面不走 page()」（8 月版如此）。
+    #   本檔的封面**是**用 page() 做的，照預設會吃掉 2 號、整份頁碼偏一
+    #   （封面印 2、第 4 節印 6）。故先歸零，讓封面拿到 1。
+    PAGE_NO[0] = 0
     prs = Presentation()
     prs.slide_width, prs.slide_height = W, H
 
@@ -142,7 +146,7 @@ def build():
               '（甲烷當零的最壞情況仍 1.33 倍）', 17, True, RED)],
         first=True, align=PP_ALIGN.CENTER)
     put(tf, [('⚠ 這整頁的前提是「補進去的真的是 1:4」。'
-              '10-02 查出只要補氣少 3.6% 的氫氣就能造出全部超量，見第 17 頁。',
+              '10-02 查出只要補氣少 3.6% 的氫氣就能造出全部超量，見第 18 頁。',
               15, False, GREY)], align=PP_ALIGN.CENTER)
 
     # ── 7 穩健性 ────────────────────────────────────────────
@@ -342,7 +346,7 @@ def build():
     s = page(prs, '十八、建議', '第一項完成前，其餘方向都無法定案')
     tf = body(s, y=Cm(3.6), h=Cm(4.0))
     put(tf, [('最優先：確認補氣用的氣體組成', 24, True, RED)], first=True, space_after=8)
-    put(tf, [('一份氣體分析報告或流量計讀數就能回答，卻直接決定第 4 頁的結論'
+    put(tf, [('一份氣體分析報告或流量計讀數就能回答，卻直接決定第 5 頁的結論'
               '能不能成立——誤差要確認到 1% 以內。'
               '第二順位才是氫氣氣密性檢查：於無菌條件下以氮氣與氫氣分別充壓至'
               '相同絕對壓力，記錄壓力變化；同時檢查橡膠墊片是否適用於氫氣。',
@@ -361,7 +365,7 @@ def build():
     tf = body(s, y=Cm(3.3), h=Cm(6.0))
     put(tf, [('最優先（10-02 改）：補氣用的氣體實際組成', 22, True, RED)],
         first=True, space_after=6)
-    put(tf, [('補氣比只要是 1 : 3.85 而非 1 : 4，第 4 頁的超量就全部被解釋掉。',
+    put(tf, [('補氣比只要是 1 : 3.85 而非 1 : 4，第 5 頁的超量就全部被解釋掉。',
               17, False, INK)], space_after=10)
     put(tf, [('第二順位：無菌（或不含活性菌）靜態保壓', 22, True, RED)],
         space_after=6)
