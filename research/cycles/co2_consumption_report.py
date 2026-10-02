@@ -87,6 +87,14 @@ def main():
     print('%-12s %-12s %7s %7s %9s %9s %11s'
           % ('起', '迄', '時數', 'CH4%', 'n前(mmol)', 'n後(mmol)', '消耗速率'))
 
+    # 全部排氣（含沒有組成讀數的）與甲烷分率的內插底數
+    from vent_selective_h2_loss import all_vents
+    mid_vents = all_vents(ts, hh, p)
+    ct = np.array([hh[i] for i in ev])
+    cv = np.array([ch4[i] / 100.0 for i in ev])
+    print('  （區間內的排氣以壓力驟降偵測，共 %d 次；'
+          '其帶走的甲烷已補回生成量）\n' % len(mid_vents))
+
     rows = []
     for k in range(1, len(ev)):
         a, b = ev[k - 1], ev[k]
@@ -99,7 +107,15 @@ def main():
         n_start = n_per_L(ch4[a], p_after)
         # 本次排氣「之前」的甲烷：用排氣前一筆的壓力
         n_end = n_per_L(ch4[b], float(p[b - 1]))
-        gen = n_end - n_start                      # mol per L(gas)
+        # ⚠ 生成量 ≠ 淨增量：區間內若另有排氣，甲烷會被帶走。
+        #   帶組成的排氣只有 35 次，但壓力驟降偵測出 108 次，
+        #   故區間內常夾有未被計入的排氣。不補回就會低估。
+        n_lost = 0.0
+        for v in mid_vents:
+            if a < v['i'] <= b:
+                x = float(np.interp(hh[v['i']], ct, cv))
+                n_lost += v['drop'] * KGF_TO_KPA * 1e3 / (R_GAS * T_K) / 1e3 * x
+        gen = (n_end - n_start) + n_lost           # mol per L(gas)
         if gen <= 0:
             continue                               # 該段甲烷未淨增，不採計
         rate = gen / dur                           # mol/(L·hr)

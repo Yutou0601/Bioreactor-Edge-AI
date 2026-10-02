@@ -55,7 +55,10 @@ def style(ax, title=None, xlabel=None, ylabel=None):
 
 
 def save(fig, name):
+    # ★ 存檔前先自動檢查「圖上文字是否壓到資料」
+    from overlap_check import report
     p = os.path.join(OUT, name + '.png')
+    report(fig, name)
     fig.savefig(p)
     plt.close(fig)
     print('  ->', name + '.png')
@@ -149,7 +152,7 @@ def fig_co2():
             ha='center', va='top', fontsize=13, color=INK2)
 
     # 右：兩個數字
-    bars = [('長期平均\n（含基質耗盡期）', 0.0915, BLUE),
+    bars = [('長期平均\n（含基質耗盡期）', 0.1332, BLUE),
             ('初始速率\n（基質充足）', 0.4343, RED)]
     xs = [0, 1]
     a2.bar(xs, [b[1] for b in bars], width=0.55,
@@ -159,9 +162,9 @@ def fig_co2():
     for x, (_, v, c) in zip(xs, bars):
         a2.text(x, v + 0.018, '%.3f' % v, ha='center', va='bottom',
                 fontsize=17, fontweight='bold', color=c)
-    a2.set_ylim(0, 0.62)
+    a2.set_ylim(0, 0.60)
     a2.text(0.5, 0.97,
-            '兩者差 4.7 倍，原因已查明：\n'
+            '兩者差 3.3 倍，原因已查明：\n'
             '量測間隔越長，平均速率越低（ρ=−0.55, p=0.01）\n'
             '長間隔把「基質耗盡後的零產量」也平均進來',
             transform=a2.transAxes, fontsize=13, color=INK,
@@ -215,8 +218,8 @@ def fig_ventloss():
             '而實際排氣有 108 次',
             transform=a2.transAxes, fontsize=14, color=INK,
             fontweight='bold', ha='center', va='top')
-    a2.text(0.5, 0.699 * 1.16, ' 實測中位 0.699', color=RED, fontsize=13,
-            fontweight='bold', ha='left', va='bottom')
+    # ★ 此處原有「實測中位 0.699」標註，不論放哪都會穿過曲線。
+    #   頂部文字已說「漲到實測的 0.699」，標註屬冗餘，故移除。
     style(a2, '每次排氣都把比值往上推', '排氣次數', 'CO₂:H₂（對數軸）')
     save(fig, 'deck13_ventloss')
 
@@ -237,18 +240,21 @@ def fig_curvature():
             ax.plot([lo, hi], [y, y], color=c, lw=4.0, solid_capstyle='round')
         ax.scatter([v], [y], s=200, color=c, edgecolors='white',
                    linewidths=2.0, zorder=5)
-        ax.text(v, y + 0.26, '%.4f' % v, ha='center', va='bottom',
+        # 數值標籤放在區間右端的右側，不壓到點與線
+        xt = (hi if np.isfinite(hi) else v) + 0.0012
+        ax.text(xt, y, '%.4f' % v, ha='left', va='center',
                 fontsize=14, fontweight='bold', color=c)
     ax.set_yticks(yy)
     ax.set_yticklabels([i[0] for i in items], fontsize=15)
     ax.invert_yaxis()
     ax.axvline(0.0125, color=MUTED, lw=2.0, ls=':')
-    ax.set_xlim(0, 0.042)
+    ax.set_xlim(0, 0.046)
     ax.set_ylim(len(items) - 0.4, -0.9)
-    ax.text(0.5, 0.055,
+    # 說明文字放左上空白處（第一列的區間從 0.0286 才開始）
+    ax.text(0.015, 0.93,
             '四個彼此獨立的方法，三個都高於論文定版',
-            transform=ax.transAxes, fontsize=15, color=INK,
-            fontweight='bold', ha='center', va='bottom')
+            transform=ax.transAxes, fontsize=14.5, color=INK,
+            fontweight='bold', ha='left', va='top')
     ax.set_xlabel('推得的 r̄_b （kgf/cm²/hr）')
     ax.set_title('★ 定版的生物速率可能被低估', color=INK,
                  fontweight='bold', loc='left', pad=14)

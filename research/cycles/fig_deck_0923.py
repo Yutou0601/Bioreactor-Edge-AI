@@ -54,7 +54,10 @@ def style(ax, title=None, xlabel=None, ylabel=None):
 
 
 def save(fig, name):
+    # ★ 存檔前先自動檢查「圖上文字是否壓到資料」
+    from overlap_check import report
     p = os.path.join(OUT, name + '.png')
+    report(fig, name)
     fig.savefig(p)
     plt.close(fig)
     print('  ->', name + '.png')
