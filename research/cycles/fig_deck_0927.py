@@ -266,9 +266,62 @@ def fig_curvature():
     save(fig, 'deck14_curvature')
 
 
+
+
+# ═══════════════════════════════════════════════════════════════
+def fig_series():
+    """串聯模型：溶解是通道不是匯。"""
+    fig, (a1, a2) = plt.subplots(1, 2, figsize=(FIGW, 5.6),
+                                 gridspec_kw={'wspace': 0.26})
+    a1.axis('off'); a1.set_xlim(0, 10); a1.set_ylim(0, 10)
+    a1.text(5, 9.8, '壓力為什麼會掉', ha='center', va='top',
+            fontsize=17, fontweight='bold', color=INK)
+    box(a1, 0.3, 7.9, 2.6, 1.2, '氣相', '#EDF2F7', MUTED, fs=15)
+    box(a1, 3.7, 7.9, 2.6, 1.2, '液相', '#E6F0FA', BLUE, fs=15)
+    box(a1, 7.1, 7.9, 2.6, 1.2, '甲烷', '#E8F6EF', AQUA, fs=15)
+    arrow(a1, 3.0, 8.5, 3.6, 8.5)
+    arrow(a1, 6.4, 8.5, 7.0, 8.5)
+    a1.text(3.3, 7.6, '溶解', ha='center', va='top', fontsize=12.5,
+            color=INK2)
+    a1.text(6.7, 7.6, '菌吃掉', ha='center', va='top', fontsize=12.5,
+            color=INK2)
+    a1.text(5, 6.4, '氣泵把氣體打回液體——這就是裝置的設計目的',
+            ha='center', va='top', fontsize=13.5, color=INK)
+    box(a1, 0.4, 3.9, 9.2, 1.9,
+        '溶解是「通道」，生物是「匯」\n'
+        '液相之所以不會飽和、溶解之所以能一直進行，\n'
+        '正是因為生物一直在把它吃掉',
+        '#FFF7E6', '#E0A800', fs=13.5)
+    a1.text(5, 3.3, '⟹ 穩態下壓力是「直線」下降',
+            ha='center', va='top', fontsize=15, color=RED, fontweight='bold')
+    a1.text(5, 2.3, '實測 252 條曲線，91% 落在「接近直線」那一群',
+            ha='center', va='top', fontsize=13, color=INK2)
+    a1.text(5, 1.2, '斜率 ＝ 消耗速率（與傳質快慢無關）',
+            ha='center', va='top', fontsize=14, color=INK, fontweight='bold')
+
+    items = [('論文定版\n(壓力擬合)', 0.0125, MUTED),
+             ('由甲烷換算', 0.0137, AQUA),
+             ('kT>7\n尾段斜率', 0.0177, BLUE),
+             ('實測\n總壓降', 0.0347, RED)]
+    xs = np.arange(len(items))
+    a2.bar(xs, [i[1] for i in items], width=0.58, color=[i[2] for i in items])
+    a2.set_xticks(xs); a2.set_xticklabels([i[0] for i in items], fontsize=13)
+    for x, (_, v, c) in zip(xs, items):
+        a2.text(x, v + 0.0009, '%.4f' % v, ha='center', va='bottom',
+                fontsize=14, fontweight='bold', color=c)
+    a2.set_ylim(0, 0.050)
+    a2.text(0.5, 0.97,
+            '生物解釋了 39% 的壓降\n剩下的 61% 才是待解的部分',
+            transform=a2.transAxes, fontsize=14, color=INK,
+            fontweight='bold', ha='center', va='top')
+    style(a2, '四個數字的對帳', '', 'kgf/cm²/hr')
+    save(fig, 'deck15_series')
+
+
 if __name__ == '__main__':
     print('產圖：')
     fig_pinn_what()
     fig_co2()
     fig_ventloss()
     fig_curvature()
+    fig_series()
