@@ -25,6 +25,8 @@ import os
 
 PATH = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
                     'decks', '報告簡報_2026-08-14_定版論文.pptx')
+if len(sys.argv) > 1:                # 可指定要稽核哪一份
+    PATH = sys.argv[1]
 LINE = 1.32                          # 行高倍率
 PT2CM = 0.03528
 
