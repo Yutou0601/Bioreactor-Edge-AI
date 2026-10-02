@@ -231,8 +231,8 @@ def fig_curvature():
     items = [
         ('曲率配對（本次新做）', 0.0321, 0.0286, 0.0349, RED),
         ('甲烷化學計量對帳', 0.0225, 0.016, 0.029, BLUE),
-        ('kT>7 的尾段斜率', 0.0177, np.nan, np.nan, BLUE),
-        ('論文定版（壓力擬合）', 0.0125, 0.0112, 0.0139, MUTED),
+        ('後半段的下降速度', 0.0177, np.nan, np.nan, BLUE),
+        ('原本的數字（壓力擬合）', 0.0125, 0.0112, 0.0139, MUTED),
     ]
     yy = np.arange(len(items))
     for y, (nm, v, lo, hi, c) in zip(yy, items):
@@ -252,7 +252,7 @@ def fig_curvature():
     ax.set_ylim(len(items) - 0.4, -0.9)
     # 說明文字放左上空白處（第一列的區間從 0.0286 才開始）
     ax.text(0.015, 0.93,
-            '四個彼此獨立的方法，三個都高於論文定版',
+            '四個各自獨立的算法，三個都比原本的數字高',
             transform=ax.transAxes, fontsize=14.5, color=INK,
             fontweight='bold', ha='left', va='top')
     ax.set_xlabel('推得的 r̄_b （kgf/cm²/hr）')
@@ -270,39 +270,39 @@ def fig_curvature():
 
 # ═══════════════════════════════════════════════════════════════
 def fig_series():
-    """串聯模型：溶解是通道不是匯。"""
+    """氣體先溶進水裡，再被菌吃掉（白話版的串聯模型）。"""
     fig, (a1, a2) = plt.subplots(1, 2, figsize=(FIGW, 5.6),
                                  gridspec_kw={'wspace': 0.26})
     a1.axis('off'); a1.set_xlim(0, 10); a1.set_ylim(0, 10)
     a1.text(5, 9.8, '壓力為什麼會掉', ha='center', va='top',
             fontsize=17, fontweight='bold', color=INK)
-    box(a1, 0.3, 7.9, 2.6, 1.2, '氣相', '#EDF2F7', MUTED, fs=15)
-    box(a1, 3.7, 7.9, 2.6, 1.2, '液相', '#E6F0FA', BLUE, fs=15)
-    box(a1, 7.1, 7.9, 2.6, 1.2, '甲烷', '#E8F6EF', AQUA, fs=15)
+    box(a1, 0.3, 7.9, 2.6, 1.2, '上方的氣體', '#EDF2F7', MUTED, fs=14)
+    box(a1, 3.7, 7.9, 2.6, 1.2, '溶在水裡', '#E6F0FA', BLUE, fs=14)
+    box(a1, 7.1, 7.9, 2.6, 1.2, '變成甲烷', '#E8F6EF', AQUA, fs=14)
     arrow(a1, 3.0, 8.5, 3.6, 8.5)
     arrow(a1, 6.4, 8.5, 7.0, 8.5)
-    a1.text(3.3, 7.6, '溶解', ha='center', va='top', fontsize=12.5,
+    a1.text(3.3, 7.6, '溶進去', ha='center', va='top', fontsize=12.5,
             color=INK2)
     a1.text(6.7, 7.6, '菌吃掉', ha='center', va='top', fontsize=12.5,
             color=INK2)
-    a1.text(5, 6.4, '氣泵把氣體打回液體——這就是裝置的設計目的',
+    a1.text(5, 6.4, '氣泵把氣體打進水裡——這本來就是裝置的設計目的',
             ha='center', va='top', fontsize=13.5, color=INK)
     box(a1, 0.4, 3.9, 9.2, 1.9,
-        '溶解是「通道」，生物是「匯」\n'
-        '液相之所以不會飽和、溶解之所以能一直進行，\n'
-        '正是因為生物一直在把它吃掉',
+        '水只是「經過的地方」，最後是被菌吃掉\n'
+        '水沒被溶飽、氣體能一直溶進去，\n'
+        '就是因為菌一直在把溶進去的吃掉',
         '#FFF7E6', '#E0A800', fs=13.5)
-    a1.text(5, 3.3, '⟹ 穩態下壓力是「直線」下降',
+    a1.text(5, 3.3, '⟹ 壓力穩定下來之後是「直線」掉',
             ha='center', va='top', fontsize=15, color=RED, fontweight='bold')
-    a1.text(5, 2.3, '實測 252 條曲線，91% 落在「接近直線」那一群',
+    a1.text(5, 2.3, '實測 252 條下降曲線，91% 幾乎是直的',
             ha='center', va='top', fontsize=13, color=INK2)
-    a1.text(5, 1.2, '斜率 ＝ 消耗速率（與傳質快慢無關）',
+    a1.text(5, 1.2, '下降的快慢 ＝ 菌吃掉的快慢',
             ha='center', va='top', fontsize=14, color=INK, fontweight='bold')
 
-    items = [('論文定版\n(壓力擬合)', 0.0125, MUTED),
+    items = [('原本的數字\n(壓力擬合)', 0.0125, MUTED),
              ('由甲烷換算', 0.0137, AQUA),
-             ('kT>7\n尾段斜率', 0.0177, BLUE),
-             ('實測\n總壓降', 0.0347, RED)]
+             ('後半段的\n下降速度', 0.0177, BLUE),
+             ('實測的\n總下降速度', 0.0347, RED)]
     xs = np.arange(len(items))
     a2.bar(xs, [i[1] for i in items], width=0.58, color=[i[2] for i in items])
     a2.set_xticks(xs); a2.set_xticklabels([i[0] for i in items], fontsize=13)
@@ -311,10 +311,10 @@ def fig_series():
                 fontsize=14, fontweight='bold', color=c)
     a2.set_ylim(0, 0.050)
     a2.text(0.5, 0.97,
-            '生物解釋了 39% 的壓降\n剩下的 61% 才是待解的部分',
+            '菌吃掉的量只能解釋 39% 的壓降\n剩下的 61% 還不知道是什麼',
             transform=a2.transAxes, fontsize=14, color=INK,
             fontweight='bold', ha='center', va='top')
-    style(a2, '四個數字的對帳', '', 'kgf/cm²/hr')
+    style(a2, '四個數字擺在一起比', '', '每小時掉多少 (kgf/cm²)')
     save(fig, 'deck15_series')
 
 
