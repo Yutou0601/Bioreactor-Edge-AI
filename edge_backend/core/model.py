@@ -10,4 +10,3 @@ class ReactorLSTM(nn.Module):
         out, _ = self.lstm(x)
         out = self.fc(out[:, -1, :])
         return out
-    
