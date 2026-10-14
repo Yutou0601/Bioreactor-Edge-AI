@@ -105,6 +105,36 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+# ⚠ 來源白名單（架構 B：後端在 Jetson）。Jetson 要讓 USB（監控電腦）與
+#   Tailscale（遠端）都連得到，所以得聽 0.0.0.0——但它也接在實驗室 Wi-Fi 上，
+#   而 API 沒有身分驗證、有刪除紀錄的端點。這一層在程式裡擋，不靠防火牆
+#   設對：防火牆規則一條寫錯就全開，而且不會有任何徵兆。
+#   REACTOR_ALLOW_NETS 留空＝不檢查（監控電腦只聽 127.0.0.1，不需要）。
+def _allow_nets():
+    import ipaddress
+    from core import config as _cfg
+    raw = (_cfg.get('REACTOR_ALLOW_NETS') or '').strip()
+    return [ipaddress.ip_network(n.strip(), strict=False)
+            for n in raw.split(',') if n.strip()]
+
+
+_ALLOW = _allow_nets()
+if _ALLOW:
+    import ipaddress as _ip
+    from fastapi.responses import PlainTextResponse
+
+    @app.middleware("http")
+    async def _only_allowed_sources(request, call_next):
+        host = request.client.host if request.client else ''
+        try:
+            ok = any(_ip.ip_address(host) in n for n in _ALLOW)
+        except ValueError:
+            ok = False
+        if not ok:
+            return PlainTextResponse('來源 %s 不在 REACTOR_ALLOW_NETS 內' % host,
+                                     status_code=403)
+        return await call_next(request)
+
 app.include_router(router, prefix="/api")
 
 # ⚠ 前後端同機之後，前端 dist/ 由本服務直接供應，不必再起第二個伺服器。

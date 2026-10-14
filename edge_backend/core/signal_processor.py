@@ -119,6 +119,19 @@ class ORPSignalProcessor:
         end_val = self._spike_buffer[-1][1]
         return self._flush_spike_buffer(end_val)
 
+    def resume(self, timestamp: str, raw_orp: float, ema: float) -> None:
+        """從已存下的最後一筆接續狀態（串流接收重啟時呼叫）。
+
+        ⚠ 不接續的話，後端每重開一次 EMA 就從當下的原始值重新起算，平滑線在
+          重開那一分鐘會斷一截，突波判定也會把重開後第一筆當成「沒有前一筆」。
+          只接續 EMA 與前一筆；重開前若正好卡在突波中，那段緩衝由呼叫端從
+          raw_sample 表重送，不在這裡假造。
+        """
+        self.reset()
+        self._prev_raw = raw_orp
+        self._prev_ts = timestamp
+        self._ema = ema
+
     def reset(self) -> None:
         """重置處理器狀態（重新連接感測器時呼叫）"""
         self._ema = None

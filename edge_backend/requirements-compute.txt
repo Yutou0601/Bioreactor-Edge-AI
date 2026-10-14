@@ -21,6 +21,12 @@ fastapi>=0.110.0
 uvicorn>=0.27.1
 pydantic>=2.6.3
 
+# 架構 B（2026-10-15）：主後端（main.py，reactor-web 服務）也跑在這台，
+# 下面兩個是它需要、而重運算節點本身不需要的。少了 python-multipart，
+# main.py 在註冊 /api/import_csv（File 上傳）時就當場 RuntimeError，服務起不來。
+python-multipart>=0.0.9   # /api/import_csv 檔案上傳
+openpyxl>=3.1.0           # 實驗批次報表匯出（xlsx）
+
 # 三個分析模組實際用到的
 numpy>=1.24.4
 pandas>=2.2.1           # covariate

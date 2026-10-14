@@ -225,6 +225,29 @@ def ingest_paths(paths, source, con=None):
     if got is None:
         return {'source': source, 'error': '資料不足'}
     ts, hours, pressure = got
+    return store_segments(ts, hours, pressure, ce.segment(hours, pressure),
+                          source, con=con)
+
+
+def store_segments(ts, hours, pressure, cycles, source, con=None, wash_from=None,
+                   exact_time=False):
+    """把已切好的段逐一估計並寫入 cycle 表。資料夾匯入與串流同步共用。
+
+    ⚠ 呼叫端負責只傳**完整**的段。cycle 表以 (source, ts_start) 為唯一鍵且
+      INSERT OR IGNORE——一段還沒結束就先寫進來，之後它長完也不會被更新，
+      那個循環的速率就永遠是半截的，而且不報錯。
+
+    wash_from：判定洗管線日用的段落清單（預設＝cycles）。串流同步每次只寫新的
+      幾段，但「當天起始超過 6 次」要數**當天全部**的段，所以另外傳。
+
+    exact_time：每段的時間軸改由時間戳對**該段起點**以整數秒精確重算。
+      ⚠ 預設關，資料夾匯入維持原樣以對齊論文的離線腳本。原樣的時間軸是
+      「整個資料夾第一筆起算的小時數」再相減，會帶 1e-14 級誤差；正好落在
+      第 180 秒的那一筆可能被 SKIP_MIN（3 分鐘）的 >= 判成不到而掐掉。
+      2026-10-15 實測 13 天 46 段，有段因此差一點、曲率 0.526 → 0.571、
+      篩選結果翻掉一段。串流同步的讀取起點每次不同，不精確重算的話同一段
+      在不同時刻同步會得到不同結果，所以串流一律開這個。
+    """
     calib = load_calibration()
     cver = (calib or {}).get('calibrated_at')
 
@@ -232,14 +255,18 @@ def ingest_paths(paths, source, con=None):
     con = con or connect()
     n_seg = n_scr = n_new = n_wash = 0
     try:
-        cycles = ce.segment(hours, pressure)
-        wash = _wash_days(ts, cycles)
+        wash = _wash_days(ts, cycles if wash_from is None else wash_from)
         for a, b in cycles:
             if ts[a].date() in wash:
                 n_wash += 1
                 continue
             n_seg += 1
-            row = ce.estimate_cycle(hours[a:b + 1], pressure[a:b + 1])
+            if exact_time:
+                seg_t = np.array([(ts[i] - ts[a]).total_seconds() / 3600.0
+                                  for i in range(a, b + 1)])
+            else:
+                seg_t = hours[a:b + 1]
+            row = ce.estimate_cycle(seg_t, pressure[a:b + 1])
             if row is None:
                 continue
             n_scr += int(row['screened'])

@@ -61,6 +61,9 @@ edge_backend/server.log
 .env
 .env.local
 edge_backend/.env
+# 監控電腦上傳程式的進度（每個 CSV 送到第幾個位元組）。每台機器自己的狀態，不進版控。
+edge_backend/.uploader_state.json
+edge_backend/.uploader_state.json.tmp
 
 # ⚠ calibration.json 是**例外，要進版控**：它是離線校準模組產出的常數，
 #   決定 rb 欄位的值，必須與程式碼一起版本化，否則同一份資料在兩台機器

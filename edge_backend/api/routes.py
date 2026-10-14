@@ -509,6 +509,7 @@ def get_analysis():
 def get_records(
     limit: int = Query(4320, ge=0, description="0 = 不限制，回傳全部；預設 4320 ≈ 3 天（每分鐘一筆）"),
     points: int = Query(0, ge=0, le=20000, description="0 = 不降採樣；給了就用 LTTB 挑約這麼多點（畫圖用）"),
+    date: str = Query('', description="YYYY-MM-DD：只回這一天（從 sample 表讀，不受記憶體視窗限制）"),
 ):
     """預設只回傳最近 limit 筆（依時間排序後取尾端），避免長時間運行後資料量
     過大拖慢前端渲染與每次輪詢的傳輸量。完整歷史仍完整保存在 sensor_records
@@ -523,10 +524,21 @@ def get_records(
 
     ⚠ `points` 只影響**這個回應**，不影響記憶體裡的資料、分析、或資料庫。
       需要精確逐筆的地方（局部分析、資料表）不要用它。
+
+    `date` 給日期選單用：從 sample 表讀那一天，所以記憶體只留最近 2 萬筆也看得到
+    更早的日子。給了 date 就不套用 limit。
     """
-    recs = _sorted_records()
-    if limit > 0:
-        recs = recs[-limit:]
+    if date:
+        if not re.fullmatch(r'\d{4}-\d{2}-\d{2}', date):
+            raise HTTPException(status_code=400, detail='date 要是 YYYY-MM-DD')
+        from core import sample_store
+        recs = sample_store.load_window(date + ' 00:00:00', date + ' 23:59:59')
+        for i, r in enumerate(recs):
+            r['id'] = i + 1
+    else:
+        recs = _sorted_records()
+        if limit > 0:
+            recs = recs[-limit:]
     if points > 0 and len(recs) > points:
         from core import downsample
         # 監控頁畫的是 ORP 四條線與 CH4／CO2；壓力給下降段看。四個都列進去，
@@ -569,70 +581,79 @@ def delete_record(record_id: int):
 
 
 # ==========================================
+# 通道 5：串流接收（監控電腦的上傳程式 → 這裡）
+# ==========================================
+# 見 core/ingest.py 與 deploy/monitor_uploader.py。
+from fastapi import Header                                     # noqa: E402
+from typing import Optional                                    # noqa: E402
+from pydantic import BaseModel                                 # noqa: E402
+
+
+class IngestBatch(BaseModel):
+    station: str = 'default'
+    file: str = ''
+    offset: Optional[int] = None    # 上傳程式送到該檔第幾個位元組（顯示與對帳用）
+    lines: list[str] = []
+
+
+@router.post("/ingest")
+def api_ingest(batch: IngestBatch,
+               x_reactor_token: Optional[str] = Header(default=None)):
+    """收一批 CSV 新增行。回 OK 才代表原始行已落地（上傳程式據此推進度）。
+
+    ⚠ 只有這個端點驗通行碼。其他端點仍靠網路層（只開 USB 與 Tailscale）把關；
+      但「灌資料」是最容易被誤用、也最難事後發現的，所以多一層。
+    """
+    from core import ingest, cycle_sync
+    ok, why = ingest.check_token(x_reactor_token)
+    if not ok:
+        raise HTTPException(status_code=401, detail=why)
+    if len(batch.lines) > 20000:
+        raise HTTPException(status_code=413, detail='一批最多 20000 行')
+    res = ingest.ingest_lines(batch.station, batch.file, batch.lines,
+                              offset=batch.offset)
+    if res.get('new'):
+        try:
+            res['cycle_sync'] = cycle_sync.maybe_sync(res['station'])
+        except Exception as e:                           # 同步失敗不能讓收資料失敗
+            res['cycle_sync'] = {'error': '%s: %s' % (type(e).__name__, e)}
+    return res
+
+
+@router.get("/ingest/status")
+def api_ingest_status():
+    """各站台多久沒收到資料。介面的「資料還有沒有在進來」燈號用它。"""
+    from core import ingest
+    return {'stations': ingest.status(), 'now': datetime.now().isoformat(sep=' ', timespec='seconds')}
+
+
+@router.get("/days")
+def api_days():
+    """有資料的日期與每日筆數、覆蓋率（新到舊）。日期選單用它。"""
+    from core import ingest
+    return ingest.days()
+
+
+@router.get("/cycles/current")
+def api_cycle_current(station: str = 'default'):
+    """進行中那段的暫定估計（Algorithm 1 跑在目前為止的資料上）。不入表。"""
+    from core import cycle_sync
+    return cycle_sync.current(station) or {'error': '沒有資料'}
+
+
+@router.post("/cycles/sync")
+def api_cycle_sync(station: str = 'default'):
+    """手動觸發一次串流循環同步（平常每批收資料後每 5 分鐘自動跑）。"""
+    from core import cycle_sync
+    return cycle_sync.sync(station)
+
+
+# ==========================================
 # 通道 4：CSV 批次匯入（含訊號前處理）
 # ==========================================
-def _parse_btp_csv(text: str) -> list:
-    """舊的 14 欄逗號格式解析。反應槽壓力取 parts[11]（parts[8]/parts[11] 對調，
-    2026-07-14 現場比對 HMI 面板確認）。"""
-    rows = []
-    for line in text.splitlines():
-        line = line.strip()
-        if not line:
-            continue
-        parts = line.split(',')
-        if len(parts) < 14:
-            continue
-        try:
-            ts = (f"{int(parts[0]):04d}-{int(parts[1]):02d}-{int(parts[2]):02d}"
-                  f" {int(parts[3]):02d}:{int(parts[4]):02d}:{int(parts[5]):02d}")
-            rows.append({
-                'timestamp': ts, 'orp_raw': float(parts[7]),
-                'pressure': float(parts[11]), 'ph': float(parts[9]),
-                'temp': float(parts[10]), 'mixer_pressure': float(parts[8]),
-                'co2_pct': float(parts[12]), 'ch4_pct': float(parts[13]),
-            })
-        except (ValueError, IndexError):
-            continue
-    return rows
-
-
-def _parse_btp_labeled(text: str) -> list:
-    """解析 BTP.SerialHarbor 記錄程式的「標籤文字」格式：
-      [2026-07-22-13:59:53] ORP=534mV | 反應器壓力=2.81kg/cm² | 酸鹼值=pH 7.00 |
-      溫度=30.0°C | 混合槽壓力=0.72kg/cm² | CO2濃度=0.0% | CH4濃度=0.36%
-
-    **欄位對調**（與逗號格式一致，2026-07-27 以實測資料 + 參數表交叉驗證）：
-    檔案標「反應器壓力」的高值(~3.5)其實是混合槽；標「混合槽壓力」的低值(~1.1)才是
-    反應槽——後者對得上參數表「進氣後反應槽 1.179」。故 pressure 取「混合槽壓力」欄。
-    """
-    import re
-    rows = []
-    for line in text.splitlines():
-        line = line.strip()
-        m_ts = re.search(r"\[(\d{4})-(\d{2})-(\d{2})-(\d{2}:\d{2}:\d{2})\]", line)
-        if not m_ts or "ORP=" not in line:
-            continue
-
-        def g(pat, cast=float):
-            m = re.search(pat, line)
-            return cast(m.group(1)) if m else None
-        try:
-            reactor = g(r"混合槽壓力=([\d.]+)")     # ← 標籤對調：這才是反應槽
-            mixer = g(r"反應器壓力=([\d.]+)")        # ← 這其實是混合槽
-            orp = g(r"ORP=(-?[\d.]+)mV")
-            ph = g(r"pH\s*([\d.]+)")
-            if orp is None or reactor is None:
-                continue
-            rows.append({
-                "timestamp": f"{m_ts.group(1)}-{m_ts.group(2)}-{m_ts.group(3)} {m_ts.group(4)}",
-                "orp_raw": orp, "pressure": reactor, "ph": ph if ph is not None else 7.0,
-                "temp": g(r"溫度=([\d.]+)") or 30.0, "mixer_pressure": mixer or 0.0,
-                "co2_pct": g(r"CO2濃度=([\d.]+)") or 0.0,
-                "ch4_pct": g(r"CH4濃度=([\d.]+)") or 0.0,
-            })
-        except (ValueError, AttributeError):
-            continue
-    return rows
+# 解析搬到 core/btp_format.py，與串流接收（/api/ingest）共用同一份欄位對應。
+from core.btp_format import parse_csv as _parse_btp_csv            # noqa: E402
+from core.btp_format import parse_labeled as _parse_btp_labeled    # noqa: E402
 
 
 def _import_csv_btp_daily(text: str, detected_date: str) -> dict:

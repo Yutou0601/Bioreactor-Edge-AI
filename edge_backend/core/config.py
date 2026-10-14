@@ -53,6 +53,18 @@ _DEFAULTS = {
     # （約 10 MB、約當 14 天的一分鐘取樣）。實測每筆 517 bytes，一年份
     # 525,600 筆＝259 MB，遠超這台 60 MB 的預算，所以不能設成「全部」。
     'REACTOR_SAMPLE_LIMIT': '',
+    # ── 串流接收（架構 B：後端在 Jetson，監控電腦只跑上傳程式）──────
+    # 上傳程式與後端事先約好的通行碼。⚠ 後端沒設就拒收 /api/ingest——
+    #   不設等於任何連得到的人都能灌資料。兩台要填同一個值。
+    'REACTOR_INGEST_TOKEN': '',
+    # 這台監控電腦的站台代號。Jetson 收到的資料會標上它。
+    'REACTOR_STATION': 'BTP-1',
+    # 上傳程式要送去的後端（USB 上的 Jetson）。
+    'REACTOR_UPLOAD_URL': 'http://192.168.55.1:8000',
+    # 允許連進後端的來源網段（逗號分隔 CIDR）。留空＝不檢查。
+    # Jetson 上要設：本機、USB、Tailscale——擋掉實驗室 Wi-Fi 區網。
+    #   127.0.0.1/32,::1/128,192.168.55.0/24,100.64.0.0/10,fd7a:115c:a1e0::/48
+    'REACTOR_ALLOW_NETS': '',
 }
 
 _cache = None
