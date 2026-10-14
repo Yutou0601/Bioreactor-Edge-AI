@@ -11,7 +11,11 @@
  *     會被誤讀成一個真實的眾數。
  */
 import { ref, onMounted, onUnmounted, nextTick } from 'vue'
-import * as echarts from 'echarts'
+import echarts from '../lib/echarts'
+// 與 styles/tokens.css 同一組色票（圖表要的是實際色值，不能直接吃 CSS 變數）
+const _css = n => getComputedStyle(document.documentElement).getPropertyValue(n).trim()
+const SERIES_1 = _css('--series-1') || '#3987e5'
+const INK = _css('--text-primary') || '#f0efec'
 import apiClient from '../services/apiClient'
 
 const loading = ref(true)
@@ -88,12 +92,12 @@ function drawSeries () {
     series: [{
       type: 'line', showSymbol: true, symbolSize: 5,
       data: rows.map(r => r.rb),
-      lineStyle: { width: 1.2, color: '#4a90d9' },
-      itemStyle: { color: '#4a90d9' },
+      lineStyle: { width: 2, color: SERIES_1 },
+      itemStyle: { color: SERIES_1 },
       markLine: rate.value?.calibration ? {
         silent: true, symbol: 'none',
-        label: { formatter: '聚合中位', color: '#c0504d', fontSize: 10 },
-        lineStyle: { color: '#c0504d', width: 1.2, type: 'solid' },
+        label: { formatter: '聚合中位', color: INK, fontSize: 10, position: 'insideEndTop' },
+        lineStyle: { color: INK, width: 1, type: 'solid' },
         data: [{ yAxis: rate.value.median_rb }],
       } : undefined,
     }],
@@ -123,7 +127,7 @@ function drawKHist () {
       nameTextStyle: { color: '#8a8a8a', fontSize: 10 },
       axisLabel: AX.yLabel, splitLine: AX.splitLine, axisLine: AX.axisLine,
     },
-    series: [{ type: 'bar', data: h.counts, itemStyle: { color: '#5b8db8' } }],
+    series: [{ type: 'bar', data: h.counts, itemStyle: { color: SERIES_1, borderRadius: [4, 4, 0, 0] } }],
   })
 }
 
@@ -155,11 +159,11 @@ function drawRbHist () {
       axisLabel: AX.yLabel, splitLine: AX.splitLine, axisLine: AX.axisLine,
     },
     series: [{
-      type: 'bar', data: h.counts, itemStyle: { color: '#5b8db8' },
+      type: 'bar', data: h.counts, itemStyle: { color: SERIES_1, borderRadius: [4, 4, 0, 0] },
       markLine: {
         silent: true, symbol: 'none',
         label: { formatter: '零', color: '#888', fontSize: 10 },
-        lineStyle: { color: '#888', width: 1, type: 'dotted' },
+        lineStyle: { color: '#898781', width: 1, type: 'solid' },
         data: [{ xAxis: h.centers.findIndex(v => v >= 0) }],
       },
     }],
@@ -299,7 +303,7 @@ onUnmounted(() => {
 
 <style scoped>
 .rate-page {
-  min-height: 100vh; background: #0d0d0d; color: #e0e0e0;
+  min-height: 100vh; background: var(--page); color: var(--text-primary);
   font-family: 'Noto Sans TC', sans-serif; padding: 1.25rem;
 }
 .hdr {
@@ -331,12 +335,12 @@ h1 small { color: #7a7a7a; font-size: .8rem; font-weight: 400; margin-left: .5re
 
 .usability { margin: 0 0 1rem; padding: 9px 12px; border-radius: 5px;
              font-size: 0.78rem; line-height: 1.6; }
-.usability.u-usable     { background: #eef8f1; border: 1px solid #bfe0c9; color: #2f6b45; }
-.usability.u-indicative { background: #fdf6e6; border: 1px solid #e6d29a; color: #86682a; }
-.usability.u-unusable   { background: #fceceb; border: 1px solid #e5b8b4; color: #93392f; }
-.unit .u-usable     { color: #2f6b45; }
-.unit .u-indicative { color: #86682a; }
-.unit .u-unusable   { color: #93392f; }
+.usability.u-usable     { background: var(--surface-1); border: 1px solid var(--good); color: var(--text-primary); }
+.usability.u-indicative { background: var(--surface-1); border: 1px solid var(--warning); color: var(--text-primary); }
+.usability.u-unusable   { background: var(--surface-1); border: 1px solid var(--critical); color: var(--text-primary); }
+.unit .u-usable     { color: var(--good); }
+.unit .u-indicative { color: var(--warning); }
+.unit .u-unusable   { color: var(--critical); }
 .calib { color: #7a7a7a; font-size: .78rem; margin: .9rem 0 0; }
 .calib b { color: #a0a0a0; }
 .calib.warn { color: #c9a227; }

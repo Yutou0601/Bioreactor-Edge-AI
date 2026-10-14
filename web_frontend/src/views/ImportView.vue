@@ -13,7 +13,7 @@
  *   這時**不顯示數字**——只給一個數字，看的人會當成結果。
  */
 import { ref, computed, onMounted, onUnmounted, nextTick } from 'vue'
-import * as echarts from 'echarts'
+import echarts from '../lib/echarts'
 import apiClient from '../services/apiClient'
 
 const files      = ref([])          // 選到的檔案

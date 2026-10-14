@@ -150,6 +150,57 @@ def maybe_sync(station='default', min_interval=300):
     return sync(station)
 
 
+RECENT_HR = 3.0      # 「目前速率」看最近幾小時（10 分鐘視窗量不到東西，見 descent_report）
+
+
+def _stoich(seg_h, seg_p, est, temp_c=30.0):
+    """由本段壓降推 CO2 消耗與 CH4 產量。全部是**上限**，除了 bio_* 兩項。
+
+    CO2 + 4H2 → CH4 + 2H2O(液)：氣相淨少 4 mol／每 mol CO2。所以
+        CO2 消耗 = CH4 產量 ≤ 淨壓降 / 4
+    ⚠ 是上限不是等號：壓降還有物理項（溶解、論文的 A·e^{-kt}），那部分消耗
+      氣體卻不產 CH4。實測三批排氣對帳 CH4/壓降 = 0.17~0.22（上限 0.25）。
+    ⚠ 濃度上限用分壓比，頭空體積自己消掉；換成 mmol 才需要體積，而頭空
+      1.00 L 的四分位是 0.60~2.14（descent_report.HEADSPACE_L），mmol 只能
+      當量級看。
+    bio_*：用 Algorithm 1 的 r_b（只有通過曲率篩選才有）換算的生物份額速率。
+    """
+    from core import descent_report as dr
+    keep = seg_h >= ce.SKIP_MIN            # 與 Algorithm 1 相同：掐掉補氣本身那幾分鐘
+    if keep.sum() < 2:
+        return None
+    seg_h, seg_p = seg_h[keep], seg_p[keep]
+    drop = float(seg_p[0] - seg_p[-1])
+    p_abs = float(seg_p[-1]) + dr.ATM
+    up = max(drop, 0.0) / 4.0
+    recent = seg_h >= seg_h[-1] - RECENT_HR
+    slope, r2 = dr._slope(seg_h[recent], seg_p[recent]) if recent.sum() >= 3 else (None, None)
+    recent_drop = float(seg_p[recent][0] - seg_p[recent][-1]) if recent.sum() >= 2 else 0.0
+    mm = lambda kgf: None if kgf is None else round(
+        1000.0 * dr.moles_from_pressure(kgf, dr.HEADSPACE_L, temp_c), 3)
+    out = {
+        # 淨降從補氣後 SKIP_MIN 起算，不是從補氣瞬間；畫面要把起算值一起列出，
+        # 否則「起點 − 目前 ≠ 淨降」會讓人以為算錯。
+        'p_from': float(seg_p[0]),
+        'net_drop_kgf': round(drop, 4),
+        'co2_consumed_upper_kgf': round(up, 5),
+        'ch4_frac_upper': round(up / p_abs, 4) if p_abs > 0 else None,
+        'co2_consumed_upper_mmol': mm(up),
+        'rate_upper_kgf_hr': None if slope is None else round(slope / 4.0, 5),
+        'rate_upper_mmol_hr': None if slope is None else mm(slope / 4.0),
+        'recent_hr': RECENT_HR,
+        # 最近 3 小時壓力變化不到 3 個量化階時，斜率主要是量化雜訊
+        'recent_below_quantum': abs(recent_drop) < 3 * dr.QUANT,
+        'headspace_l': dr.HEADSPACE_L,
+        'measured_ratio_range': [0.17, 0.22],
+        'bio_rate_kgf_hr': None, 'bio_rate_mmol_hr': None,
+    }
+    if est and est.get('screened') and est.get('rb') is not None:
+        out['bio_rate_kgf_hr'] = round(est['rb'] / 4.0, 6)
+        out['bio_rate_mmol_hr'] = mm(est['rb'] / 4.0)
+    return out
+
+
 def current(station='default', lookback_hr=48):
     """進行中那段的暫定狀態。⚠ 數字會隨時間變，不入表。"""
     latest = _latest_ts(station)
@@ -173,6 +224,7 @@ def current(station='default', lookback_hr=48):
         'provisional': True,
         'estimate': None,
         'why_no_estimate': None,
+        'stoich': _stoich(seg_h, seg_p, None),   # 上限一開始就能算；r_b 要等滿 4 小時
     }
     if seg_h[-1] < ce.MIN_HR:
         out['why_no_estimate'] = '這段才 %.1f 小時，未滿 %.0f 小時不估計' % (
@@ -184,6 +236,7 @@ def current(station='default', lookback_hr=48):
         return out
     out['curvature'] = est.get('curvature')
     out['screened'] = est.get('screened')
+    out['stoich'] = _stoich(seg_h, seg_p, est)
     if not est.get('screened'):
         out['why_no_estimate'] = ('曲率 %.2f 未達 %.2f：目前這段太直，物理與生物'
                                   '兩項分不開（論文 Algorithm 1 第 2 行）'

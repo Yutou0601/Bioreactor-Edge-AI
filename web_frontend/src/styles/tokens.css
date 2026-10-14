@@ -1,0 +1,35 @@
+/* 全站色票（深色）。圖表用 getComputedStyle 讀同一組變數，畫面與圖不會各說各話。
+ *
+ * 數值取自 dataviz 參考色票的深色欄，並以 validate_palette.js 驗過：
+ *   series-1 / series-2（#3987e5 / #d95926）深色模式全數通過，
+ *   色盲模擬最差 ΔE 26.8、一般視覺 31.8、兩者對表面皆 ≥ 3:1。
+ * 狀態色（good/warning/critical）只用在「意思就是好壞」的地方，而且一律配圖示＋文字，
+ * 不拿來當第 N 條數列。
+ *
+ * ⚠ 不載入網頁字型。監控電腦不連外網，Google 字型本來就載不到（退回系統字型）；
+ *   而且那是上百個切片檔，有網路時反而吃記憶體。直接用系統字型，離線連線一個樣。
+ */
+:root {
+  color-scheme: dark;
+  --page:           #0d0d0d;
+  --surface-1:      #1a1a19;
+  --surface-2:      #222220;
+  --text-primary:   #f0efec;
+  --text-secondary: #c3c2b7;
+  --text-muted:     #898781;
+  --grid:           #2c2c2a;
+  --axis:           #383835;
+  --border:         rgba(255, 255, 255, 0.10);
+
+  --series-1:       #3987e5;   /* 反應槽壓力、單一數列 */
+  --series-2:       #d95926;   /* 混合槽壓力 */
+
+  --good:           #0ca30c;
+  --warning:        #fab219;
+  --critical:       #d03b3b;
+
+  --font: system-ui, -apple-system, "Segoe UI", "Microsoft JhengHei", "PingFang TC", sans-serif;
+}
+
+*, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+html, body { background: var(--page); color: var(--text-primary); font-family: var(--font); }

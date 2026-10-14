@@ -7,40 +7,33 @@ import { RouterView, RouterLink } from 'vue-router'
     <nav class="page-nav">
       <span class="nav-brand">BTP 監測系統</span>
       <RouterLink to="/">即時監控</RouterLink>
+      <RouterLink to="/cycles">循環分析</RouterLink>
       <RouterLink to="/experiment">實驗批次</RouterLink>
-      <RouterLink to="/report">研究分析</RouterLink>
-      <RouterLink to="/rate">生物速率</RouterLink>
-      <RouterLink to="/import">資料匯入</RouterLink>
-      <RouterLink to="/descent">下降報表</RouterLink>
-      <RouterLink to="/modules">分析模組</RouterLink>
+      <RouterLink to="/system">系統狀態</RouterLink>
     </nav>
     <RouterView />
   </div>
 </template>
 
-<style>
-@import url('https://fonts.googleapis.com/css2?family=Noto+Sans+TC:wght@400;500;700&display=swap');
-*, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
-html, body { background: #0d0d0d; color: #e0e0e0; }
-</style>
-
 <style scoped>
-.shell { min-height: 100vh; font-family: 'Noto Sans TC', sans-serif; }
+.shell { min-height: 100vh; }
 .page-nav {
-  display: flex; align-items: center; gap: 4px;
-  background: #111; border-bottom: 1px solid #1e1e1e;
-  padding: 0 1.25rem; height: 40px;
+  display: flex; align-items: center; gap: 4px; flex-wrap: wrap;
+  background: var(--surface-1); border-bottom: 1px solid var(--border);
+  padding: 0 16px; min-height: 44px;
 }
 .nav-brand {
-  font-size: 0.8rem; font-weight: 700; color: #333;
+  font-size: 0.82rem; font-weight: 700; color: var(--text-muted);
   margin-right: 16px; letter-spacing: 0.05em;
 }
 .page-nav a {
-  color: #555; text-decoration: none; font-size: 0.82rem;
-  padding: 4px 12px; border-radius: 4px; transition: all 0.15s;
+  color: var(--text-secondary); text-decoration: none; font-size: 0.88rem;
+  padding: 6px 14px; border-radius: 4px;
 }
-.page-nav a:hover { color: #999; background: #1a1a1a; }
-.page-nav a.router-link-active {
-  color: #3498db; background: rgba(52,152,219,0.1);
+.page-nav a:hover { color: var(--text-primary); background: var(--surface-2); }
+.page-nav a.router-link-exact-active,
+.page-nav a.router-link-active:not([href="/"]) {
+  color: var(--text-primary); background: var(--surface-2);
+  box-shadow: inset 0 -2px 0 var(--series-1);
 }
 </style>
