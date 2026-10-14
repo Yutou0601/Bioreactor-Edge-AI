@@ -437,10 +437,12 @@ class Launcher:
             if sys.platform == 'win32' else 0
         try:
             # ⚠ 導向檔案，不可用 PIPE：uvicorn 持續寫 log，沒人讀會卡死。
+            # ⚠ 只聽 127.0.0.1：API 沒有身分驗證，聽 0.0.0.0 的話接在這台的
+            #   Jetson 能不經 SSH 直接呼叫刪除端點。遠端看網頁走 SSH 通道。
             fh = open(LOGFILE, 'w', encoding='utf-8', errors='replace')
             self.proc = subprocess.Popen(
                 [py, '-m', 'uvicorn', 'main:app',
-                 '--host', '0.0.0.0', '--port', str(PORT)],
+                 '--host', '127.0.0.1', '--port', str(PORT)],
                 cwd=BACKEND, creationflags=flags,
                 stdout=fh, stderr=subprocess.STDOUT)
         except OSError as e:

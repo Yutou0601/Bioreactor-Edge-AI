@@ -133,4 +133,10 @@ if os.path.isdir(_DIST):
 
 if __name__ == "__main__":
     import uvicorn
-    uvicorn.run(app, host="0.0.0.0", port=8000)
+    from core import config
+    # ⚠ 只聽 REACTOR_HOST（預設 127.0.0.1），不可寫死 0.0.0.0。API 沒有身分
+    #   驗證、還有刪除紀錄的端點；聽在所有介面上，接著監控電腦的 Jetson 就能
+    #   不經 SSH 直接呼叫它（2026-10-14 實測 HTTP 200）。遠端要看網頁一律走
+    #   SSH 通道，見 deploy/monitor_ssh_setup.ps1。
+    uvicorn.run(app, host=config.get('REACTOR_HOST'),
+                port=int(config.get('REACTOR_PORT')))
