@@ -499,7 +499,7 @@ def _analysis_runs() -> list:
     """分析用的批次清單。**沒有建任何批次時，退回一個涵蓋全部資料的虛擬批次。**
 
     ⚠ 2026-10-15 現場回報：匯入了 2/10～3/27 的資料、圖上看得到完整循環，但
-      共變數與灰箱一律回「沒有完整循環」——因為兩者只看批次時間窗內的資料，
+      共變數（與當時的灰箱）分析一律回「沒有完整循環」——因為只看批次時間窗內的資料，
       而使用者沒有建批次。對使用者而言那等於「功能壞了」。
     虛擬批次的 n_minutes 是 0（未知）：共變數分析遇到單一 n 值本來就會把它
       從迴歸剔除，不會被當成真的「每小時 0 分鐘」。
@@ -535,44 +535,6 @@ def all_cycles() -> list:
         for cy in compute_cycles(run):
             rows.append({"run_id": run["run_id"], "n_minutes": run["n_minutes"], **cy})
     return rows
-
-
-def complete_cycle_trajectories() -> list:
-    """取出所有『完整循環』的壓力軌跡（給灰箱機理分析擬合用）。
-    每個循環回傳其補氣後高點到下次補氣前的逐分鐘壓力序列 + 中繼資訊。
-    只取完整循環——殘段/記錄中斷的軌跡形狀不可信，不能拿去擬合機理模型。"""
-    out = []
-    for run in _analysis_runs():                # 沒有批次時用全部資料
-        recs = _records_between(run["start_time"], run.get("end_time"))
-        if len(recs) < 10:
-            continue
-        p, orp, ph, ts, refills, gaps, starts = _segment(recs)
-        base_p = float(run.get("baseline_pressure") or 0.0)
-        head_complete = base_p > 0 and abs(p[0] - base_p) <= REFILL_JUMP
-        for k, a in enumerate(starts):
-            b = starts[k + 1] if k + 1 < len(starts) else len(recs)
-            if b - a < 6:
-                continue
-            started = (a in refills and a not in gaps) if a > 0 else head_complete
-            ended = b < len(recs) and b in refills and b not in gaps
-            if not (started and ended):        # 只要完整循環
-                continue
-            # 只取下降段 [段首→谷底]，剪掉下一次補氣的上升邊（與 compute_cycles 一致）。
-            # 否則緩升補氣的上升邊會混進軌跡，讓灰箱把「真下降+回升」誤讀成快慢兩群、
-            # 產生假的暫態/穩態對比。
-            tro = a + int(min(range(b - a), key=lambda j: p[a + j]))
-            if tro - a < 5:                        # 下降段太短，形狀不足以擬合
-                continue
-            dt_min = (ts[a + 1] - ts[a]).total_seconds() / 60.0 or 1.0
-            out.append({
-                "run_id":     run["run_id"],
-                "n_minutes":  run["n_minutes"],
-                "start":      recs[a]["timestamp"][:16],
-                "pressure":   [round(v, 4) for v in p[a:tro + 1]],
-                "dt_min":     round(dt_min, 2),
-                "baseline_p": round(base_p, 4) if base_p else round(p[a], 4),
-            })
-    return out
 
 
 def get_live_status(run_id: str) -> dict:

@@ -162,6 +162,12 @@ if os.path.isdir(_DIST):
     @app.get("/{full_path:path}", include_in_schema=False)
     def _spa(full_path: str):
         """未命中 /api 與 /assets 的路徑，一律交給前端 router。"""
+        # ⚠ /api/ 底下不存在的路徑要回 404，不能回 index.html：否則打錯或已移除的端點
+        #   （例如 2026-10-15 移除的 /api/greybox_analysis）會拿到 HTTP 200 與一頁 HTML，
+        #   呼叫端以為成功、解析 JSON 才炸，很難查。
+        if full_path == 'api' or full_path.startswith('api/'):
+            from fastapi import HTTPException
+            raise HTTPException(status_code=404, detail='沒有這個 API：/%s' % full_path)
         candidate = os.path.join(_DIST, full_path)
         if full_path and os.path.isfile(candidate):
             return FileResponse(candidate)          # favicon 等實體檔

@@ -86,7 +86,7 @@ need = [('fastapi', 'API 框架'), ('uvicorn', 'HTTP 伺服器'),
         ('numpy', '估計器')]
 if IS_COMPUTE:
     # 這台的工作就是把重的東西熱著，所以它們是**必要**的，不是違規的。
-    need += [('scipy', 'covariate / greybox'),
+    need += [('scipy', 'covariate'),
              ('pandas', 'covariate'),
              ('sklearn', 'ch4_attribution'),
              ('joblib', '模型序列化')]

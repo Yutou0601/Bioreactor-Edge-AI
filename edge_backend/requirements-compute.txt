@@ -27,10 +27,10 @@ pydantic>=2.6.3
 python-multipart>=0.0.9   # /api/import_csv 檔案上傳
 openpyxl>=3.1.0           # 實驗批次報表匯出（xlsx）
 
-# 三個分析模組實際用到的
+# 分析模組實際用到的
 numpy>=1.24.4
 pandas>=2.2.1           # covariate
-scipy>=1.11             # covariate、greybox
+scipy>=1.11             # covariate（greybox 已於 2026-10-15 移除）
 scikit-learn>=1.4.1
 joblib>=1.3.2
 

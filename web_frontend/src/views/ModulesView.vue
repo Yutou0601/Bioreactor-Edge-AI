@@ -59,7 +59,7 @@ async function runNow (m) {
   runMsg.value  = { ...runMsg.value, [m.name]: '' }
   try {
     // ⚠ 這個端點是**同步**的：它等子行程跑完才回應，最久可到模組宣告的
-    //   timeout_s（灰箱是 300 秒）。apiClient 預設 8 秒會在模組還在算的
+    //   timeout_s（最慢的模組可達數分鐘）。apiClient 預設 8 秒會在模組還在算的
     //   時候就報逾時，畫面顯示失敗但後端其實跑得好好的。
     const budget = ((m.timeout_s || 300) + 15) * 1000
     const { data } = await apiClient.post(`/modules/${m.name}/run`, null,

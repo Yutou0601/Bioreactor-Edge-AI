@@ -456,41 +456,8 @@ def covariate_analysis():
     return out
 
 
-# ==========================================
-# 通道 8：灰箱機理分析（可分離度就緒指標）
-# ==========================================
-@router.get("/greybox_analysis")
-def greybox_analysis():
-    """對真實完整循環軌跡跑灰箱兩狀態模型，回報「可分離度就緒」：
-    穩態資料下物理速率 kLa 不可辨識 → 尚不可分離（需暫態/對照）；
-    含暫態時 kLa 可辨識 → 可進行溶解/生物分離。
-
-    比關聯分析慢（profile likelihood），但已限制只擬合最像暫態的少數循環，數秒內完成。
-    這回答的是「你收集到的資料夠不夠分離」，是機理路線的就緒指標。
-
-    ⚠ 2026-09-10 改為模組（modules/greybox/），不再於請求中即時計算。
-    scipy 光磁碟就 109 MB，而 profile likelihood 要跑數秒——放在請求路徑上
-    等於用常駐記憶體換一個沒人在等的數字。現在每 180 分鐘以子行程跑一次。
-    要立刻重算：POST /api/modules/greybox/run。
-    """
-    from core import module_runner as mr
-    got = mr.last_result("greybox")
-    if got.get("status") == "never_run":
-        return {"status": "never_run",
-                "message": "這項分析尚未跑過。它每 180 分鐘自動更新一次；"
-                           "要立刻重算請呼叫 POST /api/modules/greybox/run。"}
-    if got.get("status") != "ok":
-        return {"status": got.get("status"), "message": "模組尚無結果。"}
-    row = got["result"]
-    out = dict(row.get("payload") or {})
-    out["computed_at"] = row.get("computed_at")
-    out["module_version"] = row.get("module_version")
-    if out.get("status") == "insufficient" and not out.get("message"):
-        out["message"] = _why_no_cycles()
-    # 這次結果用的是批次內資料還是全部資料（沒建批次時自動用全部）——
-    # ⚠ 這是「現在」的範圍；結果若是在匯入新資料前算的，computed_at 會比較舊。
-    out["scope"] = exp.analysis_scope()
-    return out
+# 通道 8（灰箱機理分析）已於 2026-10-15 移除：它回報的「物理／生物可分離比例」與
+# 2026-09-21 的研究結論相衝突（壓力軌跡形狀分不出份額、曲率分離法作廢）。
 
 
 @router.get("/analysis")

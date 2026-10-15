@@ -193,11 +193,6 @@ def _provide_all_cycles():
     return [r for r in exp.all_cycles() if r.get('complete')]
 
 
-def _provide_cycle_trajectories():
-    from core import experiment_store as exp
-    return exp.complete_cycle_trajectories()
-
-
 def _provide_ch4_training_set():
     """CH4 峰值模型的訓練集（X, y）與其指紋。
 
@@ -223,8 +218,6 @@ def _provide_ch4_training_set():
 _INPUT_PROVIDERS = {
     # 每列一個完整循環的特徵（drop_rate、pre_injection_orp、n_minutes…）
     'complete_cycles': _provide_all_cycles,
-    # 每個完整循環的壓力軌跡，供灰箱擬合
-    'cycle_trajectories': _provide_cycle_trajectories,
     # CH4 峰值模型的訓練集，供特徵歸因
     'ch4_training_set': _provide_ch4_training_set,
 }
