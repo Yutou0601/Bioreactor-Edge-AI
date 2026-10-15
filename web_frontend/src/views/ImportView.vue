@@ -14,6 +14,8 @@
  */
 import { ref, computed, onMounted, onUnmounted, nextTick } from 'vue'
 import echarts from '../lib/echarts'
+import { onThemeChange } from '../lib/theme'
+const _css = n => getComputedStyle(document.documentElement).getPropertyValue(n).trim()
 import apiClient from '../services/apiClient'
 
 const files      = ref([])          // 選到的檔案
@@ -29,9 +31,10 @@ const chartRef   = ref(null)
 let chart = null
 
 const SIGNALS = [
-  { key: 'pressure', label: '反應器壓力', unit: 'kg/cm²', color: '#3a7bd5' },
-  { key: 'orp',      label: 'ORP',        unit: 'mV',     color: '#7d5ba6' },
-  { key: 'ph',       label: 'pH',         unit: '',       color: '#4caf82' },
+  // 單一數列的圖一律用 series-1（色票見 styles/tokens.css；繪製當下讀，日間／夜間才會跟著變）
+  { key: 'pressure', label: '反應器壓力', unit: 'kg/cm²' },
+  { key: 'orp',      label: 'ORP',        unit: 'mV' },
+  { key: 'ph',       label: 'pH',         unit: '' },
 ]
 const meta = computed(() => SIGNALS.find(s => s.key === signal.value))
 
@@ -94,13 +97,14 @@ function draw() {
   const w = wave.value
   if (!chartRef.value || !w || w.status !== 'ok') return
   if (!chart) chart = echarts.init(chartRef.value, null, { renderer: 'canvas' })
+  const ink = _css('--text-primary'), muted = _css('--text-muted'), axis = _css('--axis'), grid = _css('--grid')
 
   // 循環邊界疊在波形上：通過預篩的用實線，被篩掉的用淡虛線。
   // 看得出「哪幾段沒被採用」跟看得出速率一樣重要。
   const marks = (w.cycles || []).map(c => ({
     xAxis: c.start,
     lineStyle: {
-      color: c.screened ? '#c0392b' : '#bbb',
+      color: c.screened ? ink : muted,
       width: c.screened ? 1.2 : 1,
       type: c.screened ? 'solid' : 'dashed',
     },
@@ -108,16 +112,19 @@ function draw() {
 
   chart.setOption({
     grid: { left: 58, right: 20, top: 28, bottom: 58 },
-    tooltip: { trigger: 'axis' },
+    textStyle: { fontFamily: _css('--font') },
+    tooltip: { trigger: 'axis', backgroundColor: _css('--surface-2'), borderColor: _css('--border'), textStyle: { color: ink } },
     xAxis: {
       type: 'category',
       data: w.series.map(p => p.t),
-      axisLabel: { formatter: v => (v || '').slice(5, 16), fontSize: 10 },
+      axisLabel: { formatter: v => (v || '').slice(5, 16), fontSize: 10, color: muted },
+      axisLine: { lineStyle: { color: axis } },
     },
     yAxis: {
       type: 'value', scale: true,
-      name: meta.value.unit, nameTextStyle: { fontSize: 10 },
-      axisLabel: { fontSize: 10 },
+      name: meta.value.unit, nameTextStyle: { fontSize: 10, color: muted },
+      axisLabel: { fontSize: 10, color: muted },
+      splitLine: { lineStyle: { color: grid } },
     },
     dataZoom: [
       { type: 'inside' },
@@ -126,7 +133,7 @@ function draw() {
     series: [{
       type: 'line', showSymbol: false, smooth: false,
       sampling: 'lttb',
-      lineStyle: { width: 1.1, color: meta.value.color },
+      lineStyle: { width: 2, color: _css('--series-1') },
       data: w.series.map(p => p.v),
       markLine: {
         silent: true, symbol: 'none',
@@ -138,8 +145,10 @@ function draw() {
 }
 
 function onResize() { chart && chart.resize() }
-onMounted(() => { window.addEventListener('resize', onResize); loadWave() })
+let offTheme = null
+onMounted(() => { window.addEventListener('resize', onResize); loadWave(); offTheme = onThemeChange(draw) })
 onUnmounted(() => {
+  offTheme?.()
   window.removeEventListener('resize', onResize)
   chart && chart.dispose(); chart = null
 })
@@ -317,86 +326,86 @@ const USE_META = {
 <style scoped>
 .page { padding: 1.2rem 1.4rem 2.4rem; max-width: 1180px; margin: 0 auto; }
 .head h1 { font-size: 1.28rem; margin: 0 0 2px; font-weight: 650; }
-.head h1 small { font-size: .74rem; color: #8a8a8a; font-weight: 400; margin-left: 8px; }
-.sub { margin: 0 0 1.1rem; font-size: .78rem; color: #777; }
+.head h1 small { font-size: .74rem; color: var(--text-secondary); font-weight: 400; margin-left: 8px; }
+.sub { margin: 0 0 1.1rem; font-size: .78rem; color: var(--text-muted); }
 
-.panel { background: #fff; border: 1px solid #e6e6e6; border-radius: 7px;
+.panel { background: var(--surface-2); border: 1px solid var(--axis); border-radius: 7px;
          padding: 14px 16px; margin-bottom: 1rem; }
 
 .picker { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; }
 .file-in { font-size: .78rem; flex: 1; min-width: 240px; }
 .btn { padding: 7px 15px; border-radius: 5px; font-size: .8rem;
        cursor: pointer; border: 1px solid transparent; }
-.btn.primary { background: #3a7bd5; color: #fff; }
-.btn.primary:disabled { background: #b9c9e2; cursor: not-allowed; }
-.btn.ghost { background: #fff; border-color: #d5d5d5; color: #555; }
+.btn.primary { background: var(--series-1); color: var(--text-primary); }
+.btn.primary:disabled { background: var(--series-1); cursor: not-allowed; }
+.btn.ghost { background: var(--surface-2); border-color: var(--axis); color: var(--text-muted); }
 
 .filelist { margin-top: 11px; font-size: .74rem; }
-.fl-head { color: #666; margin-bottom: 5px; }
+.fl-head { color: var(--text-muted); margin-bottom: 5px; }
 .filelist ul { list-style: none; margin: 0; padding: 0;
                max-height: 168px; overflow-y: auto; }
 .filelist li { display: flex; justify-content: space-between;
-               padding: 2px 6px; border-bottom: 1px solid #f4f4f4; }
-.fn { color: #444; font-family: ui-monospace, Consolas, monospace; }
-.fs { color: #999; }
-.more { color: #999; padding: 4px 6px; }
+               padding: 2px 6px; border-bottom: 1px solid var(--axis); }
+.fn { color: var(--text-muted); font-family: ui-monospace, Consolas, monospace; }
+.fs { color: var(--text-secondary); }
+.more { color: var(--text-secondary); padding: 4px 6px; }
 
-.err { color: #b23; font-size: .78rem; margin: 8px 0 0; }
-.res { margin-top: 12px; padding: 10px 12px; background: #f7faf8;
-       border: 1px solid #d9e8df; border-radius: 5px; font-size: .76rem; }
+.err { color: var(--critical); font-size: .78rem; margin: 8px 0 0; }
+.res { margin-top: 12px; padding: 10px 12px; background: var(--surface-2);
+       border: 1px solid var(--axis); border-radius: 5px; font-size: .76rem; }
 .res-top { margin-bottom: 6px; }
 .res-list { list-style: none; margin: 0; padding: 0;
             max-height: 190px; overflow-y: auto; }
 .res-list li { display: flex; justify-content: space-between; padding: 2px 0; }
-.res-list li.bad { color: #b23; }
-.ok { color: #2f6b45; }
-.bad { color: #b23; }
+.res-list li.bad { color: var(--critical); }
+.ok { color: var(--good); }
+.bad { color: var(--critical); }
 
 .wave-head { display: flex; justify-content: space-between;
              align-items: center; flex-wrap: wrap; gap: 8px; margin-bottom: 8px; }
 .tabs { display: flex; gap: 5px; }
-.tab { padding: 5px 13px; border-radius: 4px; border: 1px solid #ddd;
-       background: #fff; font-size: .76rem; cursor: pointer; color: #555; }
-.tab.on { background: #3a7bd5; border-color: #3a7bd5; color: #fff; }
-.wave-meta { font-size: .72rem; color: #888; }
-.dim { color: #aaa; }
+.tab { padding: 5px 13px; border-radius: 4px; border: 1px solid var(--axis);
+       background: var(--surface-2); font-size: .76rem; cursor: pointer; color: var(--text-muted); }
+.tab.on { background: var(--series-1); border-color: var(--series-1); color: var(--text-primary); }
+.wave-meta { font-size: .72rem; color: var(--text-secondary); }
+.dim { color: var(--text-secondary); }
 .chart { width: 100%; height: 320px; }
 
-.legend { font-size: .7rem; color: #777; margin: 6px 0 0;
+.legend { font-size: .7rem; color: var(--text-muted); margin: 6px 0 0;
           display: flex; align-items: center; gap: 7px; flex-wrap: wrap; }
 .k { display: inline-block; width: 16px; height: 0; }
-.k.solid  { border-top: 1.5px solid #c0392b; }
-.k.dashed { border-top: 1.5px dashed #bbb; }
-.legend .note { color: #999; margin-left: 6px; }
+.k.solid  { border-top: 1.5px solid var(--critical); }
+.k.dashed { border-top: 1.5px dashed var(--axis); }
+.legend .note { color: var(--text-secondary); margin-left: 6px; }
 
 .cards { display: grid; grid-template-columns: repeat(auto-fit, minmax(168px, 1fr));
          gap: 10px; margin-bottom: 10px; }
-.card { border: 1px solid #eee; border-radius: 6px; padding: 10px 12px; }
-.lab { font-size: .7rem; color: #888; }
+.card { border: 1px solid var(--axis); border-radius: 6px; padding: 10px 12px; }
+.lab { font-size: .7rem; color: var(--text-secondary); }
 .val { font-size: 1.22rem; font-weight: 620; margin: 2px 0; }
-.val.dim { color: #bbb; }
-.unit { font-size: .68rem; color: #999; }
-.u-ok   { color: #2f6b45; }
-.u-warn { color: #86682a; }
-.u-bad  { color: #93392f; }
+.val.dim { color: var(--text-secondary); }
+.unit { font-size: .68rem; color: var(--text-secondary); }
+.u-ok   { color: var(--good); }
+.u-warn { color: var(--warning); }
+.u-bad  { color: var(--critical); }
 
 .usenote { font-size: .74rem; line-height: 1.65; padding: 9px 12px;
            border-radius: 5px; margin: 0 0 12px; }
-.usenote.u-ok   { background: #eef8f1; border: 1px solid #bfe0c9; }
-.usenote.u-warn { background: #fdf6e6; border: 1px solid #e6d29a; }
-.usenote.u-bad  { background: #fceceb; border: 1px solid #e5b8b4; }
+.usenote.u-ok   { background: var(--surface-2); border: 1px solid var(--good); }
+.usenote.u-warn { background: var(--surface-2); border: 1px solid var(--warning); }
+.usenote.u-bad  { background: var(--surface-2); border: 1px solid var(--critical); }
 
 .table-wrap { overflow-x: auto; }
 table { width: 100%; border-collapse: collapse; font-size: .74rem; }
-th { text-align: left; padding: 6px 8px; border-bottom: 2px solid #eee;
-     color: #666; font-weight: 600; }
-td { padding: 5px 8px; border-bottom: 1px solid #f4f4f4; }
-tr.dropped { color: #aaa; background: #fcfcfc; }
+th { text-align: left; padding: 6px 8px; border-bottom: 2px solid var(--axis);
+     color: var(--text-muted); font-weight: 600; }
+td { padding: 5px 8px; border-bottom: 1px solid var(--axis); }
+tr.dropped { color: var(--text-secondary); background: var(--surface-2); }
 .mono { font-family: ui-monospace, Consolas, monospace; }
-.neg { color: #c0392b; font-weight: 600; }
+.neg { color: var(--critical); font-weight: 600; }
 .badge { font-size: .66rem; padding: 1px 7px; border-radius: 9px; }
-.badge.ok { background: #eef8f1; color: #2f6b45; }
-.badge.no { background: #f1f1f1; color: #999; }
-.tblnote { font-size: .7rem; color: #777; margin: 8px 0 0; line-height: 1.6; }
-.empty { color: #888; font-size: .8rem; text-align: center; padding: 2rem; }
+.badge.ok { background: var(--surface-2); color: var(--good); }
+.badge.no { background: var(--surface-2); color: var(--text-secondary); }
+.tblnote { font-size: .7rem; color: var(--text-muted); margin: 8px 0 0; line-height: 1.6; }
+.empty { color: var(--text-secondary); font-size: .8rem; text-align: center; padding: 2rem; }
 </style>

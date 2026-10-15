@@ -214,38 +214,38 @@ onMounted(refresh)
 </template>
 
 <style scoped>
-.wrap { padding: 1.5rem; max-width: 1000px; margin: 0 auto; color: #ccc; }
+.wrap { padding: 1.5rem; max-width: 1000px; margin: 0 auto; color: var(--text-primary); }
 .head { display: flex; justify-content: space-between; align-items: flex-start; gap: 1rem; }
-h1 { font-size: 1.1rem; color: #e8e8e8; font-weight: 600; }
-.sub { font-size: 0.78rem; color: #777; margin-top: 4px; max-width: 62ch; line-height: 1.6; }
-.sched { font-size: 0.74rem; color: #666; margin: 0.75rem 0 1rem; }
-.busy { color: #d9a441; }
+h1 { font-size: 1.1rem; color: var(--text-primary); font-weight: 600; }
+.sub { font-size: 0.78rem; color: var(--text-muted); margin-top: 4px; max-width: 62ch; line-height: 1.6; }
+.sched { font-size: 0.74rem; color: var(--text-muted); margin: 0.75rem 0 1rem; }
+.busy { color: var(--warning); }
 .card {
-  border: 1px solid #1e1e1e; border-radius: 6px; background: #111;
+  border: 1px solid var(--border); border-radius: 6px; background: var(--surface-1);
   padding: 1rem 1.1rem; margin-bottom: 0.9rem;
 }
-.card.broken { border-color: #4a2020; }
+.card.broken { border-color: var(--border); }
 .card-head { display: flex; justify-content: space-between; align-items: flex-start; gap: 1rem; }
-h2 { font-size: 0.92rem; color: #e0e0e0; font-weight: 600; }
-.meta { font-size: 0.72rem; color: #666; margin-top: 3px; }
-.desc { font-size: 0.78rem; color: #8a8a8a; margin-top: 0.5rem; line-height: 1.6; }
-.stamp { font-size: 0.72rem; color: #666; margin: 0.7rem 0 0.4rem; }
-.runmsg { font-size: 0.74rem; color: #3498db; margin-top: 0.5rem; }
-.note { font-size: 0.78rem; color: #777; margin-top: 0.6rem; }
-.err { font-size: 0.76rem; color: #c0623a; margin-top: 0.6rem; line-height: 1.6; }
-.log { display: block; color: #6a6a6a; font-size: 0.68rem; margin-top: 4px;
+h2 { font-size: 0.92rem; color: var(--text-primary); font-weight: 600; }
+.meta { font-size: 0.72rem; color: var(--text-muted); margin-top: 3px; }
+.desc { font-size: 0.78rem; color: var(--text-secondary); margin-top: 0.5rem; line-height: 1.6; }
+.stamp { font-size: 0.72rem; color: var(--text-muted); margin: 0.7rem 0 0.4rem; }
+.runmsg { font-size: 0.74rem; color: var(--series-1); margin-top: 0.5rem; }
+.note { font-size: 0.78rem; color: var(--text-muted); margin-top: 0.6rem; }
+.err { font-size: 0.76rem; color: var(--series-2); margin-top: 0.6rem; line-height: 1.6; }
+.log { display: block; color: var(--text-muted); font-size: 0.68rem; margin-top: 4px;
        white-space: pre-wrap; word-break: break-all; }
-code { background: #191919; padding: 1px 5px; border-radius: 3px; font-size: 0.72rem; }
+code { background: var(--surface-2); padding: 1px 5px; border-radius: 3px; font-size: 0.72rem; }
 table { width: 100%; border-collapse: collapse; margin-top: 0.3rem; }
 th, td { text-align: left; padding: 5px 8px; font-size: 0.76rem;
-         border-bottom: 1px solid #191919; }
-th { color: #777; font-weight: 400; width: 42%; }
-td { color: #d0d0d0; font-variant-numeric: tabular-nums; }
+         border-bottom: 1px solid var(--border); }
+th { color: var(--text-muted); font-weight: 400; width: 42%; }
+td { color: var(--text-primary); font-variant-numeric: tabular-nums; }
 button { font-family: inherit; cursor: pointer; border-radius: 4px;
          font-size: 0.75rem; padding: 5px 12px; transition: all 0.15s; }
-.run { background: rgba(52,152,219,0.12); color: #3498db; border: 1px solid #23394a; }
-.run:hover:not(:disabled) { background: rgba(52,152,219,0.2); }
-.ghost { background: #161616; color: #888; border: 1px solid #242424; }
-.ghost:hover:not(:disabled) { color: #bbb; }
+.run { background: color-mix(in srgb, var(--series-1) 12%, transparent); color: var(--series-1); border: 1px solid var(--border); }
+.run:hover:not(:disabled) { background: color-mix(in srgb, var(--series-1) 20%, transparent); }
+.ghost { background: var(--surface-2); color: var(--text-secondary); border: 1px solid var(--border); }
+.ghost:hover:not(:disabled) { color: var(--text-secondary); }
 button:disabled { opacity: 0.5; cursor: default; }
 </style>

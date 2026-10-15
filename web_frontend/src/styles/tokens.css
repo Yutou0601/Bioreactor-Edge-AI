@@ -1,13 +1,19 @@
-/* 全站色票（深色）。圖表用 getComputedStyle 讀同一組變數，畫面與圖不會各說各話。
+/* 全站色票（夜間＋日間）。圖表用 getComputedStyle 讀同一組變數，畫面與圖不會各說各話；
+ * 切換主題時 lib/theme.js 會發出 'themechange'，有畫圖的元件收到就重畫。
  *
- * 數值取自 dataviz 參考色票的深色欄，並以 validate_palette.js 驗過：
- *   series-1 / series-2（#3987e5 / #d95926）深色模式全數通過，
- *   色盲模擬最差 ΔE 26.8、一般視覺 31.8、兩者對表面皆 ≥ 3:1。
- * 狀態色（good/warning/critical）只用在「意思就是好壞」的地方，而且一律配圖示＋文字，
- * 不拿來當第 N 條數列。
+ * 三種模式（lib/theme.js）：
+ *   自動 — 沒有 data-theme，跟著系統的 prefers-color-scheme
+ *   日間 — <html data-theme="light">
+ *   夜間 — <html data-theme="dark">
  *
- * ⚠ 不載入網頁字型。監控電腦不連外網，Google 字型本來就載不到（退回系統字型）；
- *   而且那是上百個切片檔，有網路時反而吃記憶體。直接用系統字型，離線連線一個樣。
+ * 數值取自 dataviz 參考色票，兩個模式各自以 validate_palette.js 驗過：
+ *   夜間 series-1..4（#3987e5 #d95926 #199e70 #c98500）全數通過，最差相鄰色盲 ΔE 8.4。
+ *   日間 series-1..4（#2a78d6 #eb6834 #1baf7a #eda100）全數通過，最差相鄰色盲 ΔE 9.1；
+ *     但 3、4 號對白底不到 3:1（2.74、2.11）→ 規格要求「看得到的標籤或表格」：
+ *     目前只用在 Jetson 溫度圖，該圖有圖例，下方有完整溫度表。
+ * 狀態色只用在「意思就是好壞」的地方，配圖示＋文字；日間的黃、綠調深一階（理由見日間區塊）。
+ *
+ * ⚠ 不載入網頁字型（監控電腦不連外網，且上百個切片檔吃記憶體）。
  */
 :root {
   color-scheme: dark;
@@ -23,14 +29,58 @@
 
   --series-1:       #3987e5;   /* 反應槽壓力、單一數列 */
   --series-2:       #d95926;   /* 混合槽壓力 */
-  --series-3:       #199e70;   /* 3、4 號只在多數列圖用（Jetson 溫度）；四色深色模式驗證通過， */
-  --series-4:       #c98500;   /* 最差相鄰色盲 ΔE 8.4（aqua↔yellow），因此一律附圖例。 */
+  --series-3:       #199e70;   /* 3、4 號只在多數列圖用（Jetson 溫度），一律附圖例 */
+  --series-4:       #c98500;
 
   --good:           #0ca30c;
   --warning:        #fab219;
   --critical:       #d03b3b;
 
   --font: system-ui, -apple-system, "Segoe UI", "Microsoft JhengHei", "PingFang TC", sans-serif;
+}
+
+/* 日間：明確選擇時 */
+:root[data-theme="light"] {
+  color-scheme: light;
+  --page:           #f9f9f7;
+  --surface-1:      #fcfcfb;
+  --surface-2:      #f0efec;
+  --text-primary:   #0b0b0b;
+  --text-secondary: #52514e;
+  --text-muted:     #6f6e69;   /* 參考色票 #898781 對白底只有 3.5:1，小字改深一階 */
+  --grid:           #e1e0d9;
+  --axis:           #c3c2b7;
+  --border:         rgba(11, 11, 11, 0.10);
+  --series-1:       #2a78d6;
+  --series-2:       #eb6834;
+  --series-3:       #1baf7a;
+  --series-4:       #eda100;
+  /* 狀態色在白底上當文字太淺（警示黃 #fab219 只有 1.8:1，截圖上那行字幾乎看不見）。
+     日間調深一階：黃 #9a6700、綠 #0a7f0a，皆約 5:1；紅 #d03b3b 本來就 4.7:1，不動。 */
+  --warning:        #9a6700;
+  --good:           #0a7f0a;
+}
+
+/* 日間：自動模式且系統是淺色時（數值與上面相同） */
+@media (prefers-color-scheme: light) {
+  :root:where(:not([data-theme="dark"])) {
+    color-scheme: light;
+    --page:           #f9f9f7;
+    --surface-1:      #fcfcfb;
+    --surface-2:      #f0efec;
+    --text-primary:   #0b0b0b;
+    --text-secondary: #52514e;
+    --text-muted:     #6f6e69;
+    --grid:           #e1e0d9;
+    --axis:           #c3c2b7;
+    --border:         rgba(11, 11, 11, 0.10);
+    --series-1:       #2a78d6;
+    --series-2:       #eb6834;
+    --series-3:       #1baf7a;
+    --series-4:       #eda100;
+    --warning:        #9a6700;
+    --good:           #0a7f0a;
+  }
 }
 
 *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }

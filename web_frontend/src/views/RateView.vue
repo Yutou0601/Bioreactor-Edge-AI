@@ -12,10 +12,27 @@
  */
 import { ref, onMounted, onUnmounted, nextTick } from 'vue'
 import echarts from '../lib/echarts'
-// 與 styles/tokens.css 同一組色票（圖表要的是實際色值，不能直接吃 CSS 變數）
+// 與 styles/tokens.css 同一組色票（圖表要的是實際色值，不能直接吃 CSS 變數）。
+// ⚠ 每次畫圖前重讀（refreshColors）：切換日間／夜間後，常數會停在舊主題的顏色。
+import { onThemeChange } from '../lib/theme'
 const _css = n => getComputedStyle(document.documentElement).getPropertyValue(n).trim()
-const SERIES_1 = _css('--series-1') || '#3987e5'
-const INK = _css('--text-primary') || '#f0efec'
+let SERIES_1, INK, MUTED, AX
+function refreshColors () {
+  SERIES_1 = _css('--series-1') || '#3987e5'
+  INK = _css('--text-primary') || '#f0efec'
+  MUTED = _css('--text-muted') || '#898781'
+  AX = {
+    xLabel: { color: MUTED, fontSize: 10 },
+    yLabel: { color: MUTED, fontSize: 10 },
+    splitLine: { lineStyle: { color: _css('--grid') } },
+    axisLine:  { lineStyle: { color: _css('--axis') } },
+    tooltip: {
+      backgroundColor: _css('--surface-2'),
+      borderColor: _css('--border'), borderWidth: 1,
+      textStyle: { color: INK, fontSize: 12 },
+    },
+  }
+}
 import apiClient from '../services/apiClient'
 
 const loading = ref(true)
@@ -27,18 +44,6 @@ const refSeries = ref(null)
 const refKHist  = ref(null)
 const refRbHist = ref(null)
 let charts = []
-
-const AX = {
-  xLabel: { color: '#8a8a8a', fontSize: 10 },
-  yLabel: { color: '#8a8a8a', fontSize: 10 },
-  splitLine: { lineStyle: { color: 'rgba(255,255,255,0.05)' } },
-  axisLine:  { lineStyle: { color: '#2a2a2a' } },
-  tooltip: {
-    backgroundColor: 'rgba(10,10,14,0.96)',
-    borderColor: '#222', borderWidth: 1,
-    textStyle: { color: '#ccc', fontSize: 12 },
-  },
-}
 
 function initChart(el) {
   const c = echarts.init(el, null, { renderer: 'canvas' })
@@ -86,7 +91,7 @@ function drawSeries () {
     },
     yAxis: {
       type: 'value', name: 'r_b  (kg/cm²/hr)',
-      nameTextStyle: { color: '#8a8a8a', fontSize: 10 },
+      nameTextStyle: { color: MUTED, fontSize: 10 },
       axisLabel: AX.yLabel, splitLine: AX.splitLine, axisLine: AX.axisLine,
     },
     series: [{
@@ -120,11 +125,11 @@ function drawKHist () {
       axisLabel: { ...AX.xLabel, interval: 3 }, axisLine: AX.axisLine,
       name: 'k̂  (/hr, 對數軸)',
       nameLocation: 'middle', nameGap: 28,
-      nameTextStyle: { color: '#8a8a8a', fontSize: 10 },
+      nameTextStyle: { color: MUTED, fontSize: 10 },
     },
     yAxis: {
       type: 'value', name: '段數',
-      nameTextStyle: { color: '#8a8a8a', fontSize: 10 },
+      nameTextStyle: { color: MUTED, fontSize: 10 },
       axisLabel: AX.yLabel, splitLine: AX.splitLine, axisLine: AX.axisLine,
     },
     series: [{ type: 'bar', data: h.counts, itemStyle: { color: SERIES_1, borderRadius: [4, 4, 0, 0] } }],
@@ -151,23 +156,30 @@ function drawRbHist () {
       axisLabel: { ...AX.xLabel, interval: 5 }, axisLine: AX.axisLine,
       name: 'r̂_b  (kg/cm²/hr, 未校準)',
       nameLocation: 'middle', nameGap: 28,
-      nameTextStyle: { color: '#8a8a8a', fontSize: 10 },
+      nameTextStyle: { color: MUTED, fontSize: 10 },
     },
     yAxis: {
       type: 'value', name: '段數',
-      nameTextStyle: { color: '#8a8a8a', fontSize: 10 },
+      nameTextStyle: { color: MUTED, fontSize: 10 },
       axisLabel: AX.yLabel, splitLine: AX.splitLine, axisLine: AX.axisLine,
     },
     series: [{
       type: 'bar', data: h.counts, itemStyle: { color: SERIES_1, borderRadius: [4, 4, 0, 0] },
       markLine: {
         silent: true, symbol: 'none',
-        label: { formatter: '零', color: '#888', fontSize: 10 },
-        lineStyle: { color: '#898781', width: 1, type: 'solid' },
+        label: { formatter: '零', color: MUTED, fontSize: 10 },
+        lineStyle: { color: MUTED, width: 1, type: 'solid' },
         data: [{ xAxis: h.centers.findIndex(v => v >= 0) }],
       },
     }],
   })
+}
+
+function redraw () {
+  refreshColors()
+  charts.forEach(x => x.dispose())
+  charts = []
+  if (cycles.value.length) { drawSeries(); drawKHist(); drawRbHist() }
 }
 
 async function load () {
@@ -181,9 +193,7 @@ async function load () {
     rate.value = r.data
     cycles.value = c.data
     await nextTick()
-    charts.forEach(x => x.dispose())
-    charts = []
-    if (cycles.value.length) { drawSeries(); drawKHist(); drawRbHist() }
+    redraw()
   } catch (e) {
     error.value = e?.message || String(e)
   } finally {
@@ -192,8 +202,10 @@ async function load () {
 }
 
 const onResize = () => charts.forEach(c => c.resize())
-onMounted(() => { load(); window.addEventListener('resize', onResize) })
+let offTheme = null
+onMounted(() => { load(); window.addEventListener('resize', onResize); offTheme = onThemeChange(redraw) })
 onUnmounted(() => {
+  offTheme?.()
   window.removeEventListener('resize', onResize)
   charts.forEach(c => c.dispose())
 })
@@ -309,29 +321,29 @@ onUnmounted(() => {
 .hdr {
   display: flex; justify-content: space-between; align-items: flex-start;
   padding-bottom: .9rem; margin-bottom: 1rem;
-  border-bottom: 1px solid #1e1e1e;
+  border-bottom: 1px solid var(--border);
 }
 h1 { font-size: 1.25rem; margin: 0; font-weight: 600; }
-h1 small { color: #7a7a7a; font-size: .8rem; font-weight: 400; margin-left: .5rem; }
-.sub { color: #6a6a6a; font-size: .8rem; margin: .35rem 0 0; }
+h1 small { color: var(--text-muted); font-size: .8rem; font-weight: 400; margin-left: .5rem; }
+.sub { color: var(--text-muted); font-size: .8rem; margin: .35rem 0 0; }
 .btn {
-  background: #1a1a1a; color: #ccc; border: 1px solid #2e2e2e;
+  background: var(--surface-2); color: var(--text-primary); border: 1px solid var(--border);
   border-radius: 4px; padding: .4rem .9rem; cursor: pointer; font-size: .82rem;
 }
 .btn:disabled { opacity: .5; cursor: default; }
-.err { color: #c0504d; font-size: .85rem; }
-.empty { color: #7a7a7a; font-size: .85rem; }
-.empty code { background: #161616; padding: .1rem .35rem; border-radius: 3px; }
+.err { color: var(--critical); font-size: .85rem; }
+.empty { color: var(--text-muted); font-size: .85rem; }
+.empty code { background: var(--surface-2); padding: .1rem .35rem; border-radius: 3px; }
 
 .cards { display: grid; grid-template-columns: repeat(4, 1fr); gap: .8rem; }
 .card {
-  background: #131313; border: 1px solid #1e1e1e; border-radius: 6px;
+  background: var(--surface-2); border: 1px solid var(--border); border-radius: 6px;
   padding: .85rem 1rem;
 }
-.lab  { color: #7a7a7a; font-size: .75rem; }
+.lab  { color: var(--text-muted); font-size: .75rem; }
 .val  { font-size: 1.5rem; font-weight: 600; margin: .25rem 0; }
-.val.dim, .dim { color: #8a8a8a; font-weight: 400; }
-.unit { color: #6a6a6a; font-size: .72rem; }
+.val.dim, .dim { color: var(--text-secondary); font-weight: 400; }
+.unit { color: var(--text-muted); font-size: .72rem; }
 
 .usability { margin: 0 0 1rem; padding: 9px 12px; border-radius: 5px;
              font-size: 0.78rem; line-height: 1.6; }
@@ -341,22 +353,22 @@ h1 small { color: #7a7a7a; font-size: .8rem; font-weight: 400; margin-left: .5re
 .unit .u-usable     { color: var(--good); }
 .unit .u-indicative { color: var(--warning); }
 .unit .u-unusable   { color: var(--critical); }
-.calib { color: #7a7a7a; font-size: .78rem; margin: .9rem 0 0; }
-.calib b { color: #a0a0a0; }
-.calib.warn { color: #c9a227; }
+.calib { color: var(--text-muted); font-size: .78rem; margin: .9rem 0 0; }
+.calib b { color: var(--text-secondary); }
+.calib.warn { color: var(--warning); }
 
 .charts {
   display: grid; grid-template-columns: 1fr 1fr; gap: .9rem; margin-top: 1rem;
 }
 .panel {
-  background: #131313; border: 1px solid #1e1e1e; border-radius: 6px;
+  background: var(--surface-2); border: 1px solid var(--border); border-radius: 6px;
   padding: .8rem .9rem;
 }
 .panel.wide { grid-column: 1 / -1; }
-.panel h3 { font-size: .85rem; margin: 0 0 .5rem; font-weight: 500; color: #c0c0c0; }
+.panel h3 { font-size: .85rem; margin: 0 0 .5rem; font-weight: 500; color: var(--text-secondary); }
 .chart { width: 100%; height: 220px; }
 .chart.tall { height: 280px; }
-.note { color: #6a6a6a; font-size: .72rem; margin: .5rem 0 0; }
+.note { color: var(--text-muted); font-size: .72rem; margin: .5rem 0 0; }
 
 @media (max-width: 900px) {
   .cards { grid-template-columns: repeat(2, 1fr); }

@@ -8,6 +8,7 @@
 import { ref, computed, onMounted, onBeforeUnmount, nextTick, watch } from 'vue'
 import echarts from '../lib/echarts'
 import api from '../services/apiClient'
+import { onThemeChange } from '../lib/theme'
 
 const POLL_MS = 30000
 const CHART_POINTS = 1200
@@ -30,6 +31,7 @@ const err = ref('')
 const loading = ref(false)
 const chartEl = ref(null)
 let chart = null
+let offTheme = null
 let timer = null
 let ro = null
 
@@ -237,6 +239,7 @@ function render() {
 watch(dayCycles, () => render())
 
 onMounted(async () => {
+  offTheme = onThemeChange(() => render())   // 切主題要重畫：圖的顏色是繪製當下讀的
   await refresh()
   await nextTick()
   ro = new ResizeObserver(() => chart?.resize())
@@ -248,6 +251,7 @@ onMounted(async () => {
   }, POLL_MS)
 })
 onBeforeUnmount(() => {
+  offTheme?.()
   clearInterval(timer)
   ro?.disconnect()
   chart?.dispose()

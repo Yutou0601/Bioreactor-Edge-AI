@@ -6,6 +6,7 @@
 import { ref, computed, onMounted, onBeforeUnmount, nextTick, watch } from 'vue'
 import echarts from '../lib/echarts'
 import api from '../services/apiClient'
+import { onThemeChange } from '../lib/theme'
 
 const form = ref({ dataset: 'paper', algo: 'both', exact_time: false, drop_k_edge: false, nrep: 25, draws: 41 })
 const runs = ref([])
@@ -14,6 +15,7 @@ const err = ref('')
 const busy = ref(false)
 const histEl = ref(null)
 let chart = null
+let offTheme = null
 let timer = null
 
 const running = computed(() => runs.value.find(r => r.status === 'running' || r.status === 'queued'))
@@ -91,9 +93,10 @@ watch(a3, () => nextTick(renderHist))
 onMounted(async () => {
   try { await loadRuns() } catch (e) { err.value = e.message }
   if (runs.value.length) await pick(runs.value[0].id)
+  offTheme = onThemeChange(() => renderHist())   // 切主題要重畫
   timer = setInterval(() => { if (!document.hidden && running.value) loadRuns().catch(() => {}) }, 3000)
 })
-onBeforeUnmount(() => { clearInterval(timer); chart?.dispose() })
+onBeforeUnmount(() => { offTheme?.(); clearInterval(timer); chart?.dispose() })
 </script>
 
 <template>

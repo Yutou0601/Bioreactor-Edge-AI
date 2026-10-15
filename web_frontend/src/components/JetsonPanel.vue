@@ -7,6 +7,7 @@
 import { ref, computed, onMounted, onBeforeUnmount, nextTick, watch } from 'vue'
 import echarts from '../lib/echarts'
 import api from '../services/apiClient'
+import { onThemeChange } from '../lib/theme'
 
 const RANGES = [[15, '15 分'], [60, '1 小時'], [360, '6 小時'], [1440, '24 小時']]
 const st = ref(null)
@@ -14,7 +15,8 @@ const hist = ref(null)
 const minutes = ref(60)
 const err = ref('')
 const chartEl = ref(null)
-let chart = null, t1 = null, t2 = null, ro = null
+let chart = null
+let offTheme = null, t1 = null, t2 = null, ro = null
 
 const now = computed(() => st.value?.now)
 const info = computed(() => st.value?.static || {})
@@ -117,13 +119,15 @@ function render() {
 watch(minutes, loadHist)
 
 onMounted(async () => {
+  offTheme = onThemeChange(() => render())   // 切主題要重畫：圖的顏色是繪製當下讀的
   await loadStatus(); await loadHist()
   await nextTick()
   ro = new ResizeObserver(() => chart?.resize()); if (chartEl.value) ro.observe(chartEl.value)
   t1 = setInterval(() => { if (!document.hidden) loadStatus() }, 5000)
   t2 = setInterval(() => { if (!document.hidden) loadHist() }, 15000)
 })
-onBeforeUnmount(() => { clearInterval(t1); clearInterval(t2); ro?.disconnect(); chart?.dispose(); chart = null })
+onBeforeUnmount(() => {
+  offTheme?.(); clearInterval(t1); clearInterval(t2); ro?.disconnect(); chart?.dispose(); chart = null })
 </script>
 
 <template>

@@ -229,55 +229,55 @@ function st (seg) { return seg.stoichiometry || {} }
 </template>
 
 <style scoped>
-.wrap { padding: 1.5rem; max-width: 1180px; margin: 0 auto; color: #ccc; }
-h1 { font-size: 1.1rem; color: #e8e8e8; font-weight: 600; }
-h2 { font-size: 0.9rem; color: #e0e0e0; font-weight: 600; margin-bottom: 0.6rem; }
-.sub { font-size: 0.78rem; color: #777; margin-top: 4px; line-height: 1.6; max-width: 66ch; }
-.panel { border: 1px solid #1e1e1e; border-radius: 6px; background: #111;
+.wrap { padding: 1.5rem; max-width: 1180px; margin: 0 auto; color: var(--text-primary); }
+h1 { font-size: 1.1rem; color: var(--text-primary); font-weight: 600; }
+h2 { font-size: 0.9rem; color: var(--text-primary); font-weight: 600; margin-bottom: 0.6rem; }
+.sub { font-size: 0.78rem; color: var(--text-muted); margin-top: 4px; line-height: 1.6; max-width: 66ch; }
+.panel { border: 1px solid var(--border); border-radius: 6px; background: var(--surface-1);
          padding: 1rem 1.1rem; margin-top: 0.9rem; }
 .row { display: flex; align-items: center; gap: 10px; margin-bottom: 8px; flex-wrap: wrap; }
-.row label { font-size: 0.76rem; color: #888; min-width: 108px; }
+.row label { font-size: 0.76rem; color: var(--text-secondary); min-width: 108px; }
 .row label.ml { min-width: auto; margin-left: 12px; }
 input[type=text], input:not([type]), input[type=number], select {
-  background: #161616; border: 1px solid #262626; color: #ddd;
+  background: var(--surface-2); border: 1px solid var(--border); color: var(--text-primary);
   border-radius: 4px; padding: 5px 8px; font-size: 0.76rem; font-family: inherit;
   min-width: 200px;
 }
-input[type=file] { font-size: 0.74rem; color: #999; }
-.hint { font-size: 0.72rem; color: #6e6e6e; line-height: 1.6; margin-top: 4px; }
-.warn-inline { font-size: 0.74rem; color: #c9a227; line-height: 1.65;
-               background: rgba(201,162,39,0.07); border-left: 2px solid #6b5615;
+input[type=file] { font-size: 0.74rem; color: var(--text-secondary); }
+.hint { font-size: 0.72rem; color: var(--text-muted); line-height: 1.6; margin-top: 4px; }
+.warn-inline { font-size: 0.74rem; color: var(--warning); line-height: 1.65;
+               background: color-mix(in srgb, var(--warning) 7%, transparent); border-left: 2px solid var(--warning);
                padding: 7px 10px; border-radius: 3px; margin: 4px 0 10px; }
-.meta { font-size: 0.74rem; color: #777; margin-bottom: 0.7rem; }
+.meta { font-size: 0.74rem; color: var(--text-muted); margin-bottom: 0.7rem; }
 .tiles { display: flex; gap: 10px; flex-wrap: wrap; }
-.tile { background: #151515; border: 1px solid #212121; border-radius: 5px;
+.tile { background: var(--surface-2); border: 1px solid var(--border); border-radius: 5px;
         padding: 8px 12px; min-width: 118px; }
-.tile span { display: block; font-size: 0.68rem; color: #777; }
-.tile b { font-size: 1.02rem; color: #e6e6e6; font-variant-numeric: tabular-nums; }
-.tile i { font-size: 0.64rem; color: #666; font-style: normal; margin-left: 3px; }
-.verdict { margin-top: 0.8rem; font-size: 0.76rem; color: #7d9a68; line-height: 1.6; }
-.verdict.bad { color: #d9a441; }
+.tile span { display: block; font-size: 0.68rem; color: var(--text-muted); }
+.tile b { font-size: 1.02rem; color: var(--text-primary); font-variant-numeric: tabular-nums; }
+.tile i { font-size: 0.64rem; color: var(--text-muted); font-style: normal; margin-left: 3px; }
+.verdict { margin-top: 0.8rem; font-size: 0.76rem; color: var(--good); line-height: 1.6; }
+.verdict.bad { color: var(--warning); }
 table { width: 100%; border-collapse: collapse; margin-top: 0.4rem; }
 th, td { text-align: left; padding: 5px 8px; font-size: 0.74rem;
-         border-bottom: 1px solid #191919; white-space: nowrap; }
-th { color: #777; font-weight: 400; }
-td { color: #d0d0d0; font-variant-numeric: tabular-nums; }
-tr.dim td { color: #6a6a6a; }
-tr.blind td { color: #5f5f5f; }
-.na { color: #8a6a3a; }
-.cap { color: #666; font-style: normal; font-size: 0.68rem; }
-.sub > td { background: #0d0d0d; padding: 6px 10px 10px; }
+         border-bottom: 1px solid var(--border); white-space: nowrap; }
+th { color: var(--text-muted); font-weight: 400; }
+td { color: var(--text-primary); font-variant-numeric: tabular-nums; }
+tr.dim td { color: var(--text-muted); }
+tr.blind td { color: var(--text-muted); }
+.na { color: var(--warning); }
+.cap { color: var(--text-muted); font-style: normal; font-size: 0.68rem; }
+.sub > td { background: var(--surface-1); padding: 6px 10px 10px; }
 table.inner { width: auto; min-width: 460px; }
 table.inner th, table.inner td { font-size: 0.71rem; padding: 3px 10px 3px 0; }
 button { font-family: inherit; cursor: pointer; border-radius: 4px;
          font-size: 0.76rem; padding: 6px 14px; transition: all 0.15s; }
-.go { background: rgba(52,152,219,0.12); color: #3498db; border: 1px solid #23394a;
+.go { background: color-mix(in srgb, var(--series-1) 12%, transparent); color: var(--series-1); border: 1px solid var(--border);
       margin-top: 6px; }
-.go:hover:not(:disabled) { background: rgba(52,152,219,0.2); }
-.mini { background: #171717; color: #888; border: 1px solid #242424;
+.go:hover:not(:disabled) { background: color-mix(in srgb, var(--series-1) 20%, transparent); }
+.mini { background: var(--surface-2); color: var(--text-secondary); border: 1px solid var(--border);
         font-size: 0.7rem; padding: 2px 8px; }
 button:disabled { opacity: 0.5; cursor: default; }
-.err { font-size: 0.76rem; color: #c0623a; margin-top: 0.6rem; line-height: 1.6;
+.err { font-size: 0.76rem; color: var(--series-2); margin-top: 0.6rem; line-height: 1.6;
        white-space: normal; }
 .err.small { font-size: 0.72rem; }
 </style>
