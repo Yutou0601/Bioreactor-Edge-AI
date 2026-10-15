@@ -10,6 +10,7 @@ const ImportTab = { name: 'ImportTab', render: () => h('div', [h(ImportView), h(
 
 const TABS = [
   { key: 'ingest',  label: '資料接收', comp: defineAsyncComponent(() => import('../components/IngestPanel.vue')) },
+  { key: 'jetson',  label: 'Jetson 硬體', comp: defineAsyncComponent(() => import('../components/JetsonPanel.vue')) },
   { key: 'modules', label: '分析模組', comp: defineAsyncComponent(() => import('./ModulesView.vue')) },
   { key: 'import',  label: '手動匯入', comp: ImportTab },
 ]

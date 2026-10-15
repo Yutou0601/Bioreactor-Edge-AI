@@ -88,11 +88,17 @@ async def lifespan(app: FastAPI):
     from core import module_runner
     module_runner.start()
 
+    # Jetson 硬體取樣（溫度、電源軌…每 10 秒一筆，留 24 小時）。不是 Jetson 就不啟動。
+    from core import jetson_hw
+    if jetson_hw.start():
+        print('[硬體] Jetson 硬體取樣已啟動（每 %d 秒）' % jetson_hw.SAMPLE_SEC)
+
     yield
 
     # ── Shutdown ───────────────────────────────────────
     scheduler.stop()
     module_runner.stop()
+    jetson_hw.stop()
 
 
 app = FastAPI(title="生物反應器 Edge AI API", lifespan=lifespan)

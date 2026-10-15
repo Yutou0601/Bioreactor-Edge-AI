@@ -77,3 +77,5 @@ edge_backend/modules/*/_input.json.tmp
 # 開發測試伺服器：檔頭自己寫明「本機用，不進版控」。它會灌合成資料，
 # 誤上監控電腦會污染現場紀錄。
 dev_test_server.py
+# 背景工作（論文檢定）的子行程輸出
+edge_backend/logs/

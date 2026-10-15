@@ -641,6 +641,55 @@ def api_cycle_current(station: str = 'default'):
     return cycle_sync.current(station) or {'error': '沒有資料'}
 
 
+@router.get("/jetson/status")
+def api_jetson_status():
+    """Jetson 硬體快照：溫度、電源軌、CPU／GPU、記憶體、風扇、電源模式。"""
+    from core import jetson_hw
+    return jetson_hw.status()
+
+
+@router.get("/jetson/history")
+def api_jetson_history(minutes: int = Query(60, ge=1, le=1440)):
+    """最近 N 分鐘的硬體時間序列（每 10 秒一筆，最多保留 24 小時）。"""
+    from core import jetson_hw
+    if not jetson_hw.available():
+        return {'available': False}
+    return jetson_hw.history(minutes)
+
+
+@router.post("/paper_tests")
+def api_paper_test_start(params: dict):
+    """啟動一次論文 Algorithm 2／3（背景子行程）。預設參數＝論文原樣。"""
+    from core import paper_jobs
+    try:
+        return paper_jobs.start(params)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except RuntimeError as e:
+        raise HTTPException(status_code=409, detail=str(e))
+
+
+@router.get("/paper_tests")
+def api_paper_test_list(limit: int = Query(50, ge=1, le=500)):
+    from core import paper_jobs
+    return paper_jobs.list_runs(limit)
+
+
+@router.get("/paper_tests/{run_id}")
+def api_paper_test_get(run_id: int):
+    from core import paper_jobs
+    r = paper_jobs.get(run_id)
+    if r is None:
+        raise HTTPException(status_code=404, detail='沒有第 %d 號工作' % run_id)
+    return r
+
+
+@router.post("/paper_tests/{run_id}/cancel")
+def api_paper_test_cancel(run_id: int):
+    from core import paper_jobs
+    return {'cancelled': paper_jobs.cancel(run_id)}
+
+
 @router.post("/cycles/sync")
 def api_cycle_sync(station: str = 'default'):
     """手動觸發一次串流循環同步（平常每批收資料後每 5 分鐘自動跑）。"""

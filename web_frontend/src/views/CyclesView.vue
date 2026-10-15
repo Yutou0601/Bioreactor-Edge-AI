@@ -7,6 +7,7 @@ import { useRoute, useRouter } from 'vue-router'
 const TABS = [
   { key: 'rate',    label: '逐循環速率（Algorithm 1）', comp: defineAsyncComponent(() => import('./RateView.vue')) },
   { key: 'descent', label: '每段下降報表',               comp: defineAsyncComponent(() => import('./DescentView.vue')) },
+  { key: 'tests',   label: '論文檢定（Algorithm 2／3）', comp: defineAsyncComponent(() => import('./PaperTestsView.vue')) },
 ]
 const route = useRoute()
 const router = useRouter()
