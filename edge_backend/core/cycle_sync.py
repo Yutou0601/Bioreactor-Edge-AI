@@ -106,12 +106,17 @@ def _last_end(station, con):
     return datetime.fromisoformat(r[0]) if r and r[0] else None
 
 
-def sync(station='default'):
-    """把新完成的段寫進 cycle 表。回傳摘要。"""
+def sync(station='default', full=False):
+    """把新完成的段寫進 cycle 表。回傳摘要。
+
+    full=True：從這個站台的第一筆整個重切（手動匯入用）。手動匯入常是補舊資料
+      （先匯 2 月再匯 1 月），只看「上次切到之後」的增量模式會永遠漏掉 1 月。
+      已存在的段由 cycle 表的唯一鍵擋掉，不會重複。
+    """
     with _lock:
         con = cs.connect()
         try:
-            last_end = _last_end(station, con)
+            last_end = None if full else _last_end(station, con)
             if last_end is not None:
                 since = (last_end - timedelta(hours=WASH_LOOKBACK_HR)).isoformat(sep=' ')
             else:

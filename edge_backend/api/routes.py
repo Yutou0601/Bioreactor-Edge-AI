@@ -412,11 +412,12 @@ def _why_no_cycles() -> str:
                 "批次只是時間窗，訊號要另外匯入。"
                 "請用「上傳 CSV」（單檔）匯入涵蓋該批次時間範圍的資料。")
     if n_run == 0:
-        first = sensor_records[0].get("timestamp", "")
-        last = sensor_records[-1].get("timestamp", "")
-        return (f"已有 {n_rec} 筆感測資料（{first[:16]} → {last[:16]}），"
-                "但還沒有批次。請新增一個批次，並把開始時間設到 "
-                f"{first[:16]}，分析才知道要取哪一段。")
+        # 沒有批次時已自動改用全部資料（experiment_store._analysis_runs），
+        # 所以走到這裡代表「全部資料裡也切不出完整循環」。
+        ts = sorted(r.get("timestamp", "") for r in sensor_records)
+        return (f"尚未建立批次，已改用全部 {n_rec} 筆資料（{ts[0][:16]} → {ts[-1][:16]}），"
+                "但仍切不出完整循環（頭尾都要是觀測到的補氣、中間沒有超過 30 分鐘的記錄斷點）。"
+                "這段期間可能沒有自動補氣循環（例如 2026 年 3 月以前是無循環運轉）。")
     return (f"已有 {n_rec} 筆資料、{n_run} 個批次，但切不出**完整**循環"
             "（完整＝頭尾都在批次時間窗內、且中間沒有記錄斷點）。"
             "多半是批次的起訖時間沒有涵蓋到資料，或該段沒有補氣循環。")
@@ -449,6 +450,9 @@ def covariate_analysis():
     out["module_version"] = row.get("module_version")
     if out.get("status") == "insufficient" and not out.get("message"):
         out["message"] = _why_no_cycles()
+    # 這次結果用的是批次內資料還是全部資料（沒建批次時自動用全部）——
+    # ⚠ 這是「現在」的範圍；結果若是在匯入新資料前算的，computed_at 會比較舊。
+    out["scope"] = exp.analysis_scope()
     return out
 
 
@@ -483,6 +487,9 @@ def greybox_analysis():
     out["module_version"] = row.get("module_version")
     if out.get("status") == "insufficient" and not out.get("message"):
         out["message"] = _why_no_cycles()
+    # 這次結果用的是批次內資料還是全部資料（沒建批次時自動用全部）——
+    # ⚠ 這是「現在」的範圍；結果若是在匯入新資料前算的，computed_at 會比較舊。
+    out["scope"] = exp.analysis_scope()
     return out
 
 
@@ -691,10 +698,10 @@ def api_paper_test_cancel(run_id: int):
 
 
 @router.post("/cycles/sync")
-def api_cycle_sync(station: str = 'default'):
+def api_cycle_sync(station: str = "default", full: bool = False):
     """手動觸發一次串流循環同步（平常每批收資料後每 5 分鐘自動跑）。"""
     from core import cycle_sync
-    return cycle_sync.sync(station)
+    return cycle_sync.sync(station, full=full)
 
 
 # ==========================================
@@ -703,6 +710,21 @@ def api_cycle_sync(station: str = 'default'):
 # 解析搬到 core/btp_format.py，與串流接收（/api/ingest）共用同一份欄位對應。
 from core.btp_format import parse_csv as _parse_btp_csv            # noqa: E402
 from core.btp_format import parse_labeled as _parse_btp_labeled    # noqa: E402
+
+
+def _cycles_after_import():
+    """手動匯入後也切循環（論文 Algorithm 1），讓「循環分析」頁看得到。
+
+    ⚠ 2026-10-15 前手動匯入只進 sample 表、不會切循環：匯入 2/10～3/27 後，
+      實驗批次頁切得出 47 個完整循環，循環分析頁卻只有 1 段。串流有自動同步，
+      手動匯入沒有。站台用 default（raw_sample 沒有它，cycle_sync 會改讀 sample 表）。
+    失敗不影響匯入本身。
+    """
+    try:
+        from core import cycle_sync
+        cycle_sync.sync("default", full=True)
+    except Exception as e:                       # noqa: BLE001
+        print("[匯入] 循環同步失敗（匯入本身成功）：%s: %s" % (type(e).__name__, e))
 
 
 def _import_csv_btp_daily(text: str, detected_date: str) -> dict:
@@ -765,6 +787,7 @@ def _import_csv_btp_daily(text: str, detected_date: str) -> dict:
     #   批次寫（一次匯入上萬筆，逐筆 commit 會慢到前端誤判逾時）。
     from core import sample_store
     sample_store.append_many(_persist)
+    _cycles_after_import()
 
     # 預熱 LSTM buffer：前 N-1 筆直接 append，最後一筆透過正式介面傳入
     if _LSTM_ON:
@@ -1054,6 +1077,7 @@ async def import_csv(file: UploadFile = File(...)):
     #   批次寫（一次匯入上萬筆，逐筆 commit 會慢到前端誤判逾時）。
     from core import sample_store
     sample_store.append_many(_persist)
+    _cycles_after_import()
 
     # ── 預熱 LSTM buffer：前 29 筆直接 append，最後一筆透過正式介面傳入
     #    這樣 latest_actual_pressure 也能被正確更新

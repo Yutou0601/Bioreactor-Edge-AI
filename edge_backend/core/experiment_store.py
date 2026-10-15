@@ -492,12 +492,46 @@ def get_cycles(run_id: str) -> dict:
     return {"run_id": run_id, "n_minutes": run["n_minutes"], "cycles": compute_cycles(run)}
 
 
+ALL_DATA_RUN_ID = "全部資料（未建批次）"
+
+
+def _analysis_runs() -> list:
+    """分析用的批次清單。**沒有建任何批次時，退回一個涵蓋全部資料的虛擬批次。**
+
+    ⚠ 2026-10-15 現場回報：匯入了 2/10～3/27 的資料、圖上看得到完整循環，但
+      共變數與灰箱一律回「沒有完整循環」——因為兩者只看批次時間窗內的資料，
+      而使用者沒有建批次。對使用者而言那等於「功能壞了」。
+    虛擬批次的 n_minutes 是 0（未知）：共變數分析遇到單一 n 值本來就會把它
+      從迴歸剔除，不會被當成真的「每小時 0 分鐘」。
+    有建批次時維持原行為（只看批次內），不混用。
+    """
+    if experiment_runs:
+        return sorted(experiment_runs, key=lambda r: _run_sort_key(r["run_id"]))
+    ts = [r["timestamp"] for r in sensor_records if r.get("timestamp")]
+    if not ts:
+        return []
+    return [{"run_id": ALL_DATA_RUN_ID, "n_minutes": 0, "start_time": min(ts),
+             "end_time": None, "baseline_pressure": 0.0}]
+
+
+def analysis_scope() -> dict:
+    """告訴介面這次分析用的是哪些資料。"""
+    ts = [r["timestamp"] for r in sensor_records if r.get("timestamp")]
+    span = {"first_ts": min(ts) if ts else None, "last_ts": max(ts) if ts else None,
+            "n_records": len(ts)}
+    if experiment_runs:
+        return {"scope": "batches", "n_runs": len(experiment_runs), **span,
+                "label": "實驗批次內的資料（%d 個批次）" % len(experiment_runs)}
+    return {"scope": "all", "n_runs": 0, **span,
+            "label": "全部資料（尚未建立實驗批次）"}
+
+
 def all_cycles() -> list:
     """所有批次的每循環特徵攤平成一張表（每列＝一個循環週期，含批次/n 標籤）。
     這才是餵模型的資料：drop_rate 為反應變數、pre_injection_orp 為菌群共變數、
-    n_minutes 為控制因子。"""
+    n_minutes 為控制因子。沒有批次時用全部資料（見 _analysis_runs）。"""
     rows = []
-    for run in sorted(experiment_runs, key=lambda r: _run_sort_key(r["run_id"])):
+    for run in _analysis_runs():
         for cy in compute_cycles(run):
             rows.append({"run_id": run["run_id"], "n_minutes": run["n_minutes"], **cy})
     return rows
@@ -508,7 +542,7 @@ def complete_cycle_trajectories() -> list:
     每個循環回傳其補氣後高點到下次補氣前的逐分鐘壓力序列 + 中繼資訊。
     只取完整循環——殘段/記錄中斷的軌跡形狀不可信，不能拿去擬合機理模型。"""
     out = []
-    for run in experiment_runs:
+    for run in _analysis_runs():                # 沒有批次時用全部資料
         recs = _records_between(run["start_time"], run.get("end_time"))
         if len(recs) < 10:
             continue

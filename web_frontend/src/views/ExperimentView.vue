@@ -109,14 +109,29 @@ const VERDICT_META = {
   biological: { label: '生物成因', color: '#4caf82' },
   physical:   { label: '物理成因', color: '#d0a24a' },
 }
+// ⚠ 「執行分析」要真的跑一次。2026-10-15 前這裡只 GET 上一次排程的結果——
+//   共變數每 60 分、灰箱每 180 分才自動重算，所以匯入新資料後按幾次都是舊的
+//   「沒有完整循環」，使用者的感受就是「功能壞了」。
+//   現在先 POST /modules/<name>/run（同步，跑完才回），再讀結果。
+async function runModule(name, getPath, timeout) {
+  try {
+    const { data: r } = await apiClient.post(`/modules/${name}/run`, null, { timeout })
+    if (!r.ok) {
+      const why = r.error || (r.log || '').trim().split('\n').slice(-3).join(' ')
+      return { status: 'error', message: `模組執行失敗：${why || '（沒有訊息）'}` }
+    }
+  } catch (e) {
+    const busy = e.response?.status === 409
+    if (!busy) return { status: 'error', message: '分析請求失敗：' + (e.response?.data?.detail || e.message || '') }
+    // 409＝另一個模組正在跑：不重算，先顯示上一次的結果並說明
+  }
+  const { data } = await apiClient.get(getPath, { timeout: 20000 })
+  return data
+}
 async function runCov() {
   covLoading.value = true
-  try {
-    const { data } = await apiClient.get('/covariate_analysis', { timeout: 20000 })
-    cov.value = data
-  } catch (e) {
-    cov.value = { status: 'error', message: '分析請求失敗：' + (e.message || '') }
-  } finally { covLoading.value = false }
+  try { cov.value = await runModule('covariate', '/covariate_analysis', 300000) }
+  finally { covLoading.value = false }
 }
 function fmtP(p) { return p === null || p === undefined ? 'n/a' : (p < 0.001 ? '<0.001' : p.toFixed(3)) + (p < 0.05 ? ' *' : '') }
 function fmtCoef(v) { return v === null || v === undefined ? '—' : (v >= 0 ? '+' : '') + v.toPrecision(3) }
@@ -127,12 +142,8 @@ const gb = ref(null)
 const gbLoading = ref(false)
 async function runGb() {
   gbLoading.value = true
-  try {
-    const { data } = await apiClient.get('/greybox_analysis', { timeout: 30000 })
-    gb.value = data
-  } catch (e) {
-    gb.value = { status: 'error', message: '分析請求失敗：' + (e.message || '') }
-  } finally { gbLoading.value = false }
+  try { gb.value = await runModule('greybox', '/greybox_analysis', 600000) }
+  finally { gbLoading.value = false }
 }
 
 let _runsBusy = false
@@ -473,6 +484,10 @@ onUnmounted(() => { clearInterval(pollTimer); clearInterval(ch4Timer) })
           {{ covLoading ? '分析中…' : '執行分析' }}
         </button>
       </div>
+      <div v-if="cov?.scope" class="cov-scope">
+        分析範圍：{{ cov.scope.label }}（{{ (cov.scope.first_ts || '').slice(0, 16) }} → {{ (cov.scope.last_ts || '').slice(0, 16) }}）
+        <span v-if="cov.computed_at"> · 算於 {{ String(cov.computed_at).slice(0, 16) }}</span>
+      </div>
 
       <div v-if="cov && cov.status === 'ok'" class="cov-body">
         <div class="cov-verdict-row">
@@ -531,6 +546,10 @@ onUnmounted(() => { clearInterval(pollTimer); clearInterval(ch4Timer) })
         <button class="btn btn-primary cov-btn" @click="runGb" :disabled="gbLoading">
           {{ gbLoading ? '分析中…' : '執行分析' }}
         </button>
+      </div>
+      <div v-if="gb?.scope" class="cov-scope">
+        分析範圍：{{ gb.scope.label }}（{{ (gb.scope.first_ts || '').slice(0, 16) }} → {{ (gb.scope.last_ts || '').slice(0, 16) }}）
+        <span v-if="gb.computed_at"> · 算於 {{ String(gb.computed_at).slice(0, 16) }}</span>
       </div>
 
       <div v-if="gb && gb.status === 'ok'" class="cov-body">
@@ -867,6 +886,7 @@ onUnmounted(() => { clearInterval(pollTimer); clearInterval(ch4Timer) })
 .cov-head { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
 .cov-title { font-size: 0.95rem; font-weight: 700; color: #6cc89a; }
 .cov-sub { font-size: 0.72rem; color: #5a7a6a; }
+.cov-scope { font-size: 0.76rem; color: var(--text-muted); margin: -4px 0 10px; }
 .cov-btn { margin-left: auto; }
 .cov-body { margin-top: 12px; }
 .cov-verdict-row { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; }
