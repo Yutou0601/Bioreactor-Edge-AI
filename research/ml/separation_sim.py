@@ -57,6 +57,11 @@ DT = torch.float64
 ATM = 1.033
 NERNST_PH, NERNST_H2 = 61.1, 30.6          # mV（35 °C）
 QP, QPH, QORP = 0.01, 0.01, 1.0
+# pH 計情境（--ph_res R --ph_sigma S）：None＝照舊（真實殘差原樣、量化 0.01）。
+# 設定時：真實 pH 殘差先做 15 分鐘移動平均（去掉現有 0.01 量化的跳動、保留慢速漂移——
+# 換 pH 計也消不掉的那部分），再加新 pH 計的白雜訊 S，以解析度 R 量化。
+PH_RES = float(sys.argv[sys.argv.index('--ph_res') + 1]) if '--ph_res' in sys.argv else None
+PH_SIGMA = float(sys.argv[sys.argv.index('--ph_sigma') + 1]) if '--ph_sigma' in sys.argv else 0.0
 
 sys.path.insert(0, HERE)
 from design_identifiability import fit_cycles             # noqa: E402
@@ -132,6 +137,10 @@ def load_templates(noise):
             rO = O - np.polyval(np.polyfit(t, O, 1), t)
         else:
             rpH, rO = pH - pH.mean(), O - O.mean()
+        if PH_RES is not None:
+            w = 15
+            rpH = np.convolve(np.pad(rpH, (w // 2, w - 1 - w // 2), mode='edge'),
+                              np.ones(w) / w, mode='valid')
         tpl.append(dict(batch=c['batch'], cycle=int(c['cycle']), t=t, P=P, pH=pH, ORP=O,
                         pump=np.asarray(c['pump'], bool), k=kh, A=Ah,
                         rP=rP, rpH=rpH, rO=rO,
@@ -220,7 +229,11 @@ def simulate(tpl, prm, idx_tpl, rng, substeps=6):
     pH = pH.cpu().numpy() + tpl['rpH'][None, :]
     ORP = ORP.cpu().numpy() + tpl['rO'][None, :]
     P = np.round(P / QP) * QP
-    pH = np.round(pH / QPH) * QPH
+    if PH_RES is not None:
+        pH = pH + PH_SIGMA * rng.standard_normal(pH.shape)
+        pH = np.round(pH / PH_RES) * PH_RES
+    else:
+        pH = np.round(pH / QPH) * QPH
     ORP = np.round(ORP / QORP) * QORP
     return P, pH, ORP, truth
 
@@ -368,7 +381,8 @@ def main():
     out['features'] = np.array(FEATURES)
     out['targets'] = np.array(TARGETS)
     os.makedirs(OUT, exist_ok=True)
-    path = os.path.join(OUT, 'sim_%s.npz' % noise)
+    tag = noise if PH_RES is None else '%s_ph%g' % (noise, PH_RES)
+    path = os.path.join(OUT, 'sim_%s.npz' % tag)
     np.savez_compressed(path, **out)
     print('-> %s' % path)
 
