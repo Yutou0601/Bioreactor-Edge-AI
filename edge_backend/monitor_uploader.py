@@ -42,8 +42,27 @@ CHUNK_BYTES = 1 << 20              # 一次最多讀 1 MB（約 13 天份）
 BATCH_LINES = 2000                 # 一個請求最多幾行
 
 
+LOG_PATH = None                    # --log 指定時才寫檔
+LOG_MAX = 5 << 20                  # 5 MB 輪替一次，只留一份舊檔
+
+
 def log(msg):
-    print('[%s] %s' % (datetime.now().strftime('%Y-%m-%d %H:%M:%S'), msg), flush=True)
+    """印到螢幕；有 --log 時同時寫檔。
+
+    ⚠ 開機自動啟動用 pythonw（沒有主控台視窗），print 會直接消失，
+      所以排程一律帶 --log，否則連不到 Jetson 時沒有任何地方看得到。
+    """
+    line = '[%s] %s' % (datetime.now().strftime('%Y-%m-%d %H:%M:%S'), msg)
+    if sys.stdout is not None:
+        print(line, flush=True)
+    if LOG_PATH:
+        try:
+            if os.path.exists(LOG_PATH) and os.path.getsize(LOG_PATH) > LOG_MAX:
+                os.replace(LOG_PATH, LOG_PATH + '.1')
+            with open(LOG_PATH, 'a', encoding='utf-8') as fh:
+                fh.write(line + '\n')
+        except OSError:
+            pass                                    # 寫不了 log 不能拖垮上傳
 
 
 def load_state():
@@ -139,6 +158,27 @@ def scan_once(data_dir, url, token, station, state, since=''):
     return sent, None
 
 
+INSTANCE_PORT = 47811              # 只 bind 不 listen：當作「同時只能一份」的鎖
+
+
+def single_instance():
+    """取得單一執行鎖；已有一份在跑就回 None。
+
+    重跑安裝、或登入兩次，都可能多開一份常駐程式。Jetson 依時間戳去重，資料不會
+    重複，但兩份同時寫 .uploader_state.json 會互相蓋掉進度。
+    ⚠ 只 bind 127.0.0.1、不 listen：不接受任何連線，也不會跳防火牆詢問。
+      行程結束時作業系統自動釋放，不會留下要手動清的鎖檔。
+    """
+    import socket
+    s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    try:
+        s.bind(('127.0.0.1', INSTANCE_PORT))
+    except OSError:
+        s.close()
+        return None
+    return s                                           # 呼叫端要一直持有它
+
+
 def check(data_dir, url, station):
     """對帳：本機每天的有效行數 vs Jetson sample 表的筆數。"""
     with urllib.request.urlopen(url.rstrip('/') + '/api/days', timeout=30) as r:
@@ -157,12 +197,19 @@ def check(data_dir, url, station):
 
 
 def main():
+    # 中文版 Windows 主控台被重導向時用 cp950，✓ ✘ ⚠ 編不進去會整支當掉
+    if sys.stdout is not None and hasattr(sys.stdout, 'reconfigure'):
+        sys.stdout.reconfigure(errors='replace')
     ap = argparse.ArgumentParser(description=__doc__.split('\n')[0])
     ap.add_argument('--once', action='store_true', help='掃一輪就結束')
     ap.add_argument('--check', action='store_true', help='對帳後結束')
     ap.add_argument('--interval', type=float, default=20.0, help='掃描間隔秒數')
     ap.add_argument('--since', default='', help='只送這天（YYYY-MM-DD）以後的檔')
+    ap.add_argument('--log', default='', help='同時寫入這個 log 檔（開機自動啟動時必帶）')
     a = ap.parse_args()
+    global LOG_PATH
+    # pythonw（開機自動啟動）沒有主控台：沒指定 --log 也要寫到預設位置，不然什麼都看不到
+    LOG_PATH = a.log or (os.path.join(HERE, 'uploader.log') if sys.stdout is None else None)
 
     data_dir = config.data_dir()
     url = config.get('REACTOR_UPLOAD_URL')
@@ -178,6 +225,12 @@ def main():
     if not token:
         log('✘ 沒有設定 REACTOR_INGEST_TOKEN（要與 Jetson 的 .env 相同）')
         return 2
+
+    if not (a.once or a.check):
+        guard = single_instance()
+        if guard is None:
+            log('已經有一份上傳程式在跑，這份結束（避免兩份同時推進度）')
+            return 0
 
     state = load_state()
     wait = a.interval
