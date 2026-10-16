@@ -1,0 +1,30 @@
+<!doctype html><html lang="zh-Hant"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1"><title>ORP 事件回落分析</title>
+<style>
+:root{color-scheme:dark;--bg:#0d0d0d;--s:#1a1a19;--t:#f0efec;--t2:#c3c2b7;--m:#898781;--g:#2c2c2a}
+body{background:var(--bg);color:var(--t);font-family:system-ui,"Microsoft JhengHei",sans-serif;margin:0;padding:16px;line-height:1.6}
+main{max-width:1100px;margin:0 auto} .card{background:var(--s);border:1px solid rgba(255,255,255,.1);border-radius:8px;padding:16px;margin:0 0 16px}
+h1{font-size:1.25rem} h2{font-size:1rem;margin:0 0 10px} p,li{color:var(--t2);font-size:.9rem}
+table{border-collapse:collapse;width:100%;font-size:.85rem;font-variant-numeric:tabular-nums} th,td{padding:5px 8px;border-bottom:1px solid var(--g);text-align:right}
+th{color:var(--m);font-weight:500} td:first-child,th:first-child{text-align:left} img{width:100%;background:#fff;border-radius:6px}
+.wrap{overflow-x:auto} b{color:var(--t)}
+</style></head><body><main>
+<h1>ORP 事件回落 vs 壓力下降　<small style="color:#898781;font-size:.8rem">產生於 2026-10-15 21:42:40（Jetson）· 資料 202607至08最新循環研究 · 164 個事件</small></h1>
+<div class="card"><h2>問題</h2><p>反應器裡只有嗜氫甲烷菌。若補氣／泵開讓 H2 溶進液相（ORP 變負），之後 ORP 回升的快慢反映 H2 被甲烷菌吃掉的快慢，
+那麼<b>ORP 回升越快的事件，同一段時間的壓力也應該降得越快</b>。逐事件檢查，而不是疊加平均。</p></div>
+<div class="card"><h2>結論</h2><p><b>沒有偵測到關聯</b>（p ≥ 0.05）。注意這不等於「沒有關係」：每段時間窗的壓力變化只有幾個 0.01 的量化階，速率雜訊很大，檢定力可能不足。</p></div>
+<div class="card"><h2>相關檢定（Spearman；置換在批次×事件類型內打亂，5000 次）</h2><div class="wrap"><table>
+<tr><th>事件</th><th>n</th><th>ρ</th><th>p</th><th>偏相關 ρ</th><th>p</th><th>安慰劑 ρ（事件前）</th><th>p</th></tr>
+<tr><td>泵啟動</td><td>145</td><td>+0.132</td><td>0.6685</td><td>+0.090</td><td>0.2719</td><td>+0.064</td><td>0.8776</td></tr><tr><td>補氣</td><td>19</td><td>+0.372</td><td>0.6461</td><td>-0.042</td><td>0.8642</td><td>+0.128</td><td>0.6193</td></tr><tr><td>全部</td><td>164</td><td>+0.155</td><td>0.6873</td><td>+0.125</td><td>0.1908</td><td>+0.062</td><td>0.8436</td></tr></table></div>
+<p>偏相關扣掉：事件時的壓力水準、事件前 ORP 基線、距上次補氣的小時數。安慰劑＝事件前 −45～−10 分做同樣計算；事件後的相關要明顯強於它才算事件特定。</p></div>
+<div class="card"><h2>各批次</h2><div class="wrap"><table><tr><th>事件</th><th>批次</th><th>n</th><th>ρ</th><th>ORP 跳動中位（mV）</th><th>ORP 回升中位（mV/分）</th><th>壓力下降中位（kgf/cm²/hr）</th></tr><tr><td>pump</td><td>tau1</td><td>39</td><td>-0.06</td><td>-24.30</td><td>+0.161</td><td>0.0139</td></tr><tr><td>pump</td><td>tau5</td><td>45</td><td>-0.17</td><td>-23.40</td><td>-0.102</td><td>0.0066</td></tr><tr><td>pump</td><td>tau10</td><td>61</td><td>+0.04</td><td>-15.80</td><td>-0.293</td><td>0.0060</td></tr><tr><td>refill</td><td>tau5</td><td>7</td><td>-0.46</td><td>-14.80</td><td>-0.221</td><td>0.0212</td></tr><tr><td>refill</td><td>tau10</td><td>9</td><td>+0.53</td><td>+50.80</td><td>-2.694</td><td>0.0021</td></tr></table></div>
+<p>ORP 已還原為真實負值：跳動為負＝事件後變得更還原（H2 進入），回升為正＝往氧化方向回去。</p></div>
+<div class="card"><h2>圖</h2><img src="orp_event_decay.png" alt="左、中：各事件的壓力下降率對 ORP 回升率散佈圖（泵、補氣）；右：事件對齊的平均 ORP 曲線"></div>
+<div class="card"><h2>限制（解讀前必讀）</h2><ul>
+<li>ORP 回升也可能是 H2 從液相逸散回氣相（物理），不只是被吃掉；壓力下降也含物理溶解。正相關是「相容」，不是「證明」。</li>
+<li>鉑電極量到的是混合電位，不是 H2 濃度；不同事件間的電極狀態可能不同。</li>
+<li>時間窗約 30–40 分鐘，壓力只變化幾個 0.01 的量化階，速率雜訊大，檢定力有限。</li>
+<li>三批 τ 期間沒有換液，τ、菌齡、液相飽和共線；批次差異不能歸因給 τ。</li>
+</ul><p>原始資料：<a href="events.csv" style="color:#86b6ef">events.csv</a>、<a href="summary.json" style="color:#86b6ef">summary.json</a>；
+程式：research/cycles/orp_event_decay.py</p></div>
+</main></body></html>

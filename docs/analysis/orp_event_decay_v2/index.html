@@ -1,0 +1,27 @@
+<!doctype html><html lang="zh-Hant"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>ORP 事件回落 v2</title><style>
+:root{color-scheme:dark} body{background:#0d0d0d;color:#f0efec;font-family:system-ui,"Microsoft JhengHei",sans-serif;margin:0;padding:16px;line-height:1.6}
+main{max-width:1150px;margin:0 auto} .card{background:#1a1a19;border:1px solid rgba(255,255,255,.1);border-radius:8px;padding:16px;margin:0 0 16px}
+h1{font-size:1.25rem} h2{font-size:1rem;margin:0 0 10px} p,li{color:#c3c2b7;font-size:.9rem} b{color:#f0efec}
+table{border-collapse:collapse;width:100%;font-size:.82rem;font-variant-numeric:tabular-nums} th,td{padding:5px 8px;border-bottom:1px solid #2c2c2a;text-align:right;white-space:nowrap}
+th{color:#898781;font-weight:500} td:nth-child(-n+3),th:nth-child(-n+3){text-align:left} tr.hit td{color:#0ca30c}
+.wrap{overflow-x:auto} img{width:100%;background:#fff;border-radius:6px} a{color:#86b6ef}
+</style></head><body><main>
+<h1>ORP 事件回落 v2：拉長時間窗、扣掉 pH　<small style="color:#898781;font-size:.8rem">產生於 2026-10-15 21:50:58（Jetson）· 202607至08最新循環研究</small></h1>
+<div class="card"><h2>結論</h2><p><b>拉長時間窗、扣掉 pH 之後，仍沒有任何組合達到「事件特定且顯著」。</b>ORP 回升快慢與壓力下降快慢，在這批資料裡看不出關聯——與 v1 一致，也與 2026-09-21「ORP 反映料位／操作、不是活性計」的結論一致。</p></div>
+<div class="card"><h2>補氣時 ORP 往正跳，是不是 pH 造成的？</h2><div class="wrap"><table>
+<tr><th>訊號</th><th></th><th></th><th>補氣事件</th><th>事件後最正（中位, mV）</th><th>事件後最負（中位, mV）</th><th>泵開後最負（中位, mV）</th></tr>
+<tr><td>原始 ORP</td><td></td><td></td><td>9</td><td>+123.3</td><td>+8.7</td><td>-20.5</td></tr><tr><td>pH 校正（Nernst 60.1 mV/pH）</td><td></td><td></td><td>9</td><td>+122.2</td><td>+8.8</td><td>-20.6</td></tr><tr><td>pH 校正（實測斜率）</td><td></td><td></td><td>9</td><td>+123.3</td><td>+8.7</td><td>-20.5</td></tr>
+</table></div><p>若補氣的正跳是 CO2 帶來的酸化，pH 校正後「最正」應明顯變小、「最負」變得更負（H2 進來了）。對照右圖的虛線（原始）與實線（校正）。</p></div>
+<div class="card"><h2>ORP 回升率 vs 壓力下降率（每一組都有批次內置換、偏相關、事件前安慰劑）</h2><div class="wrap"><table>
+<tr><th>事件</th><th>時間窗</th><th>ORP 訊號</th><th>n</th><th>ρ</th><th>p</th><th>偏相關 ρ</th><th>p</th><th>安慰劑 ρ</th><th>判定</th></tr><tr><td>泵啟動</td><td>45分</td><td>原始 ORP</td><td>145</td><td>+0.132</td><td>0.664</td><td>+0.128</td><td>0.310</td><td>+0.064</td><td>—</td></tr><tr><td>泵啟動</td><td>45分</td><td>pH 校正（Nernst 60.1 mV/pH）</td><td>145</td><td>+0.136</td><td>0.678</td><td>+0.127</td><td>0.315</td><td>+0.058</td><td>—</td></tr><tr><td>泵啟動</td><td>45分</td><td>pH 校正（實測斜率）</td><td>145</td><td>+0.132</td><td>0.672</td><td>+0.128</td><td>0.304</td><td>+0.064</td><td>—</td></tr><tr><td>補氣</td><td>45分</td><td>原始 ORP</td><td>10</td><td>+0.091</td><td>0.812</td><td>+0.289</td><td>0.423</td><td>+0.006</td><td>—</td></tr><tr><td>補氣</td><td>45分</td><td>pH 校正（Nernst 60.1 mV/pH）</td><td>10</td><td>+0.091</td><td>0.824</td><td>+0.289</td><td>0.417</td><td>-0.067</td><td>—</td></tr><tr><td>補氣</td><td>45分</td><td>pH 校正（實測斜率）</td><td>10</td><td>+0.091</td><td>0.811</td><td>+0.289</td><td>0.425</td><td>+0.006</td><td>—</td></tr><tr><td>泵啟動</td><td>55分</td><td>原始 ORP</td><td>136</td><td>-0.022</td><td>0.947</td><td>+0.054</td><td>0.750</td><td>+0.059</td><td>—</td></tr><tr><td>泵啟動</td><td>55分</td><td>pH 校正（Nernst 60.1 mV/pH）</td><td>136</td><td>-0.035</td><td>0.909</td><td>+0.036</td><td>0.829</td><td>+0.057</td><td>—</td></tr><tr><td>泵啟動</td><td>55分</td><td>pH 校正（實測斜率）</td><td>136</td><td>-0.022</td><td>0.942</td><td>+0.054</td><td>0.747</td><td>+0.059</td><td>—</td></tr><tr><td>補氣</td><td>55分</td><td>原始 ORP</td><td>9</td><td>+0.267</td><td>0.562</td><td>+0.395</td><td>0.320</td><td>+0.050</td><td>—</td></tr><tr><td>補氣</td><td>55分</td><td>pH 校正（Nernst 60.1 mV/pH）</td><td>9</td><td>+0.267</td><td>0.562</td><td>+0.395</td><td>0.319</td><td>-0.033</td><td>—</td></tr><tr><td>補氣</td><td>55分</td><td>pH 校正（實測斜率）</td><td>9</td><td>+0.267</td><td>0.571</td><td>+0.395</td><td>0.311</td><td>+0.050</td><td>—</td></tr><tr><td>泵啟動</td><td>3小時區塊</td><td>原始 ORP</td><td>27</td><td>-0.297</td><td>0.519</td><td>+0.175</td><td>0.397</td><td>-0.016</td><td>—</td></tr><tr><td>泵啟動</td><td>3小時區塊</td><td>pH 校正（Nernst 60.1 mV/pH）</td><td>27</td><td>-0.274</td><td>0.580</td><td>+0.189</td><td>0.372</td><td>-0.004</td><td>—</td></tr><tr><td>泵啟動</td><td>3小時區塊</td><td>pH 校正（實測斜率）</td><td>27</td><td>-0.297</td><td>0.514</td><td>+0.175</td><td>0.389</td><td>-0.016</td><td>—</td></tr></table></div>
+<p>綠色＝p&lt;0.05、偏相關 p&lt;0.05、且比安慰劑強 0.1 以上。3 小時區塊共 27 個（同批連續 3 次泵事件）。</p></div>
+<div class="card"><h2>pH 斜率</h2><p>理論（Nernst，30 °C）：−60.1 mV/pH。實測（各批一階差分的 Theil–Sen 斜率）：</p><ul><li>tau1：-33.3 mV/pH（2493 分鐘）</li><li>tau5：0.0 mV/pH（2011 分鐘）</li><li>tau10：0.0 mV/pH（3211 分鐘）</li></ul>
+<p>使用的實測中位斜率：0.0 mV/pH。濾掉的 pH 故障點：0 筆（5–9 以外，含 14.00）。
+實測斜率若遠小於 60，代表 ORP 與 pH 的短時變化不是單純的 Nernst 關係（混合電位），Nernst 校正可能過度。</p></div>
+<div class="card"><h2>圖</h2><img src="orp_event_decay_v2.png" alt="左、中：3 小時區塊的壓力下降率 vs 平均 ORP 回升率（原始、pH 校正）；右：補氣事件對齊的 ORP，虛線原始、實線 pH 校正"></div>
+<div class="card"><h2>限制</h2><ul><li>ORP 回升也可能是 H2 逸散回氣相（物理）；壓力下降含物理溶解。正相關只是「相容」。</li>
+<li>這裡一次看了很多組（訊號 × 時間窗 × 事件類型），單一組 p&lt;0.05 不足為證，要看是否跨設定一致。</li>
+<li>三批沒有換液，τ、菌齡、液相飽和共線。</li></ul>
+<p>v1 報告：<a href="../orp_event_decay/index.html">ORP 事件回落 v1</a>；原始資料：<a href="summary.json">summary.json</a>；程式：research/cycles/orp_event_decay_v2.py</p></div>
+</main></body></html>
