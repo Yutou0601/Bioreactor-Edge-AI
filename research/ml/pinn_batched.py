@@ -45,12 +45,28 @@
   r̄_b 散布 0.00001–0.007（真值 0.00504），中位數普遍低估——可辨識性的直接量測。
   ⚠ GPU 上同一模型在不同批次大小下不逐位元相同（批次 GEMM 的加總順序不同），差異會沿
     簡併谷底放大到 r̂_b；CPU 上則逐位元相同（演算法本身沒有把模型綁在一起）。
+  真實循環（--real，29 個規律循環 × 8 種子 × λ 0.1、1 = 464 個模型，Jetson GPU 44 分鐘）
+    · 24/29 個循環的 A 被鎖死（16 個模型範圍 ≤ 0.005）；另 5 個 kLa·T < 0.15（曲線近乎直線，
+      沒有曲率可抓），連 A 都定不了（範圍約 2）。
+    · kLa 只有 0.01–0.13 /hr（時間常數 8–100 小時，比循環長）。
+    · r̄_b 幾乎全部塌到 0：各循環中位數的中位 6e-6，論文 0.0125 的 1/2100。PINN 把壓降
+      歸給「一階物理項＋很低的 P_eq」——常數 r_b 被 P_eq 吸收的那一端。這不是「沒有生物」
+      的證據，也不能拿來支持或反駁論文的 r_b（兩者假設不同）。真正被決定的是總移除速率
+      kLa(P0−P_eq)+r̄_b（中位 0.037，與直接量的平均降速 0.033 吻合）。
+    · ⚠ 該次輸出 real_cycles.csv 的 rb_mean 只存到小數 7 位，更小的值成了 0；之後改存 6 位
+      有效數字。圖與摘要表把 < 1e-7 標為「低於記錄下限」。
+    · 擬合 RMSE：τ=1 批 ~0.005（≈ 雜訊下限），τ=5／10 批 0.008–0.011——泵每小時的鋸齒
+      不是平滑的 P(t) 能描述的。
+  圖：docs/analysis_charts_3batch/fig57_pinn_batched.png、fig58_pinn_real_cycles.png
+      （fig_pinn_batched.py 畫，讀本目錄的 CSV）
 
 用法（在 Jetson 跑）
   python3 pinn_batched.py --bench               CPU/GPU × fp32/fp64 × M=1..256 速度
   ML_DEVICE=cuda python3 pinn_batched.py --quality            預設：fp32 Adam＋fp64 收尾
   ML_DEVICE=cuda ML_REFINE_DTYPE=same python3 pinn_batched.py --quality      純 fp32
   ML_DEVICE=cuda ML_DTYPE=float64 python3 pinn_batched.py --quality          純 fp64
+  ML_DEVICE=cuda python3 pinn_batched.py --real               29 個真實循環（需 Testing_data；
+                                                             RESEARCH_DIR 可指定 research/ 的位置）
 
 輸出 -> research/ml/out_pinn_batched/
 """
@@ -146,16 +162,44 @@ def train_batched(t_obs, P_obs, T, lams, seeds, iters=4000, lr=3e-3, lr_end=1e-5
     dt_ = DTYPE if dtype is None else dtype
     M = len(seeds)
     lam = torch.tensor(np.asarray(lams, float), dtype=dt_, device=dev)
-    P_obs = np.asarray(P_obs, float)
-    if P_obs.ndim == 1:
-        P_obs = np.broadcast_to(P_obs, (M, P_obs.size))
-    N = P_obs.shape[1]
 
-    tt = torch.tensor(np.asarray(t_obs, float) / T, dtype=dt_, device=dev)
-    tt = tt.view(1, N, 1).expand(M, N, 1).contiguous()
-    pp = torch.tensor(P_obs, dtype=dt_, device=dev).view(M, N, 1)
-    p0, p1 = pp[:, 0, 0], pp[:, -1, 0]
-    sc = (p0 - p1 + 1e-9) ** 2                         # (M,) 與原腳本相同的尺度化
+    # 兩種輸入：同長度陣列（合成測試），或長度不一的串列（真實循環，各有自己的 T）。
+    # 不等長時補到最長、補的位置遮罩為 0——資料、物理、平滑三項都只在真實點上平均。
+    if isinstance(P_obs, (list, tuple)):
+        ts_list = [np.asarray(x, float) for x in t_obs]
+        ps_list = [np.asarray(x, float) for x in P_obs]
+        Tm = np.array([x[-1] for x in ts_list], float) if T is None else np.broadcast_to(
+            np.asarray(T, float), (M,)).copy()
+    else:
+        P_arr = np.asarray(P_obs, float)
+        if P_arr.ndim == 1:
+            P_arr = np.broadcast_to(P_arr, (M, P_arr.size))
+        ts_list = [np.asarray(t_obs, float)] * M
+        ps_list = list(P_arr)
+        Tm = np.broadcast_to(np.asarray(T, float), (M,)).copy()
+    N = max(len(x) for x in ps_list)
+    t_pad = np.ones((M, N))
+    p_pad = np.zeros((M, N))
+    m_pad = np.zeros((M, N))
+    p_first = np.empty(M)
+    p_last = np.empty(M)
+    for i, (tx, px) in enumerate(zip(ts_list, ps_list)):
+        n = len(px)
+        t_pad[i, :n] = tx / Tm[i]
+        p_pad[i, :n] = px
+        p_pad[i, n:] = px[-1]
+        m_pad[i, :n] = 1.0
+        p_first[i], p_last[i] = px[0], px[-1]
+    tt = torch.tensor(t_pad, dtype=dt_, device=dev).view(M, N, 1)
+    pp = torch.tensor(p_pad, dtype=dt_, device=dev).view(M, N, 1)
+    mk = torch.tensor(m_pad, dtype=dt_, device=dev).view(M, N, 1)
+    cnt = mk.sum(dim=(1, 2))
+    T_t = torch.tensor(Tm, dtype=dt_, device=dev)
+    p1 = torch.tensor(p_last, dtype=dt_, device=dev)
+    sc = (torch.tensor(p_first, dtype=dt_, device=dev) - p1 + 1e-9) ** 2   # (M,) 與原腳本相同
+
+    def mmean(x, mask, n):                      # 只在真實點上平均
+        return (x * mask).sum(dim=(1, 2)) / n
 
     fP = BatchedMLP(seeds, device=dev, dtype=dt_)
     fR = BatchedMLP(seeds, positive=True, device=dev, dtype=dt_)
@@ -173,9 +217,9 @@ def train_batched(t_obs, P_obs, T, lams, seeds, iters=4000, lr=3e-3, lr_end=1e-5
         rb = fR(tc)
         phys = dP + torch.exp(log_kLa).view(M, 1, 1) * (P - peq.view(M, 1, 1)) + rb
         drb = torch.autograd.grad(rb, tc, torch.ones_like(rb), create_graph=True)[0]
-        l_data = ((P - pp) ** 2).mean(dim=(1, 2)) / sc
-        l_phys = (phys ** 2).mean(dim=(1, 2)) / sc
-        l_sm = (drb ** 2).mean(dim=(1, 2)) / sc
+        l_data = mmean((P - pp) ** 2, mk, cnt) / sc
+        l_phys = mmean(phys ** 2, mk, cnt) / sc
+        l_sm = mmean(drb ** 2, mk, cnt) / sc
         return l_data, l_phys, l_sm
 
     for _ in range(iters):
@@ -197,6 +241,7 @@ def train_batched(t_obs, P_obs, T, lams, seeds, iters=4000, lr=3e-3, lr_end=1e-5
     x = torch.cat([p.detach().reshape(M, -1) for p in order], 1).to(rd)
     tc2, pp2, sc2, lam2 = (tc.detach().to(rd).requires_grad_(True), pp.to(rd), sc.to(rd),
                            lam.to(rd))
+    mk2, cnt2, T2 = mk.to(rd), cnt.to(rd), T_t.to(rd)
 
     def unflat(v):
         parts = torch.split(v, sizes, dim=1)
@@ -211,8 +256,8 @@ def train_batched(t_obs, P_obs, T, lams, seeds, iters=4000, lr=3e-3, lr_end=1e-5
         rb = _mlp(RW, RB, tc2, True)
         drb = torch.autograd.grad(rb, tc2, torch.ones_like(rb), create_graph=True)[0]
         phys = dP + torch.exp(lk).view(M, 1, 1) * (P - pq.view(M, 1, 1)) + rb
-        return (((P - pp2) ** 2).mean(dim=(1, 2)) + (phys ** 2).mean(dim=(1, 2))
-                + lam2 * (drb ** 2).mean(dim=(1, 2))) / sc2
+        return (mmean((P - pp2) ** 2, mk2, cnt2) + mmean(phys ** 2, mk2, cnt2)
+                + lam2 * mmean(drb ** 2, mk2, cnt2)) / sc2
 
     def f_and_g(v):
         v = v.detach().requires_grad_(True)
@@ -232,10 +277,10 @@ def train_batched(t_obs, P_obs, T, lams, seeds, iters=4000, lr=3e-3, lr_end=1e-5
         u = unflat(x)
         PW, PB, RW, RB = u[:nl], u[nl:2 * nl], u[2 * nl:3 * nl], u[3 * nl:4 * nl]
         grid = torch.linspace(0, 1, 60, dtype=rd, device=dev).view(1, 60, 1).expand(M, 60, 1)
-        rb_hat = (_mlp(RW, RB, grid, True)[..., 0] / T).double().cpu().numpy()   # (M, 60) 每小時
-        rmse = torch.sqrt(((_mlp(PW, PB, tc2.detach(), False) - pp2) ** 2)
-                          .mean(dim=(1, 2))).double().cpu().numpy()
-        kla = (torch.exp(u[4 * nl]) / T).double().cpu().numpy()
+        rb_hat = (_mlp(RW, RB, grid, True)[..., 0] / T2.view(M, 1)).double().cpu().numpy()
+        rmse = torch.sqrt(mmean((_mlp(PW, PB, tc2.detach(), False) - pp2) ** 2, mk2, cnt2)
+                          ).double().cpu().numpy()                     # rb_hat：(M, 60) 每小時
+        kla = (torch.exp(u[4 * nl]) / T2).double().cpu().numpy()
         pe = u[4 * nl + 1].double().cpu().numpy()
     rb_mean = rb_hat.mean(axis=1)
     return dict(kla=kla, peq=pe, rb=rb_hat, rb_mean=rb_mean, rmse=rmse,
@@ -395,7 +440,7 @@ def quality(n_seeds=16, lams=(0.01, 0.1, 1.0, 10.0), iters=4000, refine=400):
     for i in range(M):
         rows.append([lam_list[i], seeds[i], round(float(r['rmse'][i]), 6),
                      round(float(r['kla'][i]), 6), round(float(r['peq'][i]), 6),
-                     round(float(r['rb_mean'][i]), 7), round(float(r['A'][i]), 6)])
+                     '%.6g' % float(r['rb_mean'][i]), round(float(r['A'][i]), 6)])
     os.makedirs(OUT, exist_ok=True)
     path = os.path.join(OUT, 'quality_%s_%s.csv' % (DEVICE.type, name.replace('+fp64收尾', '_fp64refine')))
     with open(path, 'w', newline='', encoding='utf-8-sig') as f:
@@ -406,11 +451,68 @@ def quality(n_seeds=16, lams=(0.01, 0.1, 1.0, 10.0), iters=4000, refine=400):
     return r
 
 
+# ── 三　真實循環 ─────────────────────────────────────────────────────────
+def load_real_cycles():
+    """三個 τ 批的規律循環（pump_mode_split.regular_cycles：≥4 hr、降幅 ≥0.10、
+    近似直線、迄壓 ≥0.7＝排除人工排氣）。回傳 [(批, τ, 第幾個, t_hr, P), ...]。"""
+    research = os.environ.get('RESEARCH_DIR', os.path.dirname(HERE))
+    sys.path.insert(0, os.path.join(research, 'cycles'))
+    import pump_mode_split as PM                       # noqa: E402
+    from pump_rhythm import BATCHES                    # noqa: E402
+    ts, h, p = PM.load()
+    out = []
+    for nm, tau, d0, d1 in BATCHES:
+        B = PM.analyse_batch(ts, h, p, nm, tau, d0, d1)
+        for k, c in enumerate(B['reg']):
+            s, e = c['s'], c['e']
+            out.append((nm, tau, k + 1, B['h2'][s:e + 1] - B['h2'][s], B['p2'][s:e + 1].copy()))
+    return out
+
+
+def real(n_seeds=8, lams=(0.1, 1.0), chunk=128, iters=4000, refine=400):
+    """每個真實循環 × n_seeds × lams 個模型。長度相近的循環同一批（補長度浪費少）。"""
+    cycles = load_real_cycles()
+    cycles.sort(key=lambda c: len(c[4]))
+    jobs = [(ci, s, lam) for ci in range(len(cycles)) for lam in lams for s in range(n_seeds)]
+    print('真實循環 %d 個 × %d 種子 × λ %s = %d 個模型；每批最多 %d 個；%s Adam %s→收尾 %s'
+          % (len(cycles), n_seeds, list(lams), len(jobs), chunk, DEVICE.type,
+             'fp32' if DTYPE == torch.float32 else 'fp64',
+             'fp64' if REFINE_DTYPE is not None else '同上'))
+    rows = []
+    t_all = time.perf_counter()
+    for b0 in range(0, len(jobs), chunk):
+        jb = jobs[b0:b0 + chunk]
+        t0 = time.perf_counter()
+        r = train_batched([cycles[ci][3] for ci, _, _ in jb], [cycles[ci][4] for ci, _, _ in jb],
+                          None, [lam for _, _, lam in jb], [s for _, s, _ in jb],
+                          iters=iters, refine=refine, refine_dtype=REFINE_DTYPE)
+        npts = [len(cycles[ci][4]) for ci, _, _ in jb]
+        print('  批 %d–%d（%d–%d 點）%.0f 秒，卡住 %d'
+              % (b0, b0 + len(jb) - 1, min(npts), max(npts), time.perf_counter() - t0, r['n_stuck']))
+        for i, (ci, s, lam) in enumerate(jb):
+            nm, tau, k, tx, px = cycles[ci]
+            rows.append([nm, tau, k, round(float(tx[-1]), 3), len(px), round(float(px[0]), 3),
+                         round(float(px[-1]), 3), lam, s, round(float(r['rmse'][i]), 6),
+                         round(float(r['kla'][i]), 6), round(float(r['peq'][i]), 6),
+                         '%.6g' % float(r['rb_mean'][i]), round(float(r['A'][i]), 6)])
+    print('總時間 %.0f 秒' % (time.perf_counter() - t_all))
+    os.makedirs(OUT, exist_ok=True)
+    path = os.path.join(OUT, 'real_cycles.csv')
+    with open(path, 'w', newline='', encoding='utf-8-sig') as f:
+        w = csv.writer(f)
+        w.writerow(['batch', 'tau', 'cycle', 'hours', 'npts', 'p_start', 'p_end', 'lambda', 'seed',
+                    'rmse', 'kla', 'peq', 'rb_mean', 'A'])
+        w.writerows(rows)
+    print('-> %s' % path)
+
+
 if __name__ == '__main__':
     torch.set_num_threads(int(os.environ.get('ML_THREADS', os.cpu_count() or 1)))
     if '--bench' in sys.argv:
         bench()
     elif '--quality' in sys.argv:
         quality()
+    elif '--real' in sys.argv:
+        real()
     else:
         print(__doc__)
