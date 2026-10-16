@@ -295,8 +295,102 @@ def algorithm3(rows, draws=41, progress=None):
             'cycles_passing_screen_per_draw': n_kept}
 
 
+# ── 快速模式（向量化）：同一段循環的 t 不變，所有重複／抽樣共用一次 QR ─────────
+# ⚠ 不是逐位元重現論文：亂數抽法改成整批（每段一次抽完所有重複），且擬合用
+#   cycle_estimator.BatchFitter（QR，與 fit_LE 相對差 ≤ 1e-12，k̂ 242/242 相同）。
+#   統計上等價，用途是把抽樣數拉大（41 → 數千）讓 p 值下限從 0.024 往下降。
+def _ar1_batch(rng, m, n, sd, phi):
+    """m 條 AR(1)，與 ar1() 同一個定義：z0 ~ N(0, sd)，z_i = φ z_{i-1} + e_i。"""
+    from scipy.signal import lfilter
+    e = rng.normal(0, sd * np.sqrt(max(1 - phi ** 2, 1e-6)), (m, n))
+    e[:, 0] = rng.normal(0, sd, m)
+    return lfilter([1.0], [1.0, -phi], e, axis=1)
+
+
+def _curvature_rows(t, W):
+    """curvature() 的整批版：每列一條，t 共用。amp ≤ 0 回 nan。"""
+    tn = (t - t[0]) / (t[-1] - t[0])
+    j = int(np.searchsorted(tn, 0.5, side='right') - 1)
+    j = min(max(j, 0), len(t) - 2)
+    f = (0.5 - tn[j]) / (tn[j + 1] - tn[j])
+    amp = W[:, 0] - W[:, -1]
+    ymid = W[:, j] + f * (W[:, j + 1] - W[:, j])
+    with np.errstate(divide='ignore', invalid='ignore'):
+        c = (W[:, 0] - ymid) / amp
+    c[amp <= 0] = np.nan
+    return c
+
+
+def algorithm2_fast(rows, nrep=25, progress=None):
+    sys.path.insert(0, os.path.join(os.path.dirname(HERE), 'edge_backend'))
+    from core.cycle_estimator import BatchFitter
+    rng = np.random.default_rng(SEED)
+    fits = []
+    for tag, t, y, f in rows:
+        r = f['resid']
+        phi = float(np.corrcoef(r[:-1], r[1:])[0, 1]) if r.std() > 0 else 0.
+        fits.append(dict(t=t, k=f['k'], amp=f['amp'], peq=f['peq'], rb=f['rb'],
+                         sd=max(f['sd'], QUANT / 4), phi=float(np.clip(phi * 1.3, 0, 0.98)),
+                         bf=BatchFitter(t)))
+    rb_obs = np.array([f['rb'] for f in fits]); k_obs = np.array([f['k'] for f in fits])
+    rho_obs = sp(rb_obs, k_obs); R0 = float(np.median(rb_obs))
+    A = np.vstack([np.log(k_obs), np.ones_like(k_obs)]).T
+    slope, icpt = np.linalg.lstsq(A, rb_obs, rcond=None)[0]
+    sd_rb = float(np.std(rb_obs, ddof=1))
+    out = {}
+    for mi, mode in enumerate(('B0', 'B1', 'B2')):
+        RR = np.empty((nrep, len(fits))); KK = np.empty((nrep, len(fits)))
+        truth = (np.full((nrep, len(fits)), R0) if mode == 'B0' else
+                 R0 + rng.normal(0, sd_rb, (nrep, len(fits))) if mode == 'B1' else
+                 np.tile(icpt + slope * np.log(k_obs), (nrep, 1)))
+        for i, f in enumerate(fits):
+            t = f['t']
+            Y = (f['peq'] + f['amp'] * np.exp(-f['k'] * t))[None, :] - truth[:, i:i + 1] * t[None, :] \
+                + _ar1_batch(rng, nrep, len(t), f['sd'], f['phi'])
+            g = f['bf'].fit(np.round(Y / QUANT) * QUANT)
+            RR[:, i], KK[:, i] = g['rb'], g['k']
+            if progress and i % 20 == 0:
+                progress('Algorithm 2 %s（快速）' % mode, (mi + (i + 1) / len(fits)) / 3)
+        rhos = np.array([sp(RR[r], KK[r]) for r in range(nrep)]); meds = np.median(RR, 1)
+        tr = R0 if mode != 'B2' else float(np.median(icpt + slope * np.log(k_obs)))
+        out[mode] = {'rho_mean': float(rhos.mean()), 'rho_sd': float(rhos.std(ddof=1)),
+                     'rho_draws': rhos.tolist(), 'median_mean': float(meds.mean()),
+                     'truth_median': tr, 'bias_pct': float((meds.mean() / tr - 1) * 100)}
+    return {'n': len(fits), 'rho_observed': rho_obs, 'rb_median_observed': R0,
+            'slope_log_k': float(slope), 'baselines': out, 'nrep': nrep, 'fast': True}
+
+
+def algorithm3_fast(rows, draws=41, progress=None):
+    sys.path.insert(0, os.path.join(os.path.dirname(HERE), 'edge_backend'))
+    from core.cycle_estimator import BatchFitter
+    rng = np.random.default_rng(SEED)
+    observed = float(np.median([f['rb'] for *_, f in rows]))
+    RB = np.full((draws, len(rows)), np.nan)
+    for i, (_tag, t, y, _f) in enumerate(rows):
+        g = fit_phys(t, y); r = g['resid']
+        phi = float(np.corrcoef(r[:-1], r[1:])[0, 1]) if r.std() > 0 else 0.
+        Z = (g['peq'] + g['amp'] * np.exp(-g['k'] * t))[None, :] \
+            + _ar1_batch(rng, draws, len(t), max(g['sd'], QUANT / 4), float(np.clip(phi * 1.3, 0, .98)))
+        W = np.round(Z / QUANT) * QUANT
+        # ⚠ 照原版的寫法 `if curvature < CURV_MIN: continue`：曲率是 nan（振幅 ≤ 0）時比較
+        #   為 False、**不跳過**。寫成 `>= CURV_MIN 才收` 會把 nan 排掉，與原版不同。
+        ok = ~(_curvature_rows(t, W) < CURV_MIN)
+        if ok.any():
+            RB[ok, i] = BatchFitter(t).fit(W[ok])['rb']
+        if progress and i % 20 == 0:
+            progress('Algorithm 3（快速）', (i + 1) / len(rows))
+    n_kept = (~np.isnan(RB)).sum(1)
+    meds = np.array([np.nanmedian(r) for r, n in zip(RB, n_kept) if n > 0])
+    p = (1 + int((meds >= observed).sum())) / (1 + len(meds))
+    return {'n': len(rows), 'observed_median': observed, 'draws': draws,
+            'null_median': float(np.median(meds)), 'null_mean': float(meds.mean()),
+            'null_sd': float(meds.std(ddof=1)) if len(meds) > 1 else None,
+            'null_max': float(meds.max()), 'p_value': p, 'null_draws': meds.tolist(),
+            'cycles_passing_screen_per_draw': n_kept.tolist(), 'fast': True}
+
+
 def run(dataset='paper', algo='both', exact_time=False, drop_k_edge=False,
-        nrep=25, draws=41, db=None, station='BTP-1', progress=None):
+        nrep=25, draws=41, db=None, station='BTP-1', progress=None, fast=False):
     t0 = time.time()
     if dataset in ('paper', 'paper_all'):
         # paper＝論文定稿時的資料快照；paper_all＝目前 Testing_data 的全部（含之後加入的）
@@ -305,7 +399,7 @@ def run(dataset='paper', algo='both', exact_time=False, drop_k_edge=False,
         cycles = collect_stream(db, station)
     rows, n_edge = retained(cycles, drop_k_edge=drop_k_edge)
     res = {'params': dict(dataset=dataset, algo=algo, exact_time=exact_time,
-                          drop_k_edge=drop_k_edge, nrep=nrep, draws=draws, station=station),
+                          drop_k_edge=drop_k_edge, nrep=nrep, draws=draws, station=station, fast=fast),
            'n_cycles_total': len(cycles), 'n_retained': len(rows), 'n_k_edge': n_edge,
            'rb_median': float(np.median([f['rb'] for *_, f in rows])) if rows else None,
            'frac_negative': float(np.mean([f['rb'] < 0 for *_, f in rows])) if rows else None}
@@ -313,9 +407,9 @@ def run(dataset='paper', algo='both', exact_time=False, drop_k_edge=False,
         res['error'] = '通過篩選的循環只有 %d 段，不足以做檢定（至少 10 段）' % len(rows)
         return res
     if algo in ('2', 'both'):
-        res['algorithm2'] = algorithm2(rows, nrep=nrep, progress=progress)
+        res['algorithm2'] = (algorithm2_fast if fast else algorithm2)(rows, nrep=nrep, progress=progress)
     if algo in ('3', 'both'):
-        res['algorithm3'] = algorithm3(rows, draws=draws, progress=progress)
+        res['algorithm3'] = (algorithm3_fast if fast else algorithm3)(rows, draws=draws, progress=progress)
     res['seconds'] = round(time.time() - t0, 1)
     return res
 
@@ -380,6 +474,7 @@ def main():
     ap.add_argument('--algo', default='both', choices=['2', '3', 'both'])
     ap.add_argument('--exact-time', action='store_true')
     ap.add_argument('--drop-k-edge', action='store_true')
+    ap.add_argument('--fast', action='store_true', help='向量化快速模式（統計等價、非逐位元重現論文）')
     ap.add_argument('--nrep', type=int, default=25)
     ap.add_argument('--draws', type=int, default=41)
     ap.add_argument('--db'); ap.add_argument('--station', default='BTP-1')
@@ -392,7 +487,7 @@ def main():
         _db_job(a.run_id, a.db)
         return 0
     res = run(a.dataset, a.algo, a.exact_time, a.drop_k_edge, a.nrep, a.draws, a.db, a.station,
-              progress=lambda s, f: print('\r  %s %3.0f%%' % (s, f * 100), end='', flush=True))
+              progress=lambda s, f: print('\r  %s %3.0f%%' % (s, f * 100), end='', flush=True), fast=a.fast)
     print()
     brief = {k: v for k, v in res.items() if k not in ('algorithm2', 'algorithm3')}
     print(json.dumps(brief, ensure_ascii=False))

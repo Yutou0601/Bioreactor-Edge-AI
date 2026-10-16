@@ -8,7 +8,7 @@ import echarts from '../lib/echarts'
 import api from '../services/apiClient'
 import { onThemeChange } from '../lib/theme'
 
-const form = ref({ dataset: 'paper', algo: 'both', exact_time: false, drop_k_edge: false, nrep: 25, draws: 41 })
+const form = ref({ dataset: 'paper', algo: 'both', exact_time: false, drop_k_edge: false, fast: false, nrep: 25, draws: 41 })
 const runs = ref([])
 const sel = ref(null)
 const err = ref('')
@@ -19,7 +19,7 @@ let offTheme = null
 let timer = null
 
 const running = computed(() => runs.value.find(r => r.status === 'running' || r.status === 'queued'))
-const isPaper = p => p.dataset === 'paper' && !p.exact_time && !p.drop_k_edge && p.nrep === 25 && p.draws === 41
+const isPaper = p => p.dataset === 'paper' && !p.fast && !p.exact_time && !p.drop_k_edge && p.nrep === 25 && p.draws === 41
 const fmt = (v, d = 4) => (v == null || Number.isNaN(v) ? '—' : Number(v).toFixed(d))
 const pct = v => (v == null ? '—' : `${(v * 100).toFixed(0)}%`)
 
@@ -127,12 +127,14 @@ onBeforeUnmount(() => { offTheme?.(); clearInterval(timer); chart?.dispose() })
         </label>
         <label class="chk"><input type="checkbox" v-model="form.exact_time" /> 精確時間軸（修 3 分鐘門檻的浮點邊界）</label>
         <label class="chk"><input type="checkbox" v-model="form.drop_k_edge" /> 排除 k̂ 撞網格邊界的段</label>
-        <label>重複 <input type="number" v-model.number="form.nrep" min="2" max="200" /></label>
-        <label>抽樣 <input type="number" v-model.number="form.draws" min="2" max="500" /></label>
+        <label class="chk"><input type="checkbox" v-model="form.fast" /> 快速模式（整批向量化；25/41 在 Jetson 上約 15 秒，可多抽）</label>
+        <label>重複 <input type="number" v-model.number="form.nrep" min="2" :max="form.fast ? 2000 : 200" /></label>
+        <label>抽樣 <input type="number" v-model.number="form.draws" min="2" :max="form.fast ? 10000 : 500" /></label>
         <button class="btn" @click="start" :disabled="busy || !!running">{{ running ? '有工作在跑' : '執行' }}</button>
       </div>
       <p class="hint">
-        全部不勾、重複 25、抽樣 41＝<b>論文原樣</b>（已逐位元核對原腳本）。論文正文寫 60 次抽樣，但報告的 p = 0.024 是 41 次的結果，以程式為準。
+        全部不勾、重複 25、抽樣 41＝<b>論文原樣</b>（已逐位元核對原腳本）。論文正文寫 60 次抽樣，但報告的 p = 0.024 是 41 次的結果，以程式為準。<br />
+        快速模式：模擬改成一次擬合整批（同一套 QR 最小平方），隨機數的抽法不同，所以<b>不會逐位元等於論文</b>，但分布相同；適合把抽樣加到幾千次，讓 p 值的解析度超過 1/42。
       </p>
       <p v-if="err" class="msg warn">⚠ {{ err }}</p>
       <div v-if="running" class="prog">
@@ -157,6 +159,7 @@ onBeforeUnmount(() => { offTheme?.(); clearInterval(timer); chart?.dispose() })
               <td>{{ { paper: '論文 C', paper_all: 'C＋新批', stream: '串流' }[r.params.dataset] }}</td>
               <td class="l">
                 <span v-if="isPaper(r.params)" class="tag paper">論文原樣</span>
+                <span v-if="r.params.fast" class="tag">快速</span>
                 <span v-if="r.params.exact_time" class="tag">精確時間</span>
                 <span v-if="r.params.drop_k_edge" class="tag">排除邊界</span>
                 <span v-if="r.params.nrep !== 25 || r.params.draws !== 41" class="tag">{{ r.params.nrep }}/{{ r.params.draws }}</span>

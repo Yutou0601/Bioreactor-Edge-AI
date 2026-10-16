@@ -54,6 +54,15 @@ from analyze_three_batches import (                      # noqa: E402
     BLUE, YELLOW, AQUA, RED, INK, INK2, MUTED, BASELINE, OUT, style)
 
 torch.manual_seed(0)
+
+# 裝置與精度：預設照舊（CPU、float32），舊數字可原樣重現。
+#   PINN_DEVICE=cuda → 丟 GPU（Jetson），且強制 float64：
+#   這個問題本來就近乎簡併（見 docstring 的三層結論），單精度會把 LBFGS 收尾的
+#   tolerance_change=1e-14 變成空話；論文 Algorithm 1 實測 fp32 連 argmin 都會選錯。
+#   PINN_DTYPE=float64 可在 CPU 上也用雙精度，給 crosscheck() 比對用。
+DEVICE = torch.device(os.environ.get('PINN_DEVICE', 'cpu'))
+DTYPE = (torch.float64 if DEVICE.type == 'cuda' or os.environ.get('PINN_DTYPE') == 'float64'
+         else torch.float32)
 QUANT = 0.01          # 壓力量化步階
 NOISE = 0.004         # 感測器雜訊
 LAMBDAS = (0.01, 0.1, 1.0, 10.0)
@@ -76,7 +85,8 @@ class MLP(nn.Module):
 
 
 def train_pinn(t_obs, p_obs, T, lam=1.0, iters=4000, verbose=False, holdout=None,
-               seed=None, return_models=False, refine=400, rb_target=None):
+               seed=None, return_models=False, refine=400, rb_target=None,
+               device=None, dtype=None):
     """P̂(t) 與 r̂_b(t) 兩個網路；物理殘差 dP/dt + kLa(P−P_eq) + r_b = 0。
 
     kLa 與 P_eq 是可學的純量。r_b 以 softplus 保證非負（生物不會製造氣體）。
@@ -87,22 +97,26 @@ def train_pinn(t_obs, p_obs, T, lam=1.0, iters=4000, verbose=False, holdout=None
       的假象，不是方法的性質。改成 Adam 之後再接 LBFGS（strong-Wolfe 線搜尋）
       把它推到底：RMSE 降到 0.0052 ≈ 雜訊下限，kLa 也從 0.32 回到 1.44（真值 1.40）。
       refine=0 可關掉，用來重現舊行為。
+    device/dtype 省略時用模組層的 DEVICE/DTYPE（環境變數）。權重一律先在 CPU 上
+    初始化再搬過去，所以同一個 seed 在 CPU 與 GPU 的起點逐位元相同。
     """
-    tt = torch.tensor(t_obs / T, dtype=torch.float32).view(-1, 1)
-    pp = torch.tensor(p_obs, dtype=torch.float32).view(-1, 1)
+    dev = DEVICE if device is None else torch.device(device)
+    dt = DTYPE if dtype is None else dtype
+    tt = torch.tensor(t_obs / T, dtype=dt, device=dev).view(-1, 1)
+    pp = torch.tensor(p_obs, dtype=dt, device=dev).view(-1, 1)
     p0, p1 = float(p_obs[0]), float(p_obs[-1])
     if holdout is not None:
         mask = np.ones(len(t_obs), bool)
         mask[holdout] = False
-        fit_idx = torch.tensor(np.flatnonzero(mask), dtype=torch.long)
-        ho_idx = torch.tensor(np.asarray(holdout), dtype=torch.long)
+        fit_idx = torch.tensor(np.flatnonzero(mask), dtype=torch.long, device=dev)
+        ho_idx = torch.tensor(np.asarray(holdout), dtype=torch.long, device=dev)
 
     if seed is not None:
         torch.manual_seed(seed)
-    fP = MLP()
-    fR = MLP(out_positive=True)
-    log_kLa = nn.Parameter(torch.tensor(0.0))            # kLa = exp(·)，單位 1/T
-    peq = nn.Parameter(torch.tensor(p1 - 0.2))
+    fP = MLP().to(dev, dt)
+    fR = MLP(out_positive=True).to(dev, dt)
+    log_kLa = nn.Parameter(torch.tensor(0.0, dtype=dt, device=dev))   # kLa = exp(·)，單位 1/T
+    peq = nn.Parameter(torch.tensor(p1 - 0.2, dtype=dt, device=dev))
     opt = torch.optim.Adam(list(fP.parameters()) + list(fR.parameters())
                            + [log_kLa, peq], lr=3e-3)
 
@@ -159,9 +173,9 @@ def train_pinn(t_obs, p_obs, T, lam=1.0, iters=4000, verbose=False, holdout=None
                   % (a.item(), b.item(), c.item()))
 
     with torch.no_grad():
-        grid = torch.linspace(0, 1, 60).view(-1, 1)
-        rb_hat = fR(grid).numpy().ravel() / T            # 換回每小時
-        p_hat = fP(grid).numpy().ravel()
+        grid = torch.linspace(0, 1, 60, dtype=dt, device=dev).view(-1, 1)
+        rb_hat = fR(grid).cpu().numpy().ravel() / T      # 換回每小時
+        p_hat = fP(grid).cpu().numpy().ravel()
         cv = (float(((fP(tt[ho_idx]) - pp[ho_idx]) ** 2).mean())
               if holdout is not None else float('nan'))
         kla = float(torch.exp(log_kLa).detach()) / T
@@ -169,9 +183,9 @@ def train_pinn(t_obs, p_obs, T, lam=1.0, iters=4000, verbose=False, holdout=None
         rmse = float(torch.sqrt(((fP(tt) - pp) ** 2).mean()))
     if return_models:
         # 給「特徵圖／關聯性分析」用：需要網路本身與學到的純量
-        return dict(grid=grid.numpy().ravel(), rb=rb_hat, p=p_hat, kla=kla,
+        return dict(grid=grid.cpu().numpy().ravel(), rb=rb_hat, p=p_hat, kla=kla,
                     peq=pe, cv=cv, rmse=rmse, fP=fP, fR=fR, T=T)
-    return grid.numpy().ravel(), rb_hat, p_hat, kla, pe, cv
+    return grid.cpu().numpy().ravel(), rb_hat, p_hat, kla, pe, cv
 
 
 def synth(T, npts, rb_fun, kLa, peq, p_start, seed=0):
@@ -366,5 +380,34 @@ def make_figure(t, obs, rb_true, rec, real, real_out, T):
     print('\n圖 -> %s' % os.path.relpath(out, REPO))
 
 
+def crosscheck(tol=1e-3):
+    """GPU 與 CPU（皆 float64）在同一個合成問題上是否給出同一個解。
+
+    不會逐位元相同（GPU 的歸約順序不同），但最佳化在 float64 下應收斂到同一點；
+    kLa、P_eq、r̂_b 平均任一相對差超過 tol 就丟錯，**不許拿 GPU 結果寫進報告**。
+    用法：python pinn_rb_recovery.py --crosscheck
+    """
+    import time
+    if not torch.cuda.is_available():
+        raise SystemExit('沒有 CUDA，無從比對')
+    T, NP = 6.0, 360
+    t, _, obs = synth(T, NP, lambda tt: 0.012 * np.exp(-0.7 * tt / T * 3), 1.4, 0.75, 1.17)
+    out = {}
+    for dev in ('cpu', 'cuda'):
+        t0 = time.time()
+        r = train_pinn(t, obs, T, lam=0.1, seed=0, return_models=True,
+                       device=dev, dtype=torch.float64)
+        out[dev] = (r['kla'], r['peq'], float(np.mean(r['rb'])), r['rmse'], time.time() - t0)
+        print('   %-4s  kLa %.6f  P_eq %.6f  r_b 平均 %.6f  RMSE %.6f  %.1f 秒' % ((dev,) + out[dev]))
+    bad = [n for n, a, b in zip(('kLa', 'P_eq', 'r_b'), out['cpu'][:3], out['cuda'][:3])
+           if abs(a - b) > tol * max(abs(a), 1e-12)]
+    if bad:
+        raise SystemExit('✗ GPU 與 CPU 不一致：%s（相對差 > %g）' % (', '.join(bad), tol))
+    print('   ✓ 一致（相對差 ≤ %g）' % tol)
+
+
 if __name__ == '__main__':
-    main()
+    if '--crosscheck' in sys.argv:
+        crosscheck()
+    else:
+        main()

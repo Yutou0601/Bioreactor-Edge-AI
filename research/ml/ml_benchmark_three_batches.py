@@ -161,17 +161,23 @@ def torch_models():
 
 
 def train_eval(Xtr, ytr, Xte, bidir, pinn=False, mu=None, sd=None):
+    """ML_DEVICE=cuda 時在 GPU 上訓練（Jetson）；預設 CPU，舊表格可原樣重現。
+
+    ⚠ GPU 的 cuDNN LSTM 不保證逐位元可重現，數字會在小數後幾位飄；
+      這裡比的是 RMSE 量級，夠用。要寫進論文的表格仍以 CPU 版為準。
+    """
     torch, nn, Net = torch_models()
+    dev = torch.device(os.environ.get('ML_DEVICE', 'cpu'))
     torch.manual_seed(SEED)
-    net = Net(bidir=bidir)
+    net = Net(bidir=bidir).to(dev)                     # 權重在 CPU 上初始化，再搬
     opt = torch.optim.Adam(net.parameters(), lr=3e-3)
-    Xt = torch.tensor((Xtr - mu) / sd)
-    yt = torch.tensor(ytr)
-    Xv = torch.tensor((Xte - mu) / sd)
+    Xt = torch.tensor((Xtr - mu) / sd, device=dev)
+    yt = torch.tensor(ytr, device=dev)
+    Xv = torch.tensor((Xte - mu) / sd, device=dev)
     lossf = nn.MSELoss()
     n = len(Xt)
     for ep in range(EPOCHS):
-        perm = torch.randperm(n)
+        perm = torch.randperm(n).to(dev)               # 亂數仍由 CPU 產生，與 CPU 版同序
         for i in range(0, n, 256):
             b = perm[i:i + 256]
             opt.zero_grad()
@@ -186,7 +192,7 @@ def train_eval(Xtr, ytr, Xte, bidir, pinn=False, mu=None, sd=None):
             opt.step()
     net.eval()
     with torch.no_grad():
-        return net(Xv).numpy()
+        return net(Xv).cpu().numpy()
 
 
 def main():

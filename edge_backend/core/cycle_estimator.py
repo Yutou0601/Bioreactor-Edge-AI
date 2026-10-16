@@ -103,6 +103,87 @@ def fit_le(t, y):
     }
 
 
+class BatchFitter:
+    """同一條時間軸 t 上、一次擬合很多條曲線的 Algorithm 1（向量化）。
+
+    用途：模擬（論文檢定的快速模式）與 bootstrap 信賴區間——同一段循環的 t 不變，
+    只有 y 換來換去。150 個 k 的設計矩陣與 3x3 正規方程只跟 t 有關，算一次就好；
+    每條 y 只剩一次 (m×n)@(n×150) 的矩陣乘法。
+
+    ⚠ 每個 k 預先做 QR（與 fit_le 的 lstsq 同一種數值方法），**不要改回正規方程**。
+      2026-10-15 先寫了正規方程版：合成資料 k̂ 207/207 相同，但論文的 242 段真實
+      循環有 4 段 k̂ 不同、r̂_b 差到 100%——全是 k̂ 在網格下限 0.01 的段。k 很小時
+      e^{-kt} ≈ 1 − kt，與常數項和 t 兩欄幾乎共線，正規方程把條件數平方，精度不夠；
+      兩個 k 的殘差差 1e-4，不是平手，是真的算錯。QR 不平方條件數。
+    ⚠ y 先減掉平均再算（模型含常數項，殘差平方和不變），進一步減少相減損失。
+    ⚠ 一律 float64。GPU 常用的 float32 在這裡會算錯（S(k) 很平，單精度足以改變
+      argmin；實測 k̂ 只有 59/207 相同）。
+    ⚠ 仍然不是逐位元相同（運算順序不同）。**存進 cycle 表的估計與論文重現一律用
+      fit_le**，本類別只給「要很多次」的用途。
+    """
+
+    def __init__(self, t, kgrid=None):
+        t = np.asarray(t, dtype=float)
+        K = KGRID if kgrid is None else np.asarray(kgrid, dtype=float)
+        self.t, self.K = t, K
+        X = np.empty((len(K), len(t), 3))
+        X[:, :, 0] = np.exp(-K[:, None] * t[None, :])
+        X[:, :, 1] = t
+        X[:, :, 2] = 1.0
+        self.Q, self.R = np.linalg.qr(X)                         # (nk,n,3), (nk,3,3)
+        # 攤平成 (nk*3, n) 給一次 BLAS 矩陣乘法用；einsum 版本實測慢 15 倍以上
+        self.Qf = np.ascontiguousarray(self.Q.transpose(0, 2, 1).reshape(len(K) * 3, len(t)))
+
+    def fit(self, Y):
+        """Y：(m, n) 或 (n,)。回傳 dict，每個值是長度 m 的陣列。"""
+        Y = np.atleast_2d(np.asarray(Y, dtype=float))
+        m = len(Y)
+        ym = Y.mean(1, keepdims=True)
+        Yc = Y - ym
+        QtY = (self.Qf @ Yc.T).T.reshape(m, len(self.K), 3)     # (m, nk, 3)
+        sse = (Yc * Yc).sum(1)[:, None] - (QtY * QtY).sum(-1)
+        j = sse.argmin(1)
+        idx = np.arange(m)
+        b = np.linalg.solve(self.R[j], QtY[idx, j][..., None])[..., 0]   # 只解選中的 k
+        s = np.maximum(sse[idx, j], 0.0)
+        return {'amp': b[:, 0], 'rb': -b[:, 1], 'peq': b[:, 2] + ym[:, 0], 'k': self.K[j],
+                'sd': np.sqrt(s / max(len(self.t) - 4, 1))}
+
+
+def fit_le_batch(t, Y):
+    """BatchFitter 的便利寫法：fit_le_batch(t, Y)['rb'] 等。"""
+    return BatchFitter(t).fit(Y)
+
+
+def bootstrap_rb(t, y, n_boot=200, block_min=30, seed=0):
+    """r_b 的區塊 bootstrap 信賴區間（給即時監控的「目前循環」用）。
+
+    以 fit_le 的擬合為中心，殘差切成約 block_min 分鐘的區塊重抽（保留自相關——
+    實測殘差 lag-1 約 0.26，不是白雜訊，逐點重抽會讓區間窄得不實）。
+    回傳 (2.5%, 97.5%) 分位數與 k̂ 落在網格端點的比例。
+
+    ⚠ 這是「同一個模型下的抽樣不確定度」，不含參數簡併的結構性偏誤
+      （那由論文 Algorithm 2 處理）。區間窄不代表 r_b 可信。
+    """
+    t = np.asarray(t, dtype=float); y = np.asarray(y, dtype=float)
+    f = fit_le(t, y)
+    yhat = f['peq'] + f['amp'] * np.exp(-f['k'] * t) - f['rb'] * t
+    r = y - yhat
+    n = len(t)
+    dt_min = max(np.median(np.diff(t)) * 60.0, 1e-6)
+    L = max(2, int(round(block_min / dt_min)))
+    nb = int(np.ceil(n / L))
+    rng = np.random.default_rng(seed)
+    starts = rng.integers(0, max(n - L, 1), size=(n_boot, nb))
+    idx = (starts[:, :, None] + np.arange(L)[None, None, :]).reshape(n_boot, -1)[:, :n]
+    Yb = yhat[None, :] + r[idx]
+    g = BatchFitter(t).fit(Yb)
+    edge = np.mean((g['k'] <= KGRID[0] + 1e-9) | (g['k'] >= KGRID[-1] - 1e-9))
+    lo, hi = np.percentile(g['rb'], [2.5, 97.5])
+    return {'rb': f['rb'], 'ci_lo': float(lo), 'ci_hi': float(hi), 'n_boot': n_boot,
+            'block_min': block_min, 'k_edge_frac': float(edge)}
+
+
 def estimate_cycle(hours, pressure):
     """對一段下降做完整的 Algorithm 1。
 

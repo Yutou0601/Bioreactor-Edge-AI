@@ -41,7 +41,7 @@ CREATE TABLE IF NOT EXISTS paper_test_run (
 );
 """
 
-DEFAULTS = dict(dataset='paper', algo='both', exact_time=False, drop_k_edge=False,
+DEFAULTS = dict(dataset='paper', algo='both', exact_time=False, drop_k_edge=False, fast=False,
                 nrep=25, draws=41, station='BTP-1')
 
 
@@ -89,8 +89,10 @@ def _clean(params):
         raise ValueError('algo 只能是 2、3 或 both')
     p['exact_time'] = bool(p['exact_time'])
     p['drop_k_edge'] = bool(p['drop_k_edge'])
-    p['nrep'] = max(2, min(int(p['nrep']), 200))
-    p['draws'] = max(2, min(int(p['draws']), 500))
+    p['fast'] = bool(p['fast'])
+    # 快速模式（向量化，同一段共用 QR）可以跑到數千次；原版逐次 lstsq，41 次就要 7 分鐘
+    p['nrep'] = max(2, min(int(p['nrep']), 2000 if p['fast'] else 200))
+    p['draws'] = max(2, min(int(p['draws']), 10000 if p['fast'] else 500))
     p['station'] = str(p['station'])[:40]
     return p
 

@@ -114,12 +114,13 @@ def best_fit(t, obs, **kw):
 
 def hidden_features(model, n=200):
     """取出 r̂_b 網路最後一層之前的隱藏輸出 = 它自己長出來的基底函數。"""
-    g = torch.linspace(0, 1, n).view(-1, 1)
+    w = next(model.parameters())                # 跟著模型的裝置與精度（PINN_DEVICE=cuda 時在 GPU）
+    g = torch.linspace(0, 1, n, dtype=w.dtype, device=w.device).view(-1, 1)
     h = g
     with torch.no_grad():
         for layer in list(model.net)[:-1]:      # 去掉最後的 Linear(width, 1)
             h = layer(h)
-    return g.numpy().ravel(), h.numpy()
+    return g.cpu().numpy().ravel(), h.cpu().numpy()
 
 
 # ═══════════════════════════════════════════════════════════════

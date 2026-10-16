@@ -19,6 +19,13 @@ const RATIO_LO = 0.17, RATIO_HI = 0.22, RATIO_MAX = 0.25
 // 或大得離譜（實測 07-30 有 k̂=0.01、r̂_b=−0.27 的段）。這種段要標出來，不能混著看。
 const K_LO = 0.01, K_HI = 2.99
 const kAtEdge = k => k != null && (k <= K_LO + 1e-9 || k >= K_HI - 1e-9)
+// 區塊 bootstrap 95% 區間（後端 cycle_sync._bootstrap_ci）。只含抽樣誤差，不含結構性簡併；
+// 重抽裡 k̂ 常撞網格邊界時，區間本身也不可信，要明講。
+const ciText = ci => {
+  if (!ci || ci.lo == null) return ''
+  const s = `；95% 區間 [${fmt(ci.lo, 4)}, ${fmt(ci.hi, 4)}]（區塊 bootstrap ${ci.n_boot} 次，只含抽樣誤差）`
+  return ci.k_edge_frac > 0.2 ? s + `；⚠ 重抽中 ${Math.round(ci.k_edge_frac * 100)}% 的 k̂ 撞網格邊界` : s
+}
 
 const days = ref([])
 const day = ref('')
@@ -75,7 +82,7 @@ const tiles = computed(() => {
       k: '生物移除速率 r_b', v: e ? fmt(e.rb, 4) : '—', unit: e ? 'kgf/cm²/h' : '',
       sub: !e ? (c.why_no_estimate || '')
         : kAtEdge(e.k) ? `⚠ k = ${fmt(e.k, 2)} 撞到網格邊界，資料約束不了 k，這個 r_b 不可採信`
-        : `弛豫常數 k = ${fmt(e.k, 2)} /h（Algorithm 1，循環未結束）`,
+        : `弛豫常數 k = ${fmt(e.k, 2)} /h（Algorithm 1，循環未結束）` + ciText(e.ci),
       tag: '暫定',
     },
     {

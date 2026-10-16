@@ -248,4 +248,30 @@ def current(station='default', lookback_hr=48):
                                   % (est.get('curvature') or float('nan'), ce.CURV_MIN))
         return out
     out['estimate'] = {k: est.get(k) for k in ('k', 'rb', 'peq', 'amp', 'sd')}
+    out['estimate']['ci'] = _bootstrap_ci(out['ts_start'], out['ts_last'], seg_h, seg_p)
     return out
+
+
+_ci_cache = {}
+
+
+def _bootstrap_ci(ts_start, ts_last, seg_h, seg_p):
+    """r_b 的 95% 區塊 bootstrap 區間。同一段、同一筆最新資料只算一次（畫面會輪詢）。
+
+    與 estimate_cycle 一樣先掐掉 SKIP_MIN，區間才對得上畫面上的 r̂_b。
+    ⚠ 只含抽樣不確定度，不含 k 與 r_b 的結構性簡併（論文 Algorithm 2）。
+    """
+    key = (ts_start, ts_last)
+    if key in _ci_cache:
+        return _ci_cache[key]
+    t = seg_h - seg_h[0]
+    sel = t >= ce.SKIP_MIN
+    try:
+        b = ce.bootstrap_rb(t[sel] - t[sel][0], seg_p[sel])
+        ci = {'lo': b['ci_lo'], 'hi': b['ci_hi'], 'n_boot': b['n_boot'],
+              'block_min': b['block_min'], 'k_edge_frac': b['k_edge_frac']}
+    except Exception as e:                      # 區間算不出來不該拖垮整個畫面
+        ci = {'error': str(e)}
+    _ci_cache.clear()                           # 只留目前這一段
+    _ci_cache[key] = ci
+    return ci
