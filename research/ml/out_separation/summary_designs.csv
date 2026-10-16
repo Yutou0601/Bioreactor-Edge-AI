@@ -1,0 +1,6 @@
+﻿design,lin_pressure,lin_pressure_ph,lin_pressure_orp,hgb_pressure,hgb_pressure_ph,hgb_pressure_orp,ga_best_lin,null_max
+N2,0.163,0.302,0.236,0.212,0.408,0.235,0.3437,0.037
+grp_same_K4_N2,0.219,0.249,0.173,0.21,0.496,0.3,0.4693,0.107
+grp_same_K8_N2,0.206,0.424,0.254,0.283,0.51,0.315,0.5073,0.095
+grp_cross_K4_N2,0.22,0.455,-0.075,0.176,0.615,0.289,0.5479,0.119
+grp_cross_K8_N2,0.242,0.542,-0.046,0.319,0.656,0.412,0.597,0.111

@@ -1,0 +1,17 @@
+﻿n_features,robust_r2,r2_A,r2_B1,r2_B2,features
+1,0.2534,0.3704,0.2534,0.7069,slope_early
+2,0.3615,0.437,0.3615,0.7521,slope_early;ph_slope
+3,0.4053,0.5741,0.4053,0.6854,hours;curv;corr_ph_p
+4,0.4221,0.5813,0.4221,0.6908,hours;curv;ph_on_minus_off;corr_ph_p
+5,0.4469,0.6007,0.4469,0.6938,hours;p0;curv;ph_on_minus_off;corr_ph_p
+6,0.4589,0.5928,0.4589,0.6803,hours;p0;curv;ph_on_minus_off;corr_ph_p;orp_on_minus_off
+7,0.4702,0.6182,0.4702,0.7118,hours;curv;rate_pump_on;ph_on_minus_off;corr_ph_p;orp_on_minus_off;grp_k_contrast
+8,0.4764,0.6163,0.4764,0.725,hours;p0;curv;ph_mean;ph_on_minus_off;corr_ph_p;orp_on_minus_off;grp_k_contrast
+9,0.4809,0.611,0.4809,0.6993,hours;p0;curv;rate_pump_on;ph_on_minus_off;corr_ph_p;orp_on_minus_off;grp_dph_vs_drop_slope;grp_k_contrast
+10,0.4874,0.6132,0.4874,0.7025,hours;p0;curv;rate_pump_on;dph;ph_on_minus_off;corr_ph_p;orp_on_minus_off;grp_dph_vs_drop_slope;grp_k_contrast
+11,0.4893,0.6128,0.4893,0.7014,hours;p0;A_single;curv;rate_pump_on;dph;ph_on_minus_off;corr_ph_p;orp_on_minus_off;grp_dph_vs_drop_slope;grp_k_contrast
+12,0.4897,0.6059,0.4897,0.702,hours;p0;A_single;curv;rate_pump_on;dph;ph_on_minus_off;corr_ph_p;orp_on_minus_off;corr_orp_p;grp_dph_vs_drop_slope;grp_k_contrast
+13,0.4902,0.6373,0.4902,0.8004,p0;drop;drop_rate;A_single;slope_early;slope_late;curv;rate_pump_on;ph_on_minus_off;corr_ph_p;orp_on_minus_off;corr_orp_p;grp_dph_vs_drop_slope
+14,0.4941,0.6355,0.4941,0.7017,p0;drop;drop_rate;k_single;A_single;slope_early;slope_late;curv;rate_pump_on;ph_on_minus_off;corr_ph_p;orp_on_minus_off;corr_orp_p;grp_dph_vs_drop_slope
+15,0.5065,0.6326,0.5065,0.6618,p0;drop;drop_rate;k_single;A_single;slope_early;slope_late;curv;rate_pump_on;ph_on_minus_off;corr_ph_p;orp_on_minus_off;corr_orp_p;grp_dph_vs_drop_slope;grp_corr_A_invk
+16,0.5073,0.633,0.5073,0.6752,p0;drop;drop_rate;k_single;A_single;s0;slope_early;slope_late;curv;rate_pump_on;ph_on_minus_off;corr_ph_p;orp_on_minus_off;corr_orp_p;grp_dph_vs_drop_slope;grp_corr_A_invk

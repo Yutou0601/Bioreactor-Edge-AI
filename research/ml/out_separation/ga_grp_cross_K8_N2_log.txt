@@ -1,0 +1,77 @@
+雜訊 grp_cross_K8_N2；目標＝bio（生物造成的壓降速率）；訓練 1000、各測試集 500；依模板分組 3 折（在沒見過的真實循環雜訊上測）
+
+== 覆蓋檢查（真實 29 個循環落在模擬 1–99 百分位內的比例；< 0.9 標 ⚠）——分組資料：略過（單循環特徵的覆蓋見單循環的 log）
+
+== 基準（嶺迴歸；穩健＝B1、B2 較差者）
+   全部特徵       R²  A +0.360   B1 +0.361   B2 +0.439   穩健 +0.361
+   只用壓力       R²  A +0.391   B1 +0.242   B2 +0.549   穩健 +0.242
+   壓力＋pH      R²  A +0.633   B1 +0.542   B2 +0.687   穩健 +0.542
+   壓力＋ORP     R²  A -0.211   B1 -0.046   B2 +0.084   穩健 -0.046
+   只用 pH      R²  A +0.320   B1 +0.114   B2 +0.616   穩健 +0.114
+   只用 ORP     R²  A -1.632   B1 -1.093   B2 -1.415   穩健 -1.415
+
+== 窮舉：單一特徵（依穩健 R² 排序，前 10）
+   s0                           穩健 +0.275   A +0.352   B1 +0.275   B2 +0.283
+   slope_early                  穩健 +0.246   A +0.369   B1 +0.246   B2 +0.719
+   drop_rate                    穩健 +0.217   A +0.415   B1 +0.217   B2 +0.797
+   curv                         穩健 +0.203   A +0.200   B1 +0.278   B2 +0.203
+   drop                         穩健 +0.168   A +0.305   B1 +0.168   B2 +0.706
+   grp_rb_from_A_vs_invk        穩健 +0.159   A +0.362   B1 +0.159   B2 +0.681
+   rate_pump_off                穩健 +0.131   A +0.379   B1 +0.131   B2 +0.819
+   slope_late                   穩健 +0.080   A +0.377   B1 +0.080   B2 +0.853
+   grp_k_contrast               穩健 +0.070   A +0.194   B1 +0.070   B2 +0.419
+   ph_slope                     穩健 +0.041   A +0.042   B1 +0.041   B2 +0.240
+== 窮舉：兩兩組合（465 種，前 8）
+   s0 + corr_ph_p                                   穩健 +0.365   A +0.581
+   curv + corr_ph_p                                 穩健 +0.361   A +0.484
+   s0 + ph_slope                                    穩健 +0.360   A +0.386
+   slope_early + ph_slope                           穩健 +0.348   A +0.407
+   s0 + dph                                         穩健 +0.345   A +0.363
+   slope_early + grp_dph_vs_drop_slope              穩健 +0.334   A +0.359
+   slope_early + dph                                穩健 +0.333   A +0.383
+   slope_early + corr_ph_p                          穩健 +0.328   A +0.561
+
+== NSGA-II 前沿（5 個種子；每種特徵數下最佳的穩健 R²）
+    1 個特徵：最佳 +0.275（5 種子間 +0.275–+0.275）  s0
+    2 個特徵：最佳 +0.365（5 種子間 +0.365–+0.365）  s0, corr_ph_p
+    3 個特徵：最佳 +0.464（5 種子間 +0.464–+0.464）  hours, curv, corr_ph_p
+    4 個特徵：最佳 +0.502（5 種子間 +0.502–+0.502）  hours, curv, ph_on_minus_off, corr_ph_p
+    5 個特徵：最佳 +0.528（5 種子間 +0.528–+0.528）  hours, A_single, curv, ph_on_minus_off, corr_ph_p
+    6 個特徵：最佳 +0.534（5 種子間 +0.534–+0.534）  hours, A_single, curv, rate_pump_on, ph_on_minus_off, corr_ph_p
+    7 個特徵：最佳 +0.545（5 種子間 +0.545–+0.545）  drop, drop_rate, curv, rate_pump_off, ph_on_minus_off, corr_ph_p, grp_k_contrast
+    8 個特徵：最佳 +0.552（5 種子間 +0.551–+0.552）  hours, p0, A_single, curv, rate_pump_on, ph_slope, corr_ph_p, grp_dph_vs_drop_slope
+    9 個特徵：最佳 +0.560（5 種子間 +0.560–+0.560）  p0, drop, drop_rate, A_single, curv, rate_pump_off, resid_ac1, ph_on_minus_off, corr_ph_p
+   10 個特徵：最佳 +0.566（5 種子間 +0.564–+0.566）  p0, drop, drop_rate, slope_early, curv, rate_pump_off, resid_ac1, ph_on_minus_off, corr_ph_p, grp_k_contrast
+   11 個特徵：最佳 +0.578（5 種子間 +0.574–+0.578）  p0, drop, drop_rate, A_single, slope_early, curv, rate_pump_off, resid_ac1, ph_on_minus_off, corr_ph_p, dorp
+   12 個特徵：最佳 +0.581（5 種子間 +0.581–+0.581）  p0, drop, drop_rate, A_single, slope_early, curv, rate_pump_off, resid_ac1, ph_on_minus_off, corr_ph_p, dorp, grp_k_contrast
+   （GA 共 22 秒）
+
+== 選擇感知的置換虛無（訓練標籤打亂、整個 GA 重跑 20 次）
+   置換後 GA 能找到的最佳穩健 R²：中位 +0.062、95 百分位 +0.100、最大 +0.111
+   真標籤下 GA 的最佳穩健 R² +0.597 → 置換 p = 0.048
+
+== 穩定性（訓練列 bootstrap 10 次，記錄穩健 R² 最佳解用到的特徵）
+   drop_rate                    10/10
+   drop                         10/10
+   A_single                     10/10
+   curv                         10/10
+   ph_on_minus_off              10/10
+   grp_dph_vs_drop_slope        10/10
+   corr_ph_p                    10/10
+   k_single                      9/10
+   grp_k_contrast                9/10
+   s0                            8/10
+   slope_early                   8/10
+   resid_ac1                     8/10
+
+== 非線性（梯度提升樹）重評
+   全部特徵       R²  A +0.722   B1 +0.648   B2 +0.827   穩健 +0.648
+   只用壓力       R²  A +0.459   B1 +0.319   B2 +0.757   穩健 +0.319
+   壓力＋pH      R²  A +0.721   B1 +0.656   B2 +0.826   穩健 +0.656
+   壓力＋ORP     R²  A +0.530   B1 +0.412   B2 +0.759   穩健 +0.412
+   GA 最佳      R²  A +0.694   B1 +0.619   B2 +0.792   穩健 +0.619
+
+== 超越壓力：pH／ORP 能不能預測「壓力解釋不了的生物」？（依模板分組）
+   pH        A：殘差 R² -0.167  B1：殘差 R² -0.053  B2：殘差 R² -0.895
+   ORP       A：殘差 R² -0.186  B1：殘差 R² -0.137  B2：殘差 R² -0.716
+   pH＋ORP    A：殘差 R² -0.145  B1：殘差 R² -0.087  B2：殘差 R² -0.777

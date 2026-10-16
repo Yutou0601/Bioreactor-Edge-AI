@@ -1,0 +1,16 @@
+﻿n_features,robust_r2,r2_A,r2_B1,r2_B2,features
+1,0.2532,0.375,0.2532,0.6991,slope_early
+2,0.3607,0.4446,0.3607,0.7388,slope_early;ph_slope
+3,0.3854,0.4508,0.3854,0.7392,slope_early;ph_slope;grp_k_contrast
+4,0.4002,0.3192,0.4002,0.494,hours;curv;dph;grp_k_contrast
+5,0.4083,0.3379,0.4083,0.4959,hours;curv;dorp;dorp_h2part;grp_k_contrast
+6,0.4175,0.5343,0.4175,0.7176,hours;curv;ph_mean;ph_on_minus_off;corr_ph_p;grp_k_contrast
+7,0.4203,0.534,0.4203,0.718,hours;curv;rate_pump_on;ph_mean;ph_on_minus_off;corr_ph_p;grp_k_contrast
+8,0.4221,0.5554,0.4221,0.756,hours;A_single;curv;ph_mean;ph_on_minus_off;corr_ph_p;grp_rb_from_A_vs_invk;grp_k_contrast
+9,0.4396,0.5885,0.4396,0.796,drop;drop_rate;A_single;curv;ph_mean;ph_on_minus_off;corr_ph_p;orp_mean;orp_on_minus_off
+10,0.4497,0.5872,0.4497,0.6762,drop;drop_rate;A_single;s0;curv;ph_mean;ph_on_minus_off;corr_ph_p;orp_mean;orp_on_minus_off
+11,0.4576,0.5841,0.4576,0.6419,drop;drop_rate;A_single;s0;curv;ph_mean;ph_on_minus_off;corr_ph_p;orp_mean;orp_on_minus_off;grp_k_contrast
+12,0.4636,0.5821,0.4636,0.6421,drop;drop_rate;A_single;s0;curv;rate_pump_on;ph_mean;ph_on_minus_off;corr_ph_p;orp_mean;orp_on_minus_off;grp_k_contrast
+13,0.4671,0.5764,0.4671,0.6386,p0;drop;drop_rate;A_single;s0;curv;rate_pump_on;ph_mean;ph_on_minus_off;corr_ph_p;orp_on_minus_off;corr_orp_p;grp_k_contrast
+14,0.4684,0.5797,0.4684,0.642,hours;p0;drop;drop_rate;A_single;s0;curv;rate_pump_on;ph_mean;ph_on_minus_off;corr_ph_p;orp_on_minus_off;corr_orp_p;grp_k_contrast
+15,0.4693,0.5791,0.4693,0.6391,hours;p0;drop;drop_rate;A_single;s0;curv;rate_pump_on;ph_mean;ph_on_minus_off;corr_ph_p;orp_on_minus_off;corr_orp_p;grp_Peq_from_A_vs_invk;grp_k_contrast

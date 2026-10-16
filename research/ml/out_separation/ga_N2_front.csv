@@ -1,0 +1,9 @@
+﻿n_features,robust_r2,r2_A,r2_B1,r2_B2,features
+1,0.2322,0.3542,0.2322,0.6214,s0
+2,0.3246,0.4615,0.3246,0.7268,s0;ph_slope
+9,0.326,0.5843,0.326,0.806,hours;drop;drop_rate;curv;rate_pump_on;ph_mean;ph_on_minus_off;corr_ph_p;orp_on_minus_off
+10,0.3341,0.5865,0.3341,0.8083,hours;p0;drop;drop_rate;curv;rate_pump_on;ph_mean;ph_on_minus_off;corr_ph_p;orp_on_minus_off
+11,0.3372,0.5892,0.3372,0.8112,hours;p0;drop;drop_rate;curv;rate_pump_on;ph_mean;ph_on_minus_off;corr_ph_p;dorp;orp_on_minus_off
+12,0.3401,0.5905,0.3401,0.8137,hours;p0;drop;drop_rate;s0;curv;rate_pump_on;ph_mean;ph_on_minus_off;corr_ph_p;dorp;orp_on_minus_off
+13,0.3425,0.5915,0.3425,0.8136,hours;p0;drop;drop_rate;k_single;slope_late;curv;rate_pump_on;ph_mean;ph_on_minus_off;corr_ph_p;dorp;orp_on_minus_off
+14,0.3437,0.5913,0.3437,0.8115,hours;p0;drop;drop_rate;k_single;slope_late;curv;rate_pump_on;resid_ac1;ph_mean;ph_on_minus_off;corr_ph_p;orp_on_minus_off;dorp_h2part

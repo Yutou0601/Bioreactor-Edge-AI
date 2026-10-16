@@ -79,3 +79,6 @@ edge_backend/modules/*/_input.json.tmp
 dev_test_server.py
 # 背景工作（論文檢定）的子行程輸出
 edge_backend/logs/
+
+# 批次模擬的中間檔（可由 separation_sim.py 重新產生；每個約 4 MB）
+research/ml/out_separation/*.npz
