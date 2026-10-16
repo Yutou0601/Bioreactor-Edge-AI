@@ -18,7 +18,7 @@ echo   Stopping the uploader...
 powershell -NoProfile -Command ^
   "Get-CimInstance Win32_Process | Where-Object { $_.CommandLine -like '*monitor_uploader.py*' } | ForEach-Object { Stop-Process -Id $_.ProcessId -Force; 'stopped pid ' + $_.ProcessId }"
 
-for %%f in ("%STARTUP%\Bioreactor uploader.lnk" "%STARTUP%\Bioreactor uploader.cmd" "%DESK%\Bioreactor monitor.url") do (
+for %%f in ("%STARTUP%\Bioreactor uploader.lnk" "%STARTUP%\Bioreactor uploader.cmd" "%DESK%\Bioreactor monitor.url" "%DESK%\Bioreactor panel.lnk") do (
   if exist %%f ( del %%f & echo   removed %%~f )
 )
 echo.

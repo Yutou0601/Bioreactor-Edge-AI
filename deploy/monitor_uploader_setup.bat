@@ -149,6 +149,13 @@ set "URLF=%DESK%\Bioreactor monitor.url"
   echo URL=http://%JETSON%:8000/
 )
 echo   [7/7] desktop shortcut  %URLF%
+REM  control panel (monitor_panel.pyw): shows which link of the data chain broke
+set "PANEL=%DESK%\Bioreactor panel.lnk"
+if exist "%ROOT%\monitor_panel.pyw" (
+  powershell -NoProfile -ExecutionPolicy Bypass -File "%ROOT%\deploy\make_shortcut.ps1" ^
+    -Lnk "!PANEL!" -Target "!PYW!" -Script "%ROOT%\monitor_panel.pyw" -WorkDir "%ROOT%" >nul 2>&1
+  if exist "!PANEL!" echo         panel shortcut   !PANEL!
+)
 
 echo.
 echo ============================================================
