@@ -12,6 +12,7 @@ const ICON = { auto: '◐', light: '☀', dark: '☾' }
       <RouterLink to="/">即時監控</RouterLink>
       <RouterLink to="/cycles">循環分析</RouterLink>
       <RouterLink to="/experiment">實驗批次</RouterLink>
+      <RouterLink to="/jobs">實驗排程</RouterLink>
       <RouterLink to="/system">系統狀態</RouterLink>
       <button class="theme-btn" @click="cycleMode"
               :title="`目前：${LABEL[mode]}（按一下切換：自動 → 日間 → 夜間）`"

@@ -65,6 +65,8 @@ _DEFAULTS = {
     # Jetson 上要設：本機、USB、Tailscale——擋掉實驗室 Wi-Fi 區網。
     #   127.0.0.1/32,::1/128,192.168.55.0/24,100.64.0.0/10,fd7a:115c:a1e0::/48
     'REACTOR_ALLOW_NETS': '',
+    # 研究實驗排程（「實驗排程」頁）的執行緒。Jetson 自動開；別台要開設 1。
+    'REACTOR_RESEARCH_JOBS': '',
 }
 
 _cache = None

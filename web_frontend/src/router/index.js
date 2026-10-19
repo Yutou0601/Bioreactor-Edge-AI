@@ -12,6 +12,7 @@ const LiveView       = () => import('../views/LiveView.vue')
 const CyclesView     = () => import('../views/CyclesView.vue')
 const ExperimentView = () => import('../views/ExperimentView.vue')
 const SystemView     = () => import('../views/SystemView.vue')
+const JobsView       = () => import('../views/JobsView.vue')
 
 export default createRouter({
   history: createWebHistory(),
@@ -20,6 +21,7 @@ export default createRouter({
     { path: '/cycles',     component: CyclesView },
     { path: '/experiment', component: ExperimentView },
     { path: '/system',     component: SystemView },
+    { path: '/jobs',       component: JobsView },
     // 舊網址
     { path: '/rate',    redirect: { path: '/cycles', query: { tab: 'rate' } } },
     { path: '/descent', redirect: { path: '/cycles', query: { tab: 'descent' } } },

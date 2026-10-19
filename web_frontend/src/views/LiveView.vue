@@ -75,7 +75,7 @@ const tiles = computed(() => {
     },
     {
       k: '曲率篩選 c', v: c.curvature == null ? '—' : fmt(c.curvature, 2),
-      sub: c.curvature == null ? (c.why_no_estimate || '') : (c.screened ? '≥ 0.45 通過，可分離物理與生物' : '< 0.45 未通過，太直分不開'),
+      sub: c.curvature == null ? (c.why_no_estimate || '') : (c.screened ? '≥ 0.45 通過：形狀符合模型（⚠ 直線也會通過，r_b 仍可能與物理項混在一起）' : '< 0.45 未通過：壓降集中在後半段，形狀不符模型'),
       tag: '暫定', badge: c.curvature == null ? null : (c.screened ? 'good' : 'warning'),
     },
     {
@@ -95,7 +95,16 @@ const tiles = computed(() => {
         : (s.bio_rate_kgf_hr != null ? `其中生物份額估計 ${fmt(s.bio_rate_kgf_hr, 5)}（由 r_b ÷ 4）` : '生物份額要等曲率通過才估得出'),
       tag: '上限',
     },
-    {
+    // CH4 ＝ H2 消耗 ÷ 4 ＝ 淨降 ÷ 4（上限）；× 排氣校正的份額（ch4_sequential，每次新排氣就更新）
+    s.share ? {
+      k: 'CH4 產量（本循環）',
+      v: `${fmt(s.ch4_cal_kgf, 4)}`, unit: 'kgf/cm²',
+      sub: `80% 區間 ${fmt(s.ch4_cal_kgf_80?.[0], 4)}–${fmt(s.ch4_cal_kgf_80?.[1], 4)}；`
+        + `上限（H2 消耗 ÷ 4）${fmt(s.co2_consumed_upper_kgf, 4)} × 產甲烷份額 ${fmt(s.share.share_mean, 2)}`
+        + `（${s.share.n_labels} 次排氣校正，${(s.share.updated || '').slice(5, 10)} 更新）；`
+        + `濃度約 +${ch4Up == null ? '—' : (s.ch4_cal_frac * 100).toFixed(1)} %`,
+      tag: '推估',
+    } : {
       k: 'CH4 濃度增量（本循環）',
       v: ch4Up == null ? '—' : `${(ch4Up * RATIO_LO / RATIO_MAX * 100).toFixed(1)}–${(ch4Up * RATIO_HI / RATIO_MAX * 100).toFixed(1)} %`,
       sub: ch4Up == null ? '' : `上限 ${(ch4Up * 100).toFixed(1)} %；範圍依三批排氣對帳的實測比 ${RATIO_LO}–${RATIO_HI}（上限 ${RATIO_MAX}）`,

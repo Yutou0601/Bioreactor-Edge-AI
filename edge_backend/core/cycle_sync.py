@@ -10,6 +10,8 @@
 
 ⚠ 只准 numpy 與標準函式庫（與 cycle_estimator 相同的規矩）。
 """
+import json
+import os
 import threading
 import time
 from datetime import datetime, timedelta
@@ -203,7 +205,39 @@ def _stoich(seg_h, seg_p, est, temp_c=30.0):
     if est and est.get('screened') and est.get('rb') is not None:
         out['bio_rate_kgf_hr'] = round(est['rb'] / 4.0, 6)
         out['bio_rate_mmol_hr'] = mm(est['rb'] / 4.0)
+    # 依排氣校正的 CH4：上限（＝H2 消耗 ÷ 4）× 份額。份額由 research/ml/ch4_sequential.py
+    # 每次有新排氣量測就更新一次（排程頁「甲烷份額模型：逐次更新」），這裡跟著讀最新的。
+    sh = _share_state()
+    if sh:
+        lo, hi = sh['share_80']
+        out['share'] = sh
+        out['ch4_cal_kgf'] = round(up * sh['share_mean'], 5)
+        out['ch4_cal_kgf_80'] = [round(up * max(lo, 0.0), 5), round(up * min(hi, 1.0), 5)]
+        out['ch4_cal_frac'] = round(up * sh['share_mean'] / p_abs, 4) if p_abs > 0 else None
     return out
+
+
+_share_cache = {'mtime': None, 'val': None}
+SHARE_STATE = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))),
+                           'research', 'ml', 'out_ch4_seq', 'state.json')
+
+
+def _share_state():
+    """ch4_sequential.py 寫的 state.json；檔案沒變就用快取（畫面每幾秒輪詢一次）。"""
+    try:
+        mt = os.path.getmtime(SHARE_STATE)
+    except OSError:
+        return None
+    if _share_cache['mtime'] != mt:
+        try:
+            with open(SHARE_STATE, encoding='utf-8') as fh:
+                d = json.load(fh)
+            _share_cache['val'] = {k: d.get(k) for k in ('share_mean', 'share_80', 'n_labels',
+                                                         'updated', 'last_label_end', 'model')}
+        except (OSError, ValueError):
+            _share_cache['val'] = None
+        _share_cache['mtime'] = mt
+    return _share_cache['val']
 
 
 def current(station='default', lookback_hr=48):
@@ -243,8 +277,8 @@ def current(station='default', lookback_hr=48):
     out['screened'] = est.get('screened')
     out['stoich'] = _stoich(seg_h, seg_p, est)
     if not est.get('screened'):
-        out['why_no_estimate'] = ('曲率 %.2f 未達 %.2f：目前這段太直，物理與生物'
-                                  '兩項分不開（論文 Algorithm 1 第 2 行）'
+        out['why_no_estimate'] = ('曲率 %.2f 未達 %.2f：壓降集中在後半段（越降越快），'
+                                  '形狀不符模型，不估計（論文 Algorithm 1 第 2 行）'
                                   % (est.get('curvature') or float('nan'), ce.CURV_MIN))
         return out
     out['estimate'] = {k: est.get(k) for k in ('k', 'rb', 'peq', 'amp', 'sd')}

@@ -11,6 +11,7 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from api.routes import router
+from api.research_routes import router as research_router
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
@@ -93,12 +94,21 @@ async def lifespan(app: FastAPI):
     if jetson_hw.start():
         print('[硬體] Jetson 硬體取樣已啟動（每 %d 秒）' % jetson_hw.SAMPLE_SEC)
 
+    # 研究實驗排程（第三條 daemon 執行緒）：佇列裡的研究腳本依序以子行程執行。
+    # ⚠ 只在有 GPU 的那台開（Jetson）。監控電腦 4GB，跑不動也不該跑。
+    #   不是 Jetson（無 /etc/nv_tegra_release）且沒設 REACTOR_RESEARCH_JOBS=1 就不啟動；佇列照樣能排、看。
+    from core import research_jobs
+    if config.get('REACTOR_RESEARCH_JOBS') == '1' or os.path.exists('/etc/nv_tegra_release'):
+        research_jobs.start()
+        print('[研究排程] 已啟動（每 %d 秒檢查佇列）' % research_jobs.TICK_SEC)
+
     yield
 
     # ── Shutdown ───────────────────────────────────────
     scheduler.stop()
     module_runner.stop()
     jetson_hw.stop()
+    research_jobs.stop()
 
 
 app = FastAPI(title="生物反應器 Edge AI API", lifespan=lifespan)
@@ -142,6 +152,7 @@ if _ALLOW:
         return await call_next(request)
 
 app.include_router(router, prefix="/api")
+app.include_router(research_router, prefix="/api")
 
 # ⚠ 前後端同機之後，前端 dist/ 由本服務直接供應，不必再起第二個伺服器。
 #   必須在 include_router 之後才掛，否則會蓋掉 /api。
