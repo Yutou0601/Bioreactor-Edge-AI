@@ -82,3 +82,7 @@ edge_backend/logs/
 
 # 批次模擬的中間檔（可由 separation_sim.py 重新產生；每個約 4 MB）
 research/ml/out_separation/*.npz
+
+# 一鍵安裝（deploy/monitor_oneclick.ps1）留下的備份
+edge_backend/.env.bak_*
+backup_oneclick_*/
